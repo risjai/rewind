@@ -11,18 +11,31 @@ This follows the same pattern as ruff, uv, and deno — a Python entry
 point that bootstraps a native binary on first use.
 """
 
-import hashlib
-import os
-import platform
-import shutil
-import stat
-import subprocess
 import sys
-import tarfile
-import tempfile
-import urllib.request
 
-from rewind_agent import __version__
+try:
+    import hashlib
+    import os
+    import platform
+    import shutil
+    import stat
+    import subprocess
+    import tarfile
+    import tempfile
+    import urllib.request
+
+    from rewind_agent import __version__
+except (ImportError, OSError) as e:
+    print(
+        f"\033[31mrewind: failed to load a required module: {e}\n\n"
+        f"  Your Python installation may be broken or incomplete.\n"
+        f"  Try:\n"
+        f"    brew reinstall python@{sys.version_info.major}.{sys.version_info.minor}\n"
+        f"  or install with a different Python version:\n"
+        f"    pipx install rewind-agent --python python3.12\033[0m",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 GITHUB_REPO = "agentoptics/rewind"
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".rewind", "bin")
