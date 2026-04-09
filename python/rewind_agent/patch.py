@@ -167,7 +167,7 @@ def replay(session_ref: str = "latest", from_step: int = None):
 
 def _print_replay_banner(session_name: str, from_step: int, total_steps: int):
     _print_logo()
-    print(f"  \033[36m\033[1mFork & Execute Replay\033[0m")
+    print("  \033[36m\033[1mFork & Execute Replay\033[0m")
     print()
     print(f"  \033[90m  Session:\033[0m  {session_name}")
     print(f"  \033[90m  Cached:\033[0m   \033[32mSteps 1-{from_step} (0ms, 0 tokens)\033[0m")
@@ -249,25 +249,25 @@ def _patch_existing_clients(proxy_url: str):
 
 def _print_direct_banner(session_name: str):
     _print_logo()
-    print(f"  \033[36m\033[1mRecording active\033[0m \033[90m(direct)\033[0m")
+    print("  \033[36m\033[1mRecording active\033[0m \033[90m(direct)\033[0m")
     print()
     print(f"  \033[90m  Session:\033[0m  {session_name}")
-    print(f"  \033[90m  Store:\033[0m    ~/.rewind/")
-    print(f"  \033[90m  Debug:\033[0m    \033[32mrewind show latest\033[0m")
+    print("  \033[90m  Store:\033[0m    ~/.rewind/")
+    print("  \033[90m  Debug:\033[0m    \033[32mrewind show latest\033[0m")
     print()
-    print(f"  \033[33m  ● Recording all LLM calls\033[0m")
+    print("  \033[33m  ● Recording all LLM calls\033[0m")
     print()
 
 
 def _print_proxy_banner(proxy_url: str):
     _print_logo()
-    print(f"  \033[36m\033[1mRecording active\033[0m \033[90m(proxy)\033[0m")
+    print("  \033[36m\033[1mRecording active\033[0m \033[90m(proxy)\033[0m")
     print()
     print(f"  \033[90m  Proxy:\033[0m    {proxy_url}")
     print(f"  \033[90m  OpenAI:\033[0m   {proxy_url}/v1")
-    print(f"  \033[90m  Debug:\033[0m    \033[32mrewind show latest\033[0m")
+    print("  \033[90m  Debug:\033[0m    \033[32mrewind show latest\033[0m")
     print()
-    print(f"  \033[33m  ● Recording all LLM calls\033[0m")
+    print("  \033[33m  ● Recording all LLM calls\033[0m")
     print()
 
 

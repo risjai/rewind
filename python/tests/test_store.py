@@ -1,7 +1,6 @@
 """Tests for the pure Python store — no external binary needed."""
 
 import hashlib
-import json
 import os
 import sqlite3
 import tempfile

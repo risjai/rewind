@@ -1,6 +1,5 @@
 """Tests for the assertions module — baseline querying and regression checks."""
 
-import os
 import tempfile
 import unittest
 import uuid

@@ -6,7 +6,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from rewind_agent.store import Store
 from rewind_agent.recorder import (
