@@ -121,8 +121,11 @@ class RewindTracingProcessor:
     def _record_generation(self, span_data, duration_ms, error):
         """Record an LLM generation as a Rewind step."""
         model = getattr(span_data, "model", "unknown") or "unknown"
-        input_tokens = getattr(span_data, "input_tokens", 0) or 0
-        output_tokens = getattr(span_data, "output_tokens", 0) or 0
+
+        # Usage is a dict with input_tokens/output_tokens
+        usage = getattr(span_data, "usage", None) or {}
+        input_tokens = usage.get("input_tokens", 0) or 0
+        output_tokens = usage.get("output_tokens", 0) or 0
 
         # Build request/response dicts from span data
         model_config = getattr(span_data, "model_config", None)

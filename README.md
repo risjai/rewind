@@ -414,7 +414,42 @@ with rewind_agent.trace("analysis_phase"):
 
 ### Framework adapters
 
-One-line integration for popular agent frameworks:
+#### OpenAI Agents SDK — zero-config, auto-detected
+
+If you're using the [OpenAI Agents SDK](https://github.com/openai/openai-agents-python), Rewind auto-detects it. Just `init()` and every agent run is recorded — LLM calls, tool executions, and handoffs between agents:
+
+```python
+import rewind_agent
+from agents import Agent, Runner
+
+rewind_agent.init()  # auto-detects Agents SDK, registers tracing
+
+agent = Agent(name="researcher", instructions="You are a research assistant.", tools=[web_search])
+result = await Runner.run(agent, "What is the population of Tokyo?")
+
+# rewind show latest → trace with agent names, tool calls, handoffs
+```
+
+```
+⏪ Rewind — Session Trace
+
+  ┌ ✓ 🧠  Step 1  gpt-4o       researcher     320ms   156↓  28↑
+  │   → tool_calls: web_search
+  ├ ✓ 🔧  Step 2  tool:web_search               45ms
+  ├ ✓ 🧠  Step 3  gpt-4o       researcher     890ms   312↓  35↑
+  │   → final answer
+```
+
+For explicit control over lifecycle hooks:
+
+```python
+hooks = rewind_agent.openai_agents_hooks()
+result = await Runner.run(agent, input, hooks=hooks)
+```
+
+Install with: `pip install rewind-agent[agents]`
+
+#### LangGraph & CrewAI
 
 ```python
 # LangGraph — wraps all graph nodes automatically
@@ -483,7 +518,7 @@ result = crew.kickoff()
 | AWS Bedrock | ✅ | — |
 | Any OpenAI-compatible (Ollama, vLLM, LiteLLM) | ✅ | ✅ |
 
-Works with any agent framework: **LangGraph**, **CrewAI**, **OpenAI Agents SDK**, **Autogen**, **smolagents**, or custom code.
+Works with any agent framework: **[OpenAI Agents SDK](https://github.com/openai/openai-agents-python)** (native integration), **LangGraph**, **CrewAI**, **Autogen**, **smolagents**, or custom code.
 
 ## Architecture
 
