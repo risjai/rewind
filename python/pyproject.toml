@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rewind-agent"
-version = "0.1.0"
+version = "0.2.0"
 description = "Chrome DevTools for AI agents — record, inspect, fork, replay, diff."
 readme = "README.md"
 license = "MIT"
@@ -38,6 +38,9 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = []
+
+[project.scripts]
+rewind = "rewind_agent._cli:main"
 
 [project.optional-dependencies]
 openai = ["openai>=1.0"]

@@ -24,7 +24,7 @@
   [![CI](https://github.com/risjai/rewind/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/risjai/rewind/actions)
   [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
   [![GitHub Release](https://img.shields.io/github/v/release/risjai/rewind?label=release)](https://github.com/risjai/rewind/releases)
-  [![PyPI](https://img.shields.io/pypi/v/rewind-agent)](https://pypi.org/project/rewind-agent/)
+  [![PyPI](https://img.shields.io/pypi/v/rewind-agent?style=flat)](https://pypi.org/project/rewind-agent/)
   [![GitHub stars](https://img.shields.io/github/stars/risjai/rewind?style=social)](https://github.com/risjai/rewind)
   <br/>
   <sub>Single binary &middot; 9 MB &middot; zero dependencies &middot; MIT licensed</sub>
@@ -180,7 +180,15 @@ The `rewind inspect` command opens a full terminal UI:
 
 ## Install
 
-### Quick install (macOS / Linux)
+### pip (recommended)
+
+```bash
+pip install rewind-agent
+```
+
+This installs both the Python SDK **and** the `rewind` CLI. The native binary is auto-downloaded on first use — no Rust toolchain required.
+
+### Quick install (binary only, macOS / Linux)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/risjai/rewind/master/install.sh | sh
@@ -199,12 +207,6 @@ git clone https://github.com/risjai/rewind.git
 cd rewind
 cargo build --release
 # Binary at ./target/release/rewind (9 MB, no dependencies)
-```
-
-### Python SDK
-
-```bash
-pip install rewind-agent
 ```
 
 ## Quickstart

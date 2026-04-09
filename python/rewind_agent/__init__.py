@@ -42,4 +42,4 @@ __all__ = [
     "wrap_langgraph",
     "wrap_crew",
 ]
-__version__ = "0.1.0"
+__version__ = "0.2.0"
