@@ -1,9 +1,9 @@
 <p align="center">
   <br/>
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/risjai/rewind/main/assets/banner-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/risjai/rewind/main/assets/banner-light.svg">
-    <img alt="Rewind" src="https://raw.githubusercontent.com/risjai/rewind/main/assets/banner-light.svg" width="500">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/risjai/rewind/master/assets/banner-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/risjai/rewind/master/assets/banner-light.svg">
+    <img alt="Rewind" src="https://raw.githubusercontent.com/risjai/rewind/master/assets/banner-light.svg" width="500">
   </picture>
   <br/>
   <br/>
@@ -171,7 +171,7 @@ The `rewind inspect` command opens a full terminal UI:
 - Navigate with arrow keys, Tab to switch panels, scroll through context
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/risjai/rewind/main/assets/demo.gif" alt="Rewind demo" width="800">
+  <img src="https://raw.githubusercontent.com/risjai/rewind/master/assets/demo.gif" alt="Rewind demo" width="800">
 </p>
 
 ## Install
@@ -179,7 +179,7 @@ The `rewind inspect` command opens a full terminal UI:
 ### Quick install (macOS / Linux)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/risjai/rewind/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/risjai/rewind/master/install.sh | sh
 ```
 
 ### From source (requires Rust)

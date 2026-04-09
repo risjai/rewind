@@ -1,6 +1,6 @@
 #!/bin/sh
 # ⏪ Rewind — Install Script
-# Usage: curl -fsSL https://raw.githubusercontent.com/risjai/rewind/main/install.sh | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/risjai/rewind/master/install.sh | sh
 
 set -e
 
