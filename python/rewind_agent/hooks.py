@@ -230,14 +230,30 @@ def wrap_crew(crew, recorder_name: str = "crewai"):
 
 # ── Internal ───────────────────────────────────────────────────
 
+_direct_mode_warned = False
+
+
 def _annotate(event_type: str, data: dict):
     """Record an annotation locally and optionally POST to the proxy."""
+    global _direct_mode_warned
     entry = {
         "type": event_type,
         "timestamp": time.time(),
         "data": data,
     }
     _annotations.append(entry)
+
+    # Check if we're in direct mode (no proxy to POST to)
+    from . import patch as _patch
+    if getattr(_patch, "_mode", None) == "direct":
+        if not _direct_mode_warned:
+            _direct_mode_warned = True
+            import logging
+            logging.getLogger("rewind").info(
+                "Annotations (@step, @tool, trace) are not yet persisted in direct recording mode. "
+                "LLM calls are still fully recorded. Use mode='proxy' for annotation support."
+            )
+        return
 
     # Best-effort POST to proxy side-channel (non-blocking)
     try:

@@ -1,73 +1,88 @@
 """
-Monkey-patching layer for OpenAI clients.
+Initialization layer for Rewind recording.
 
-When `init()` is called, it patches the OpenAI client to route
-all API calls through the local Rewind proxy, which records them.
+Two modes:
+  - "direct" (default): Records LLM calls in-process by monkey-patching
+    OpenAI/Anthropic SDK clients. No proxy needed.
+  - "proxy": Redirects LLM traffic through the Rewind proxy server.
+    Requires `rewind record` running in another terminal.
 """
 
-import os
+import atexit
 import contextlib
-from functools import wraps
+import os
 
 _original_base_url = None
 _initialized = False
+_mode = None
+_recorder = None
+_store = None
+_session_id = None
 
 REWIND_PROXY_URL = "http://127.0.0.1:8443"
 
 
-def init(proxy_url: str | None = None, auto_patch: bool = True):
+def init(mode: str = "direct", proxy_url: str = None, session_name: str = "default",
+         auto_patch: bool = True):
     """
     Initialize Rewind recording.
 
-    This patches the OPENAI_BASE_URL environment variable so that
-    all OpenAI client instances route through the Rewind proxy.
-
     Args:
-        proxy_url: Override the default proxy URL (http://127.0.0.1:8443)
-        auto_patch: If True, also monkey-patch already-imported OpenAI clients
+        mode: "direct" (default) records in-process, no proxy needed.
+              "proxy" redirects traffic through the Rewind proxy.
+        proxy_url: Override proxy URL (proxy mode only).
+        session_name: Name for this recording session.
+        auto_patch: If True, monkey-patch OpenAI/Anthropic clients.
     """
-    global _original_base_url, _initialized
+    global _original_base_url, _initialized, _mode, _recorder, _store, _session_id
 
     if _initialized:
         return
 
-    url = proxy_url or REWIND_PROXY_URL
+    _mode = mode
 
-    # Save original
-    _original_base_url = os.environ.get("OPENAI_BASE_URL")
-
-    # Set proxy URL — new OpenAI() clients will pick this up automatically
-    os.environ["OPENAI_BASE_URL"] = f"{url}/v1"
-
-    # Also patch Anthropic if available
-    os.environ["ANTHROPIC_BASE_URL"] = f"{url}/anthropic"
+    if mode == "direct":
+        _init_direct(session_name, auto_patch)
+    else:
+        _init_proxy(proxy_url, auto_patch)
 
     _initialized = True
-
-    if auto_patch:
-        _patch_existing_clients(url)
-
-    _print_banner(url)
+    atexit.register(_atexit_cleanup)
 
 
 def uninit():
-    """Restore original base URLs and remove patches."""
-    global _original_base_url, _initialized
+    """Stop recording and clean up."""
+    global _original_base_url, _initialized, _mode, _recorder, _store, _session_id
 
     if not _initialized:
         return
 
-    if _original_base_url is not None:
-        os.environ["OPENAI_BASE_URL"] = _original_base_url
+    if _mode == "direct":
+        if _recorder:
+            _recorder.unpatch_all()
+        if _store and _session_id:
+            try:
+                _store.update_session_status(_session_id, "completed")
+            except Exception:
+                pass
+            _store.close()
+        _recorder = None
+        _store = None
+        _session_id = None
     else:
-        os.environ.pop("OPENAI_BASE_URL", None)
+        # Proxy mode cleanup
+        if _original_base_url is not None:
+            os.environ["OPENAI_BASE_URL"] = _original_base_url
+        else:
+            os.environ.pop("OPENAI_BASE_URL", None)
+        os.environ.pop("ANTHROPIC_BASE_URL", None)
 
-    os.environ.pop("ANTHROPIC_BASE_URL", None)
     _initialized = False
+    _mode = None
 
 
 @contextlib.contextmanager
-def session(name: str = "default", proxy_url: str | None = None):
+def session(name: str = "default", mode: str = "direct", proxy_url: str = None):
     """
     Context manager for a Rewind recording session.
 
@@ -76,29 +91,79 @@ def session(name: str = "default", proxy_url: str | None = None):
             client = openai.OpenAI()
             client.chat.completions.create(...)
     """
-    # TODO: Start a named session via the proxy API
-    init(proxy_url=proxy_url)
+    init(mode=mode, proxy_url=proxy_url, session_name=name)
     try:
         yield
     finally:
         uninit()
 
 
+def _init_direct(session_name: str, auto_patch: bool):
+    """Initialize direct recording mode."""
+    global _recorder, _store, _session_id
+
+    from .store import Store
+    from .recorder import Recorder
+
+    _store = Store()
+    sid, tid = _store.create_session(session_name)
+    _session_id = sid
+
+    _recorder = Recorder(_store, sid, tid)
+    if auto_patch:
+        _recorder.patch_all()
+
+    _print_direct_banner(session_name)
+
+
+def _init_proxy(proxy_url: str, auto_patch: bool):
+    """Initialize proxy recording mode (existing behavior)."""
+    global _original_base_url
+
+    url = proxy_url or REWIND_PROXY_URL
+    _original_base_url = os.environ.get("OPENAI_BASE_URL")
+    os.environ["OPENAI_BASE_URL"] = f"{url}/v1"
+    os.environ["ANTHROPIC_BASE_URL"] = f"{url}/anthropic"
+
+    if auto_patch:
+        _patch_existing_clients(url)
+
+    _print_proxy_banner(url)
+
+
+def _atexit_cleanup():
+    """Best-effort cleanup on interpreter exit."""
+    try:
+        uninit()
+    except Exception:
+        pass
+
+
 def _patch_existing_clients(proxy_url: str):
     """Patch already-instantiated OpenAI clients if the module is loaded."""
     try:
         import openai
-        # Patch the module-level default client if it exists
-        if hasattr(openai, '_client'):
+        if hasattr(openai, "_client"):
             openai._client.base_url = f"{proxy_url}/v1"
     except ImportError:
         pass
 
 
-def _print_banner(proxy_url: str):
-    """Print a nice startup banner."""
+def _print_direct_banner(session_name: str):
     print()
-    print("  \033[36m\033[1m⏪ Rewind\033[0m — Recording active")
+    print("  \033[36m\033[1m⏪ Rewind\033[0m — Recording active (direct)")
+    print()
+    print(f"  \033[90mSession:\033[0m {session_name}")
+    print(f"  \033[90mStore:\033[0m   ~/.rewind/")
+    print()
+    print("  \033[33mAll LLM calls are being recorded.\033[0m")
+    print("  Run \033[32mrewind show latest\033[0m to see the trace.")
+    print()
+
+
+def _print_proxy_banner(proxy_url: str):
+    print()
+    print("  \033[36m\033[1m⏪ Rewind\033[0m — Recording active (proxy)")
     print()
     print(f"  \033[90mProxy:\033[0m  {proxy_url}")
     print(f"  \033[90mOpenAI:\033[0m {proxy_url}/v1")
