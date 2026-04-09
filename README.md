@@ -21,7 +21,7 @@
   <br/>
   <br/>
 
-  [![CI](https://github.com/risjai/rewind/actions/workflows/ci.yml/badge.svg)](https://github.com/risjai/rewind/actions)
+  [![CI](https://github.com/risjai/rewind/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/risjai/rewind/actions)
   [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
   [![GitHub Release](https://img.shields.io/github/v/release/risjai/rewind?label=release)](https://github.com/risjai/rewind/releases)
   [![PyPI](https://img.shields.io/pypi/v/rewind-agent)](https://pypi.org/project/rewind-agent/)
