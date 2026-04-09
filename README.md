@@ -46,15 +46,15 @@ Every existing observability tool (LangSmith, Langfuse, AgentOps) shows you **wh
 
 **Rewind is Chrome DevTools for AI agents.**
 
-It records every LLM call your agent makes — the full request, response, context window, token counts, costs, and timing. Then it lets you:
+It records every LLM call your agent makes — the full request, response, context window, token counts, and timing. Then it lets you:
 
 | Capability | What it means |
 |:---|:---|
 | **Record** | A transparent proxy captures every LLM call. Your agent doesn't know it's being recorded. Streaming works in real-time — zero added latency. |
 | **Inspect** | See the *exact* context window at each step. Every message, system prompt, and tool response the model saw — displayed as human-readable, color-coded views. |
-| **Fork** | Branch the execution timeline at any step. Edit the context (fix a stale tool response, tweak the prompt). Resume from there — pay only for the new steps. |
+| **Fork** | Branch the execution timeline at any step. Edit the context (fix a stale tool response, tweak the prompt). Resume from there — re-run only the new steps. |
 | **Diff** | Compare the original and forked timelines. See exactly where they diverge and why. |
-| **Instant Replay** | Identical requests are served from cache at **$0 cost, 0ms latency**. Run the same agent 10 times — pay once. |
+| **Instant Replay** | Identical requests are served from cache at **0 tokens, 0ms latency**. Run the same agent 10 times — only the first run hits the LLM. |
 | **Snapshots** | Capture your entire workspace at any point. Restore in one command if your agent breaks something. No git dependency. |
 
 ### The before/after
@@ -64,9 +64,9 @@ Without Rewind                         With Rewind
 ─────────────────                      ─────────────────
 Agent fails on step 5.                 Agent fails on step 5.
 Re-run all 5 steps.                    rewind fork --at 4
-Pay for 5 LLM calls.                   Fix the stale tool response.
+Burn tokens on all 5 calls.            Fix the stale tool response.
 Wait 30 seconds.                       Re-run only step 5.
-Hope it works this time.               Pay for 1 LLM call. 5 seconds.
+Hope it works this time.               1 LLM call. 5 seconds.
 No idea what changed.                  Diff shows exactly what diverged.
 ```
 
@@ -82,16 +82,16 @@ No idea what changed.                  Diff shows exactly what diverged.
 ⏪ Rewind — Session Trace
 
   Session: research-agent
-  Steps: 5    Cost: $0.0049    Tokens: 1,231
+  Steps: 5    Tokens: 1,231
 
-  ┌ ✓ 🧠  Step 1  gpt-4o    320ms   $0.0006   156↓  28↑
+  ┌ ✓ 🧠  Step 1  gpt-4o    320ms   156↓  28↑
   │   → tool_calls: web_search("Tokyo population 2024")
-  ├ ✓ 📋  Step 2  tool        45ms   $0.0000
-  ├ ✓ 🧠  Step 3  gpt-4o    890ms   $0.0011   312↓  35↑
+  ├ ✓ 📋  Step 2  tool        45ms
+  ├ ✓ 🧠  Step 3  gpt-4o    890ms   312↓  35↑
   │   → tool_calls: web_search("Tokyo population decade trend")
-  ├ ✓ 📋  Step 4  tool        38ms   $0.0000
+  ├ ✓ 📋  Step 4  tool        38ms
   │        ⚠ Stale cached data returned (2019 dataset)
-  └ ✗ 🧠  Step 5  gpt-4o   1450ms   $0.0031   520↓ 180↑
+  └ ✗ 🧠  Step 5  gpt-4o   1450ms   520↓ 180↑
        ERROR: Hallucination — used 2019 projection as 2024 fact
 ```
 
@@ -108,14 +108,14 @@ The trace shows the agent succeeded on steps 1-4, then hallucinated on step 5 be
   ═ Step  2  identical
   ═ Step  3  identical
   ═ Step  4  identical
-  ≠ Step  5  [error] $0.0031  →  [success] $0.0032
+  ≠ Step  5  [error] 700tok  →  [success] 715tok
 ```
 
-Steps 1-4 are shared (zero cost, zero re-execution). Only step 5 was re-run with corrected context.
+Steps 1-4 are shared (zero re-execution). Only step 5 was re-run with corrected context.
 
-### Instant Replay — same task, $0
+### Instant Replay — same task, 0 tokens
 
-When you enable `--replay`, Rewind caches every successful LLM response. The next time your agent sends the exact same request, the cached response is returned instantly — no upstream call, no tokens burned, no cost.
+When you enable `--replay`, Rewind caches every successful LLM response. The next time your agent sends the exact same request, the cached response is returned instantly — no upstream call, no tokens burned.
 
 ```bash
 # Enable caching
@@ -123,16 +123,16 @@ rewind record --name "my-agent" --upstream https://api.openai.com --replay
 ```
 
 ```
-  Call 1: gpt-4o   320ms   $0.0006   156↓ 28↑    ← cache miss (hits upstream)
-  Call 2: gpt-4o     0ms   $0.0000   156↓ 28↑    ← ⚡ cache hit (instant, free)
-  Call 3: gpt-4o   890ms   $0.0011   312↓ 35↑    ← cache miss (different request)
+  Call 1: gpt-4o   320ms   156↓ 28↑    ← cache miss (hits upstream)
+  Call 2: gpt-4o     0ms   156↓ 28↑    ← ⚡ cache hit (instant, 0 tokens)
+  Call 3: gpt-4o   890ms   312↓ 35↑    ← cache miss (different request)
 ```
 
 ```bash
 rewind cache   # see stats
 # Cached responses: 2
 # Total cache hits: 1
-# Total saved: $0.0007
+# Tokens saved: 184
 ```
 
 This is especially useful for iterative development — re-run your agent 20 times while tweaking a prompt, and only the changed steps hit the LLM.
@@ -170,7 +170,7 @@ No git required. Works on any directory. Compressed tar+gz stored in the blob st
 
 The `rewind inspect` command opens a full terminal UI:
 
-- **Left panel**: Step-by-step timeline with status icons, timing, and cost
+- **Left panel**: Step-by-step timeline with status icons, timing, and token counts
 - **Right panel**: Full context window at the selected step — every message, tool call, and system prompt
 - Navigate with arrow keys, Tab to switch panels, scroll through context
 
@@ -331,7 +331,7 @@ result = crew.kickoff()
 
 - **Proxy-based instrumentation.** No SDK required, no code changes. Works with any agent framework that makes HTTP calls to an LLM API — Python, TypeScript, Rust, Go, anything.
 - **Content-addressed storage.** Requests and responses are stored by SHA-256 hash, like git objects. Identical payloads are deduplicated automatically. The same blob store powers Instant Replay caching and Snapshot storage.
-- **Timeline DAG.** Forks share parent steps via structural sharing. Forking at step 40 of a 50-step run costs zero storage for steps 1-40.
+- **Timeline DAG.** Forks share parent steps via structural sharing. Forking at step 40 of a 50-step run uses zero storage for steps 1-40.
 - **Instant Replay at the transport layer.** Request hash → cached response. Works with any LLM provider, any framework, any language. No SDK-level instrumentation required.
 - **Streaming pass-through.** SSE streams are forwarded to the agent in real-time while being accumulated for recording. The agent sees zero added latency.
 - **Single binary, zero dependencies.** 9 MB static Rust binary. Data stored in SQLite + flat files. No Docker, no database server, no cloud account.
@@ -422,7 +422,7 @@ cargo build --release -p rewind-mcp
 | Tool | Description |
 |:-----|:------------|
 | `list_sessions` | List all recorded sessions with stats |
-| `show_session` | Step-by-step trace with costs, errors, response previews |
+| `show_session` | Step-by-step trace with token counts, errors, response previews |
 | `get_step_detail` | Full request/response content from blob store |
 | `diff_timelines` | Compare two timelines side by side |
 | `fork_timeline` | Create a fork at a specific step |

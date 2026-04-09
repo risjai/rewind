@@ -146,7 +146,7 @@ async fn cmd_record(name: String, port: u16, upstream: String, replay: bool) -> 
     println!("  {} {}", "Proxy:".dimmed(), format!("http://127.0.0.1:{}", port).yellow());
     println!("  {} {}", "Upstream:".dimmed(), upstream.dimmed());
     if replay {
-        println!("  {} {}", "Replay:".dimmed(), "ON — identical requests served from cache at $0".green().bold());
+        println!("  {} {}", "Replay:".dimmed(), "ON — identical requests served from cache (0 tokens)".green().bold());
     }
     println!();
     println!("  {} Set your agent's base URL to intercept calls:", "→".cyan());
@@ -174,16 +174,15 @@ fn cmd_sessions() -> Result<()> {
 
     // Table header
     println!(
-        "  {} {:^12} {:^20} {:>6} {:>10} {:>12} {}",
+        "  {} {:^12} {:^20} {:>6} {:>10} {}",
         "STATUS".dimmed(),
         "ID".dimmed(),
         "NAME".dimmed(),
         "STEPS".dimmed(),
         "TOKENS".dimmed(),
-        "COST".dimmed(),
         "CREATED".dimmed(),
     );
-    println!("  {}", "─".repeat(85).dimmed());
+    println!("  {}", "─".repeat(72).dimmed());
 
     for session in &sessions {
         let status_icon = match session.status {
@@ -197,13 +196,12 @@ fn cmd_sessions() -> Result<()> {
         let ago = format_time_ago(session.created_at);
 
         println!(
-            "  {}  {:>12} {:>20} {:>6} {:>10} {:>12} {}",
+            "  {}  {:>12} {:>20} {:>6} {:>10} {}",
             status_icon,
             short_id.dimmed(),
             session.name.white().bold(),
             session.total_steps.to_string().yellow(),
             session.total_tokens.to_string().blue(),
-            format!("${:.4}", session.total_cost_usd).green(),
             ago.dimmed(),
         );
     }
@@ -237,7 +235,7 @@ fn cmd_show(session_ref: String) -> Result<()> {
     println!("  {} {}", "Session:".dimmed(), session.name.white().bold());
     println!("  {} {}", "ID:".dimmed(), session.id.dimmed());
     println!("  {} {}", "Steps:".dimmed(), steps.len().to_string().yellow());
-    println!("  {} {}", "Cost:".dimmed(), format!("${:.6}", session.total_cost_usd).green());
+    println!("  {} {}", "Tokens:".dimmed(), session.total_tokens.to_string().blue());
     println!();
 
     for step in &steps {
@@ -250,14 +248,13 @@ fn cmd_show(session_ref: String) -> Result<()> {
         let connector = if step.step_number == 1 { "┌" } else if step.step_number == steps.len() as u32 { "└" } else { "├" };
 
         println!(
-            "  {} {} {} {:>8} {:>8} {:>10} {:>12} {}",
+            "  {} {} {} {:>8} {:>8} {:>10} {}",
             connector.dimmed(),
             status_icon,
             step.step_type.icon(),
             format!("Step {}", step.step_number).white().bold(),
             step.model.magenta(),
             format!("{}ms", step.duration_ms).yellow(),
-            format!("${:.6}", step.cost_usd).green(),
             format!("{}↓ {}↑", step.tokens_in, step.tokens_out).blue(),
         );
 
@@ -349,14 +346,14 @@ fn cmd_diff(session_ref: String, left_ref: String, right_ref: String) -> Result<
                 rewind_replay::DiffType::Modified => {
                     let left_status = sd.left.as_ref().map(|s| s.status.clone()).unwrap_or_default();
                     let right_status = sd.right.as_ref().map(|s| s.status.clone()).unwrap_or_default();
-                    let left_cost = sd.left.as_ref().map(|s| format!("${:.4}", s.cost_usd)).unwrap_or_default();
-                    let right_cost = sd.right.as_ref().map(|s| format!("${:.4}", s.cost_usd)).unwrap_or_default();
+                    let left_tokens = sd.left.as_ref().map(|s| format!("{}tok", s.tokens_in + s.tokens_out)).unwrap_or_default();
+                    let right_tokens = sd.right.as_ref().map(|s| format!("{}tok", s.tokens_in + s.tokens_out)).unwrap_or_default();
                     format!("{} {} {} {} {}",
                         format!("[{}]", left_status).red(),
-                        left_cost.dimmed(),
+                        left_tokens.dimmed(),
                         "→".dimmed(),
                         format!("[{}]", right_status).green(),
-                        right_cost.dimmed(),
+                        right_tokens.dimmed(),
                     )
                 }
                 rewind_replay::DiffType::LeftOnly => format!("only in {}", diff.left_label).cyan().to_string(),
@@ -520,7 +517,7 @@ fn cmd_cache() -> Result<()> {
     } else {
         println!("  {} {}", "Cached responses:".dimmed(), stats.entries.to_string().white().bold());
         println!("  {} {}", "Total cache hits:".dimmed(), stats.total_hits.to_string().yellow().bold());
-        println!("  {} {}", "Total saved:".dimmed(), format!("${:.4}", stats.total_saved_usd).green().bold());
+        println!("  {} {}", "Tokens saved:".dimmed(), stats.total_tokens_saved.to_string().green().bold());
     }
     println!();
     Ok(())
@@ -566,7 +563,7 @@ fn seed_demo_data(store: &Store) -> Result<()> {
     });
 
     create_step_with_blobs(store, &timeline.id, &session.id, 1, StepType::LlmCall, StepStatus::Success,
-        "gpt-4o", 320, 156, 28, 0.00062, &req1, &resp1, None)?;
+        "gpt-4o", 320, 156, 28, &req1, &resp1, None)?;
 
     // Step 2: Tool result — web search
     let req2 = serde_json::json!({
@@ -577,7 +574,7 @@ fn seed_demo_data(store: &Store) -> Result<()> {
     let resp2 = serde_json::json!({"status": "delivered"});
 
     create_step_with_blobs(store, &timeline.id, &session.id, 2, StepType::ToolResult, StepStatus::Success,
-        "tool", 45, 0, 0, 0.0, &req2, &resp2, None)?;
+        "tool", 45, 0, 0, &req2, &resp2, None)?;
 
     // Step 3: Second LLM call — agent processes search results
     let req3 = serde_json::json!({
@@ -600,7 +597,7 @@ fn seed_demo_data(store: &Store) -> Result<()> {
     });
 
     create_step_with_blobs(store, &timeline.id, &session.id, 3, StepType::LlmCall, StepStatus::Success,
-        "gpt-4o", 890, 312, 35, 0.00113, &req3, &resp3, None)?;
+        "gpt-4o", 890, 312, 35, &req3, &resp3, None)?;
 
     // Step 4: Tool result — search about decade trend (THIS HAS MISLEADING DATA)
     let req4 = serde_json::json!({
@@ -611,7 +608,7 @@ fn seed_demo_data(store: &Store) -> Result<()> {
     let resp4 = serde_json::json!({"status": "delivered"});
 
     create_step_with_blobs(store, &timeline.id, &session.id, 4, StepType::ToolResult, StepStatus::Success,
-        "tool", 38, 0, 0, 0.0, &req4, &resp4, None)?;
+        "tool", 38, 0, 0, &req4, &resp4, None)?;
 
     // Step 5: Third LLM call — agent tries to synthesize (BUT context now has contradictory data)
     let req5 = serde_json::json!({
@@ -637,14 +634,13 @@ fn seed_demo_data(store: &Store) -> Result<()> {
     });
 
     create_step_with_blobs(store, &timeline.id, &session.id, 5, StepType::LlmCall, StepStatus::Error,
-        "gpt-4o", 1450, 520, 180, 0.00310, &req5, &resp5,
+        "gpt-4o", 1450, 520, 180, &req5, &resp5,
         Some("HALLUCINATION: Agent used stale 2019 projection (14.2M) as current fact, ignored COVID-19 dip to 13.96M, and claimed 'no significant disruptions' despite search result explicitly noting COVID impacts."))?;
 
     // Update session totals
     store.update_session_stats(
         &session.id,
         5,
-        0.00062 + 0.00113 + 0.00310,
         184 + 347 + 700,
     )?;
     store.update_session_status(&session.id, SessionStatus::Failed)?;
@@ -676,7 +672,7 @@ fn seed_demo_data(store: &Store) -> Result<()> {
     });
 
     create_step_with_blobs(store, &fork.id, &session.id, 5, StepType::LlmCall, StepStatus::Success,
-        "gpt-4o", 1320, 520, 195, 0.00323, &req5_fixed, &resp5_fixed, None)?;
+        "gpt-4o", 1320, 520, 195, &req5_fixed, &resp5_fixed, None)?;
 
     println!("  {} Created main timeline (5 steps, fails at step 5 — hallucination)", "├".dimmed());
     println!("  {} Created fork at step 4 with corrected tool response", "├".dimmed());
@@ -697,7 +693,6 @@ fn create_step_with_blobs(
     duration_ms: u64,
     tokens_in: u64,
     tokens_out: u64,
-    cost_usd: f64,
     request: &serde_json::Value,
     response: &serde_json::Value,
     error: Option<&str>,
@@ -716,7 +711,6 @@ fn create_step_with_blobs(
         duration_ms,
         tokens_in,
         tokens_out,
-        cost_usd,
         model: model.to_string(),
         request_blob: req_hash,
         response_blob: resp_hash,

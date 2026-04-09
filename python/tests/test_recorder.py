@@ -11,28 +11,10 @@ from unittest.mock import MagicMock, patch
 from rewind_agent.store import Store
 from rewind_agent.recorder import (
     Recorder,
-    _estimate_cost,
     _extract_openai_usage,
     _extract_anthropic_usage,
     _OpenAIStreamWrapper,
 )
-
-
-class TestCostEstimation(unittest.TestCase):
-    def test_gpt4o(self):
-        cost = _estimate_cost("gpt-4o-2024-08-06", 1000, 500)
-        expected = (1000 * 2.5 + 500 * 10.0) / 1_000_000
-        self.assertAlmostEqual(cost, expected)
-
-    def test_claude_sonnet(self):
-        cost = _estimate_cost("claude-3-5-sonnet-20241022", 1000, 500)
-        expected = (1000 * 3.0 + 500 * 15.0) / 1_000_000
-        self.assertAlmostEqual(cost, expected)
-
-    def test_unknown_model_uses_default(self):
-        cost = _estimate_cost("some-new-model", 1000, 500)
-        expected = (1000 * 3.0 + 500 * 15.0) / 1_000_000
-        self.assertAlmostEqual(cost, expected)
 
 
 class TestUsageExtraction(unittest.TestCase):

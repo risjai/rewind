@@ -100,7 +100,7 @@ class TestStore(unittest.TestCase):
         step_id = self.store.create_step(
             session_id=sid, timeline_id=tid, step_number=1,
             step_type="llm_call", status="success", model="gpt-4o",
-            duration_ms=100, tokens_in=10, tokens_out=5, cost_usd=0.0001,
+            duration_ms=100, tokens_in=10, tokens_out=5,
             request_blob=req_hash, response_blob=resp_hash,
         )
         self.assertTrue(len(step_id) > 0)
@@ -115,13 +115,12 @@ class TestStore(unittest.TestCase):
 
     def test_update_session_stats(self):
         sid, _ = self.store.create_session("test")
-        self.store.update_session_stats(sid, 3, 0.005, 100)
+        self.store.update_session_stats(sid, 3, 100)
 
         conn = sqlite3.connect(os.path.join(self.tmpdir, "rewind.db"))
-        row = conn.execute("SELECT total_steps, total_cost_usd, total_tokens FROM sessions WHERE id = ?", (sid,)).fetchone()
+        row = conn.execute("SELECT total_steps, total_tokens FROM sessions WHERE id = ?", (sid,)).fetchone()
         self.assertEqual(row[0], 3)
-        self.assertAlmostEqual(row[1], 0.005)
-        self.assertEqual(row[2], 100)
+        self.assertEqual(row[1], 100)
         conn.close()
 
     def test_update_session_status(self):
@@ -166,7 +165,7 @@ class TestStore(unittest.TestCase):
                     self.store.create_step(
                         session_id=sid, timeline_id=tid, step_number=step_num,
                         step_type="llm_call", status="success", model="test",
-                        duration_ms=1, tokens_in=1, tokens_out=1, cost_usd=0.0,
+                        duration_ms=1, tokens_in=1, tokens_out=1,
                         request_blob=req_hash, response_blob=resp_hash,
                     )
                 with lock:

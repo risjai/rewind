@@ -169,28 +169,27 @@ async fn handle_request(
             step.duration_ms = 0;
             step.tokens_in = cached.tokens_in;
             step.tokens_out = cached.tokens_out;
-            step.cost_usd = 0.0; // free — cached!
             step.request_blob = request_hash.clone();
             step.response_blob = cached.response_blob.clone();
 
             {
                 let store = state.store.lock().unwrap();
                 let _ = store.create_step(&step);
-                let _ = store.update_session_stats(&state.session_id, step_number, 0.0, 0);
+                let _ = store.update_session_stats(&state.session_id, step_number, 0);
                 let _ = store.cache_hit(&request_hash);
             }
 
             tracing::info!(
                 step = step_number, model = %model,
-                "⚡ Instant Replay cache hit — saved ${:.6}, {}+{} tokens",
-                cached.original_cost_usd, cached.tokens_in, cached.tokens_out,
+                "⚡ Instant Replay cache hit — saved {}+{} tokens",
+                cached.tokens_in, cached.tokens_out,
             );
 
             let response = Response::builder()
                 .status(200)
                 .header("content-type", "application/json")
                 .header("x-rewind-cache", "hit")
-                .header("x-rewind-saved-usd", format!("{:.6}", cached.original_cost_usd))
+                .header("x-rewind-saved-tokens", format!("{}", cached.tokens_in + cached.tokens_out))
                 .body(box_full(Bytes::from(resp_data)))
                 .unwrap();
             return Ok(response);
@@ -264,7 +263,7 @@ async fn handle_buffered_response(
     let resp_bytes = resp.bytes().await.unwrap_or_default();
     let duration_ms = start.elapsed().as_millis() as u64;
 
-    let (tokens_in, tokens_out, cost_usd) = extract_usage(&resp_bytes);
+    let (tokens_in, tokens_out) = extract_usage(&resp_bytes);
 
     let response_hash = {
         let store = state.store.lock().unwrap();
@@ -284,7 +283,6 @@ async fn handle_buffered_response(
     step.duration_ms = duration_ms;
     step.tokens_in = tokens_in;
     step.tokens_out = tokens_out;
-    step.cost_usd = cost_usd;
     step.request_blob = request_hash.clone();
     step.response_blob = response_hash.clone();
     step.error = error;
@@ -298,13 +296,13 @@ async fn handle_buffered_response(
         if let Err(e) = store.create_step(&step) {
             tracing::error!("Failed to save step: {:?}", e);
         }
-        let _ = store.update_session_stats(&state.session_id, step_number, step.cost_usd, tokens_in + tokens_out);
+        let _ = store.update_session_stats(&state.session_id, step_number, tokens_in + tokens_out);
     }
 
     // Populate Instant Replay cache on success
     if state.instant_replay && step.status == StepStatus::Success && tokens_in > 0 {
         let store = state.store.lock().unwrap();
-        let _ = store.cache_put(&request_hash, &response_hash, &model, tokens_in, tokens_out, cost_usd);
+        let _ = store.cache_put(&request_hash, &response_hash, &model, tokens_in, tokens_out);
     }
 
     tracing::info!(
@@ -403,7 +401,6 @@ async fn handle_streaming_response(
         );
 
         let resp_bytes = serde_json::to_vec(&synthetic_response).unwrap_or_default();
-        let cost_usd = estimate_cost_from_model(&response_model, total_input_tokens, total_output_tokens);
 
         let response_hash = {
             let s = store.lock().unwrap();
@@ -421,7 +418,6 @@ async fn handle_streaming_response(
         step.duration_ms = duration_ms;
         step.tokens_in = total_input_tokens;
         step.tokens_out = total_output_tokens;
-        step.cost_usd = cost_usd;
         step.request_blob = request_hash;
         step.response_blob = response_hash;
 
@@ -434,7 +430,7 @@ async fn handle_streaming_response(
             if let Err(e) = s.create_step(&step) {
                 tracing::error!("Failed to save streaming step: {:?}", e);
             }
-            let _ = s.update_session_stats(&session_id, step_number, cost_usd, total_input_tokens + total_output_tokens);
+            let _ = s.update_session_stats(&session_id, step_number, total_input_tokens + total_output_tokens);
         }
 
         tracing::info!(
@@ -607,7 +603,7 @@ fn extract_model_from_path(path: &str) -> Option<String> {
     None
 }
 
-fn extract_usage(resp_bytes: &[u8]) -> (u64, u64, f64) {
+fn extract_usage(resp_bytes: &[u8]) -> (u64, u64) {
     let val: serde_json::Value = serde_json::from_slice(resp_bytes).unwrap_or_default();
 
     if let Some(usage) = val.get("usage") {
@@ -619,26 +615,10 @@ fn extract_usage(resp_bytes: &[u8]) -> (u64, u64, f64) {
             .or(usage.get("output_tokens"))
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
-        let model = val.get("model").and_then(|m| m.as_str()).unwrap_or("");
-        let cost = estimate_cost_from_model(model, input, output);
-        return (input, output, cost);
+        return (input, output);
     }
 
-    (0, 0, 0.0)
-}
-
-fn estimate_cost_from_model(model: &str, input_tokens: u64, output_tokens: u64) -> f64 {
-    let (input_rate, output_rate) = match model {
-        m if m.contains("gpt-4o") => (2.5, 10.0),
-        m if m.contains("gpt-4") => (30.0, 60.0),
-        m if m.contains("gpt-3.5") => (0.5, 1.5),
-        m if m.contains("claude-3-5-sonnet") || m.contains("claude-sonnet-4") => (3.0, 15.0),
-        m if m.contains("claude-3-5-haiku") || m.contains("claude-haiku-4") => (0.8, 4.0),
-        m if m.contains("claude-opus") => (15.0, 75.0),
-        _ => (3.0, 15.0),
-    };
-
-    (input_tokens as f64 * input_rate / 1_000_000.0) + (output_tokens as f64 * output_rate / 1_000_000.0)
+    (0, 0)
 }
 
 fn is_tool_call_response(resp_bytes: &[u8]) -> bool {

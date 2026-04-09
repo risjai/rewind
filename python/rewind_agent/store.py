@@ -62,7 +62,6 @@ CREATE TABLE IF NOT EXISTS sessions (
     updated_at TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'recording',
     total_steps INTEGER NOT NULL DEFAULT 0,
-    total_cost_usd REAL NOT NULL DEFAULT 0.0,
     total_tokens INTEGER NOT NULL DEFAULT 0,
     metadata TEXT NOT NULL DEFAULT '{}'
 );
@@ -87,7 +86,6 @@ CREATE TABLE IF NOT EXISTS steps (
     duration_ms INTEGER NOT NULL DEFAULT 0,
     tokens_in INTEGER NOT NULL DEFAULT 0,
     tokens_out INTEGER NOT NULL DEFAULT 0,
-    cost_usd REAL NOT NULL DEFAULT 0.0,
     model TEXT NOT NULL DEFAULT '',
     request_blob TEXT NOT NULL DEFAULT '',
     response_blob TEXT NOT NULL DEFAULT '',
@@ -104,7 +102,6 @@ CREATE TABLE IF NOT EXISTS replay_cache (
     model TEXT NOT NULL DEFAULT '',
     tokens_in INTEGER NOT NULL DEFAULT 0,
     tokens_out INTEGER NOT NULL DEFAULT 0,
-    original_cost_usd REAL NOT NULL DEFAULT 0.0,
     hit_count INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     last_hit_at TEXT
@@ -163,8 +160,8 @@ class Store:
 
         with self._lock:
             self._conn.execute(
-                "INSERT INTO sessions (id, name, created_at, updated_at, status, total_steps, total_cost_usd, total_tokens, metadata) "
-                "VALUES (?, ?, ?, ?, 'recording', 0, 0.0, 0, '{}')",
+                "INSERT INTO sessions (id, name, created_at, updated_at, status, total_steps, total_tokens, metadata) "
+                "VALUES (?, ?, ?, ?, 'recording', 0, 0, '{}')",
                 (session_id, name, now, now),
             )
             self._conn.execute(
@@ -187,7 +184,6 @@ class Store:
         duration_ms: int,
         tokens_in: int,
         tokens_out: int,
-        cost_usd: float,
         request_blob: str,
         response_blob: str,
         error: str = None,
@@ -199,22 +195,22 @@ class Store:
         # Lock is expected to be held by the caller (Recorder._record_call)
         self._conn.execute(
             "INSERT INTO steps (id, timeline_id, session_id, step_number, step_type, status, "
-            "created_at, duration_ms, tokens_in, tokens_out, cost_usd, model, request_blob, response_blob, error) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "created_at, duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (step_id, timeline_id, session_id, step_number, step_type, status,
-             now, duration_ms, tokens_in, tokens_out, cost_usd, model,
+             now, duration_ms, tokens_in, tokens_out, model,
              request_blob, response_blob, error),
         )
         self._conn.commit()
         return step_id
 
-    def update_session_stats(self, session_id: str, total_steps: int, cost: float, tokens: int):
+    def update_session_stats(self, session_id: str, total_steps: int, tokens: int):
         """Update session aggregate stats."""
         now = _now_rfc3339()
         self._conn.execute(
-            "UPDATE sessions SET total_steps = ?, total_cost_usd = total_cost_usd + ?, "
+            "UPDATE sessions SET total_steps = ?, "
             "total_tokens = total_tokens + ?, updated_at = ? WHERE id = ?",
-            (total_steps, cost, tokens, now, session_id),
+            (total_steps, tokens, now, session_id),
         )
         self._conn.commit()
 

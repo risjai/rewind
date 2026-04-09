@@ -48,7 +48,6 @@ impl Store {
                 updated_at TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'recording',
                 total_steps INTEGER NOT NULL DEFAULT 0,
-                total_cost_usd REAL NOT NULL DEFAULT 0.0,
                 total_tokens INTEGER NOT NULL DEFAULT 0,
                 metadata TEXT NOT NULL DEFAULT '{}'
             );
@@ -73,7 +72,6 @@ impl Store {
                 duration_ms INTEGER NOT NULL DEFAULT 0,
                 tokens_in INTEGER NOT NULL DEFAULT 0,
                 tokens_out INTEGER NOT NULL DEFAULT 0,
-                cost_usd REAL NOT NULL DEFAULT 0.0,
                 model TEXT NOT NULL DEFAULT '',
                 request_blob TEXT NOT NULL DEFAULT '',
                 response_blob TEXT NOT NULL DEFAULT '',
@@ -91,7 +89,6 @@ impl Store {
                 model TEXT NOT NULL DEFAULT '',
                 tokens_in INTEGER NOT NULL DEFAULT 0,
                 tokens_out INTEGER NOT NULL DEFAULT 0,
-                original_cost_usd REAL NOT NULL DEFAULT 0.0,
                 hit_count INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 last_hit_at TEXT
@@ -117,8 +114,8 @@ impl Store {
 
     pub fn create_session(&self, session: &Session) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO sessions (id, name, created_at, updated_at, status, total_steps, total_cost_usd, total_tokens, metadata)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO sessions (id, name, created_at, updated_at, status, total_steps, total_tokens, metadata)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 session.id,
                 session.name,
@@ -126,7 +123,6 @@ impl Store {
                 session.updated_at.to_rfc3339(),
                 session.status.as_str(),
                 session.total_steps,
-                session.total_cost_usd,
                 session.total_tokens,
                 session.metadata.to_string(),
             ],
@@ -134,10 +130,10 @@ impl Store {
         Ok(())
     }
 
-    pub fn update_session_stats(&self, session_id: &str, steps: u32, cost: f64, tokens: u64) -> Result<()> {
+    pub fn update_session_stats(&self, session_id: &str, steps: u32, tokens: u64) -> Result<()> {
         self.conn.execute(
-            "UPDATE sessions SET total_steps = ?1, total_cost_usd = total_cost_usd + ?2, total_tokens = total_tokens + ?3, updated_at = ?4 WHERE id = ?5",
-            params![steps, cost, tokens, chrono::Utc::now().to_rfc3339(), session_id],
+            "UPDATE sessions SET total_steps = ?1, total_tokens = total_tokens + ?2, updated_at = ?3 WHERE id = ?4",
+            params![steps, tokens, chrono::Utc::now().to_rfc3339(), session_id],
         )?;
         Ok(())
     }
@@ -152,7 +148,7 @@ impl Store {
 
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, created_at, updated_at, status, total_steps, total_cost_usd, total_tokens, metadata
+            "SELECT id, name, created_at, updated_at, status, total_steps, total_tokens, metadata
              FROM sessions ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -167,9 +163,8 @@ impl Store {
                     .with_timezone(&chrono::Utc),
                 status: SessionStatus::parse(&row.get::<_, String>(4)?),
                 total_steps: row.get(5)?,
-                total_cost_usd: row.get(6)?,
-                total_tokens: row.get(7)?,
-                metadata: serde_json::from_str(&row.get::<_, String>(8)?).unwrap_or_default(),
+                total_tokens: row.get(6)?,
+                metadata: serde_json::from_str(&row.get::<_, String>(7)?).unwrap_or_default(),
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -177,7 +172,7 @@ impl Store {
 
     pub fn get_session(&self, session_id: &str) -> Result<Option<Session>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, created_at, updated_at, status, total_steps, total_cost_usd, total_tokens, metadata
+            "SELECT id, name, created_at, updated_at, status, total_steps, total_tokens, metadata
              FROM sessions WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(params![session_id], |row| {
@@ -192,9 +187,8 @@ impl Store {
                     .with_timezone(&chrono::Utc),
                 status: SessionStatus::parse(&row.get::<_, String>(4)?),
                 total_steps: row.get(5)?,
-                total_cost_usd: row.get(6)?,
-                total_tokens: row.get(7)?,
-                metadata: serde_json::from_str(&row.get::<_, String>(8)?).unwrap_or_default(),
+                total_tokens: row.get(6)?,
+                metadata: serde_json::from_str(&row.get::<_, String>(7)?).unwrap_or_default(),
             })
         })?;
         Ok(rows.next().transpose()?)
@@ -252,8 +246,8 @@ impl Store {
 
     pub fn create_step(&self, step: &Step) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO steps (id, timeline_id, session_id, step_number, step_type, status, created_at, duration_ms, tokens_in, tokens_out, cost_usd, model, request_blob, response_blob, error)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            "INSERT INTO steps (id, timeline_id, session_id, step_number, step_type, status, created_at, duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 step.id,
                 step.timeline_id,
@@ -265,7 +259,6 @@ impl Store {
                 step.duration_ms,
                 step.tokens_in,
                 step.tokens_out,
-                step.cost_usd,
                 step.model,
                 step.request_blob,
                 step.response_blob,
@@ -277,7 +270,7 @@ impl Store {
 
     pub fn get_steps(&self, timeline_id: &str) -> Result<Vec<Step>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, timeline_id, session_id, step_number, step_type, status, created_at, duration_ms, tokens_in, tokens_out, cost_usd, model, request_blob, response_blob, error
+            "SELECT id, timeline_id, session_id, step_number, step_type, status, created_at, duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error
              FROM steps WHERE timeline_id = ?1 ORDER BY step_number",
         )?;
         let rows = stmt.query_map(params![timeline_id], |row| {
@@ -294,11 +287,10 @@ impl Store {
                 duration_ms: row.get(7)?,
                 tokens_in: row.get(8)?,
                 tokens_out: row.get(9)?,
-                cost_usd: row.get(10)?,
-                model: row.get(11)?,
-                request_blob: row.get(12)?,
-                response_blob: row.get(13)?,
-                error: row.get(14)?,
+                model: row.get(10)?,
+                request_blob: row.get(11)?,
+                response_blob: row.get(12)?,
+                error: row.get(13)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -306,7 +298,7 @@ impl Store {
 
     pub fn get_step(&self, step_id: &str) -> Result<Option<Step>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, timeline_id, session_id, step_number, step_type, status, created_at, duration_ms, tokens_in, tokens_out, cost_usd, model, request_blob, response_blob, error
+            "SELECT id, timeline_id, session_id, step_number, step_type, status, created_at, duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error
              FROM steps WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(params![step_id], |row| {
@@ -323,11 +315,10 @@ impl Store {
                 duration_ms: row.get(7)?,
                 tokens_in: row.get(8)?,
                 tokens_out: row.get(9)?,
-                cost_usd: row.get(10)?,
-                model: row.get(11)?,
-                request_blob: row.get(12)?,
-                response_blob: row.get(13)?,
-                error: row.get(14)?,
+                model: row.get(10)?,
+                request_blob: row.get(11)?,
+                response_blob: row.get(12)?,
+                error: row.get(13)?,
             })
         })?;
         Ok(rows.next().transpose()?)
@@ -335,18 +326,18 @@ impl Store {
 
     // ── Instant Replay Cache ──────────────────────────────────
 
-    pub fn cache_put(&self, request_hash: &str, response_blob: &str, model: &str, tokens_in: u64, tokens_out: u64, cost_usd: f64) -> Result<()> {
+    pub fn cache_put(&self, request_hash: &str, response_blob: &str, model: &str, tokens_in: u64, tokens_out: u64) -> Result<()> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO replay_cache (request_hash, response_blob, model, tokens_in, tokens_out, original_cost_usd, hit_count, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
-            params![request_hash, response_blob, model, tokens_in, tokens_out, cost_usd, chrono::Utc::now().to_rfc3339()],
+            "INSERT OR REPLACE INTO replay_cache (request_hash, response_blob, model, tokens_in, tokens_out, hit_count, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
+            params![request_hash, response_blob, model, tokens_in, tokens_out, chrono::Utc::now().to_rfc3339()],
         )?;
         Ok(())
     }
 
     pub fn cache_get(&self, request_hash: &str) -> Result<Option<CacheEntry>> {
         let mut stmt = self.conn.prepare(
-            "SELECT request_hash, response_blob, model, tokens_in, tokens_out, original_cost_usd, hit_count, created_at
+            "SELECT request_hash, response_blob, model, tokens_in, tokens_out, hit_count
              FROM replay_cache WHERE request_hash = ?1",
         )?;
         let mut rows = stmt.query_map(params![request_hash], |row| {
@@ -356,8 +347,7 @@ impl Store {
                 model: row.get(2)?,
                 tokens_in: row.get(3)?,
                 tokens_out: row.get(4)?,
-                original_cost_usd: row.get(5)?,
-                hit_count: row.get(6)?,
+                hit_count: row.get(5)?,
             })
         })?;
         Ok(rows.next().transpose()?)
@@ -373,13 +363,13 @@ impl Store {
 
     pub fn cache_stats(&self) -> Result<CacheStats> {
         let mut stmt = self.conn.prepare(
-            "SELECT COUNT(*), COALESCE(SUM(hit_count), 0), COALESCE(SUM(hit_count * original_cost_usd), 0.0) FROM replay_cache",
+            "SELECT COUNT(*), COALESCE(SUM(hit_count), 0), COALESCE(SUM(hit_count * (tokens_in + tokens_out)), 0) FROM replay_cache",
         )?;
         let stats = stmt.query_row([], |row| {
             Ok(CacheStats {
                 entries: row.get(0)?,
                 total_hits: row.get(1)?,
-                total_saved_usd: row.get(2)?,
+                total_tokens_saved: row.get(2)?,
             })
         })?;
         Ok(stats)

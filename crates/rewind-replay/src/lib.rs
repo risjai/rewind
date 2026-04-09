@@ -25,7 +25,6 @@ pub struct StepSummary {
     pub model: String,
     pub tokens_in: u64,
     pub tokens_out: u64,
-    pub cost_usd: f64,
     pub duration_ms: u64,
     pub response_preview: String,
 }
@@ -179,7 +178,6 @@ impl<'a> ReplayEngine<'a> {
             model: step.model.clone(),
             tokens_in: step.tokens_in,
             tokens_out: step.tokens_out,
-            cost_usd: step.cost_usd,
             duration_ms: step.duration_ms,
             response_preview,
         }

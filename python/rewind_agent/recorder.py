@@ -15,31 +15,6 @@ from .store import Store
 
 logger = logging.getLogger("rewind")
 
-# ── Cost estimation (same table as Rust proxy) ────────────────
-
-_PRICING = {
-    "gpt-4o": (2.5, 10.0),
-    "gpt-4o-mini": (0.15, 0.6),
-    "gpt-4": (30.0, 60.0),
-    "gpt-3.5": (0.5, 1.5),
-    "claude-3-5-sonnet": (3.0, 15.0),
-    "claude-sonnet-4": (3.0, 15.0),
-    "claude-3-5-haiku": (0.8, 4.0),
-    "claude-haiku-4": (0.8, 4.0),
-    "claude-opus": (15.0, 75.0),
-}
-_DEFAULT_PRICING = (3.0, 15.0)
-
-
-def _estimate_cost(model: str, tokens_in: int, tokens_out: int) -> float:
-    model_lower = model.lower()
-    for key, (inp, out) in _PRICING.items():
-        if key in model_lower:
-            return (tokens_in * inp + tokens_out * out) / 1_000_000
-    inp, out = _DEFAULT_PRICING
-    return (tokens_in * inp + tokens_out * out) / 1_000_000
-
-
 # ── Response parsing helpers ──────────────────────────────────
 
 def _serialize_response(response) -> dict:
@@ -523,8 +498,6 @@ class Recorder:
                 else:
                     tokens_in, tokens_out = _extract_openai_usage(response_data)
 
-            cost = _estimate_cost(model, tokens_in, tokens_out)
-
             # Store blobs
             req_hash = self._store.blobs.put_json(request_data)
             resp_hash = self._store.blobs.put_json(response_data or {"error": error or "unknown"})
@@ -544,13 +517,12 @@ class Recorder:
                     duration_ms=duration_ms,
                     tokens_in=tokens_in,
                     tokens_out=tokens_out,
-                    cost_usd=cost,
                     request_blob=req_hash,
                     response_blob=resp_hash,
                     error=error,
                 )
                 self._store.update_session_stats(
-                    self._session_id, step_number, cost, tokens_in + tokens_out,
+                    self._session_id, step_number, tokens_in + tokens_out,
                 )
 
         except Exception:

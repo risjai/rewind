@@ -10,7 +10,6 @@ pub struct Session {
     pub updated_at: DateTime<Utc>,
     pub status: SessionStatus,
     pub total_steps: u32,
-    pub total_cost_usd: f64,
     pub total_tokens: u64,
     pub metadata: serde_json::Value,
 }
@@ -66,7 +65,6 @@ pub struct Step {
     pub duration_ms: u64,
     pub tokens_in: u64,
     pub tokens_out: u64,
-    pub cost_usd: f64,
     pub model: String,
     pub request_blob: String,  // SHA-256 hash -> blob store
     pub response_blob: String, // SHA-256 hash -> blob store
@@ -151,7 +149,6 @@ impl Session {
             updated_at: now,
             status: SessionStatus::Recording,
             total_steps: 0,
-            total_cost_usd: 0.0,
             total_tokens: 0,
             metadata: serde_json::json!({}),
         }
@@ -191,7 +188,6 @@ pub struct CacheEntry {
     pub model: String,
     pub tokens_in: u64,
     pub tokens_out: u64,
-    pub original_cost_usd: f64,
     pub hit_count: u64,
 }
 
@@ -199,7 +195,7 @@ pub struct CacheEntry {
 pub struct CacheStats {
     pub entries: u64,
     pub total_hits: u64,
-    pub total_saved_usd: f64,
+    pub total_tokens_saved: u64,
 }
 
 // ── Snapshots ─────────────────────────────────────────────
@@ -249,7 +245,6 @@ impl Step {
             duration_ms: 0,
             tokens_in: 0,
             tokens_out: 0,
-            cost_usd: 0.0,
             model: model.to_string(),
             request_blob: String::new(),
             response_blob: String::new(),

@@ -129,7 +129,6 @@ impl TuiApp {
             .map(|s| s.name)
             .unwrap_or_else(|| "Unknown".into());
 
-        let total_cost: f64 = self.steps.iter().map(|s| s.cost_usd).sum();
         let total_tokens: u64 = self.steps.iter().map(|s| s.tokens_in + s.tokens_out).sum();
         let error_count = self.steps.iter().filter(|s| s.status == StepStatus::Error).count();
 
@@ -140,8 +139,6 @@ impl TuiApp {
                 Span::styled(&session_name, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
                 Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
                 Span::styled(format!("{} steps", self.steps.len()), Style::default().fg(Color::Yellow)),
-                Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("${:.4}", total_cost), Style::default().fg(Color::Green)),
                 Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
                 Span::styled(format!("{} tokens", total_tokens), Style::default().fg(Color::Blue)),
                 if error_count > 0 {
@@ -214,8 +211,8 @@ impl TuiApp {
                 ),
                 Span::styled("  ", Style::default()),
                 Span::styled(
-                    format!("${:.4}", step.cost_usd),
-                    Style::default().fg(Color::DarkGray),
+                    format!("{}tok", step.tokens_in + step.tokens_out),
+                    Style::default().fg(Color::Blue),
                 ),
             ]);
 
@@ -296,8 +293,6 @@ impl TuiApp {
                 ),
                 Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
                 Span::styled(format!("{:.0}ms", step.duration_ms), Style::default().fg(Color::Yellow)),
-                Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("${:.6}", step.cost_usd), Style::default().fg(Color::Green)),
                 if let Some(ref err) = step.error {
                     Span::styled(format!(" │ {}", &err[..err.len().min(60)]), Style::default().fg(Color::Red))
                 } else {

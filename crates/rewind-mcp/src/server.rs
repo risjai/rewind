@@ -62,7 +62,6 @@ struct SessionSummary {
     status: String,
     total_steps: u32,
     total_tokens: u64,
-    total_cost_usd: f64,
     created_at: String,
     timelines: usize,
 }
@@ -76,7 +75,6 @@ struct StepSummaryResponse {
     duration_ms: u64,
     tokens_in: u64,
     tokens_out: u64,
-    cost_usd: f64,
     error: Option<String>,
     response_preview: String,
 }
@@ -116,7 +114,7 @@ impl RewindMcp {
 impl RewindMcp {
     #[tool(
         name = "list_sessions",
-        description = "List all recorded agent sessions with summary stats (name, steps, cost, tokens, status, timeline count)"
+        description = "List all recorded agent sessions with summary stats (name, steps, tokens, status, timeline count)"
     )]
     async fn list_sessions(&self) -> Result<CallToolResult, McpError> {
         let store = self.lock_store()?;
@@ -132,7 +130,6 @@ impl RewindMcp {
                     status: s.status.as_str().to_string(),
                     total_steps: s.total_steps,
                     total_tokens: s.total_tokens,
-                    total_cost_usd: s.total_cost_usd,
                     created_at: s.created_at.to_rfc3339(),
                     timelines: timeline_count,
                 }
@@ -148,7 +145,7 @@ impl RewindMcp {
 
     #[tool(
         name = "show_session",
-        description = "Show the step-by-step trace for an agent session. Returns the timeline with step types, models, costs, durations, errors, and response previews. Pass session ID, prefix, or 'latest'."
+        description = "Show the step-by-step trace for an agent session. Returns the timeline with step types, models, token counts, durations, errors, and response previews. Pass session ID, prefix, or 'latest'."
     )]
     async fn show_session(
         &self,
@@ -179,7 +176,6 @@ impl RewindMcp {
                     duration_ms: s.duration_ms,
                     tokens_in: s.tokens_in,
                     tokens_out: s.tokens_out,
-                    cost_usd: s.cost_usd,
                     error: s.error.clone(),
                     response_preview: preview,
                 }
@@ -202,7 +198,7 @@ impl RewindMcp {
                 "name": sess.name,
                 "status": sess.status.as_str(),
                 "total_steps": sess.total_steps,
-                "total_cost_usd": sess.total_cost_usd,
+                "total_tokens": sess.total_tokens,
             },
             "timeline": { "id": root.id, "label": root.label },
             "steps": step_summaries,
@@ -241,7 +237,6 @@ impl RewindMcp {
                 "duration_ms": step.duration_ms,
                 "tokens_in": step.tokens_in,
                 "tokens_out": step.tokens_out,
-                "cost_usd": step.cost_usd,
                 "error": step.error,
             },
             "response": response,
@@ -315,7 +310,7 @@ impl RewindMcp {
 
     #[tool(
         name = "cache_stats",
-        description = "Show Instant Replay cache statistics: number of cached responses, total cache hits, and total money saved."
+        description = "Show Instant Replay cache statistics: number of cached responses, total cache hits, and total tokens saved."
     )]
     async fn cache_stats(&self) -> Result<CallToolResult, McpError> {
         let store = self.lock_store()?;
@@ -326,7 +321,7 @@ impl RewindMcp {
 
     #[tool(
         name = "fork_timeline",
-        description = "Create a timeline fork at a specific step, allowing exploration of alternative agent execution paths. Steps before the fork point are shared with the parent (zero cost)."
+        description = "Create a timeline fork at a specific step, allowing exploration of alternative agent execution paths. Steps before the fork point are shared with the parent (zero re-execution)."
     )]
     async fn fork_timeline(
         &self,
