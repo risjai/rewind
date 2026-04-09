@@ -21,6 +21,10 @@ pub struct ProxyServer {
     step_counter: Arc<Mutex<u32>>,
     upstream_base: String,
     instant_replay: bool,
+    /// Fork-and-execute: parent steps to replay (steps 1..=fork_at_step served from cache)
+    replay_steps: Option<Vec<Step>>,
+    /// Fork-and-execute: step number cutoff — steps <= this are served from cache
+    fork_at_step: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -31,6 +35,8 @@ struct ProxyState {
     step_counter: Arc<Mutex<u32>>,
     upstream_base: String,
     instant_replay: bool,
+    replay_steps: Option<Arc<Vec<Step>>>,
+    fork_at_step: Option<u32>,
 }
 
 impl ProxyServer {
@@ -55,11 +61,47 @@ impl ProxyServer {
             step_counter: Arc::new(Mutex::new(0)),
             upstream_base: upstream_base.to_string(),
             instant_replay,
+            replay_steps: None,
+            fork_at_step: None,
+        })
+    }
+
+    /// Create a proxy in fork-and-execute mode: steps 1..=fork_at serve cached responses,
+    /// steps after that forward to upstream and record into the forked timeline.
+    pub fn new_fork_execute(
+        store: Store,
+        session_id: &str,
+        fork_timeline_id: &str,
+        replay_steps: Vec<Step>,
+        fork_at_step: u32,
+        upstream_base: &str,
+    ) -> Result<Self> {
+        tracing::info!(
+            session_id = %session_id,
+            fork_timeline_id = %fork_timeline_id,
+            fork_at_step = fork_at_step,
+            cached_steps = replay_steps.len(),
+            "Starting fork-and-execute proxy",
+        );
+
+        Ok(ProxyServer {
+            store: Arc::new(Mutex::new(store)),
+            session_id: session_id.to_string(),
+            timeline_id: fork_timeline_id.to_string(),
+            step_counter: Arc::new(Mutex::new(0)),
+            upstream_base: upstream_base.to_string(),
+            instant_replay: false,
+            replay_steps: Some(replay_steps),
+            fork_at_step: Some(fork_at_step),
         })
     }
 
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    pub fn timeline_id(&self) -> &str {
+        &self.timeline_id
     }
 
     pub async fn run(self, addr: SocketAddr) -> Result<()> {
@@ -73,6 +115,8 @@ impl ProxyServer {
             step_counter: self.step_counter,
             upstream_base: self.upstream_base,
             instant_replay: self.instant_replay,
+            replay_steps: self.replay_steps.map(Arc::new),
+            fork_at_step: self.fork_at_step,
         };
 
         loop {
@@ -150,6 +194,49 @@ async fn handle_request(
     };
 
     let streaming = is_stream_request(&body_bytes);
+
+    // ── Fork-and-Execute: serve parent steps from cache ──
+    if let (Some(replay_steps), Some(fork_at)) = (&state.replay_steps, state.fork_at_step) {
+        if step_number <= fork_at {
+            if let Some(parent_step) = replay_steps.iter().find(|s| s.step_number == step_number) {
+                let resp_data = {
+                    let store = state.store.lock().unwrap();
+                    store.blobs.get(&parent_step.response_blob).unwrap_or_default()
+                };
+
+                // Record a replayed step in the forked timeline
+                let mut step = Step::new_llm_call(&state.timeline_id, &state.session_id, step_number, &parent_step.model);
+                step.status = parent_step.status.clone();
+                step.duration_ms = 0;
+                step.tokens_in = parent_step.tokens_in;
+                step.tokens_out = parent_step.tokens_out;
+                step.request_blob = request_hash.clone();
+                step.response_blob = parent_step.response_blob.clone();
+                step.step_type = parent_step.step_type.clone();
+
+                {
+                    let store = state.store.lock().unwrap();
+                    let _ = store.create_step(&step);
+                    let _ = store.update_session_stats(&state.session_id, step_number, 0);
+                }
+
+                tracing::info!(
+                    step = step_number, model = %parent_step.model,
+                    "⏪ Fork replay — served cached step {}/{} (0ms, 0 tokens)",
+                    step_number, fork_at,
+                );
+
+                let response = Response::builder()
+                    .status(200)
+                    .header("content-type", "application/json")
+                    .header("x-rewind-replay", "fork")
+                    .header("x-rewind-cached-step", step_number.to_string())
+                    .body(box_full(Bytes::from(resp_data)))
+                    .unwrap();
+                return Ok(response);
+            }
+        }
+    }
 
     // ── Instant Replay: check cache before hitting upstream ──
     if state.instant_replay && !streaming

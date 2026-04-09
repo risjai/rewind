@@ -55,6 +55,35 @@ fn default_fork_label() -> String {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReplaySessionParams {
+    /// Session ID, prefix, or "latest"
+    pub session: String,
+    /// Step number to replay from (steps 1..from_step served from cache, from_step+1 onward live)
+    pub from_step: u32,
+    /// Upstream LLM API base URL (default: https://api.openai.com)
+    #[serde(default = "default_upstream")]
+    pub upstream: String,
+    /// Proxy listen port (default: 8443)
+    #[serde(default = "default_port")]
+    pub port: u16,
+    /// Label for the forked timeline
+    #[serde(default = "default_replay_label")]
+    pub label: String,
+}
+
+fn default_upstream() -> String {
+    "https://api.openai.com".to_string()
+}
+
+fn default_port() -> u16 {
+    8443
+}
+
+fn default_replay_label() -> String {
+    "replayed".to_string()
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct CreateBaselineParams {
     /// Session ID, prefix, or "latest"
     pub session: String,
@@ -384,6 +413,76 @@ impl RewindMcp {
             "message": format!(
                 "Fork created. Steps 1-{} are shared with parent timeline.",
                 params.at_step
+            ),
+        });
+        ok_json(&json)
+    }
+
+    #[tool(
+        name = "replay_session",
+        description = "Set up a fork-and-execute replay: creates a forked timeline where steps 1..from_step \
+            are served from the parent's cached responses (0ms, 0 tokens), and steps after from_step \
+            are forwarded to the real LLM. Returns connection info for the replay proxy. \
+            Point your agent at the returned proxy URL to run the replay."
+    )]
+    async fn replay_session(
+        &self,
+        params: Parameters<ReplaySessionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let params = &params.0;
+        let store = self.lock_store()?;
+        let sess = resolve_session(&store, &params.session)?;
+        let root = store
+            .get_root_timeline(&sess.id)
+            .map_err(|e| mcp_err(&e))?
+            .ok_or_else(|| mcp_err_str("No root timeline found"))?;
+
+        let engine = ReplayEngine::new(&store);
+        let parent_steps = engine
+            .get_full_timeline_steps(&root.id, &sess.id)
+            .map_err(|e| mcp_err(&e))?;
+
+        if params.from_step == 0 || params.from_step as usize > parent_steps.len() {
+            return Err(mcp_err_str(&format!(
+                "Invalid from_step {}. Session has {} steps (use 1-{}).",
+                params.from_step, parent_steps.len(), parent_steps.len()
+            )));
+        }
+
+        // Create the forked timeline
+        let fork = engine
+            .fork(&sess.id, &root.id, params.from_step, &params.label)
+            .map_err(|e| mcp_err(&e))?;
+
+        let cached_steps: Vec<serde_json::Value> = parent_steps.iter()
+            .filter(|s| s.step_number <= params.from_step)
+            .map(|s| serde_json::json!({
+                "step_number": s.step_number,
+                "model": s.model,
+                "tokens_in": s.tokens_in,
+                "tokens_out": s.tokens_out,
+            }))
+            .collect();
+
+        let json = serde_json::json!({
+            "replay": {
+                "session_id": sess.id,
+                "session_name": sess.name,
+                "fork_id": fork.id,
+                "fork_label": fork.label,
+                "from_step": params.from_step,
+                "total_parent_steps": parent_steps.len(),
+                "cached_steps": cached_steps,
+                "port": params.port,
+                "upstream": params.upstream,
+            },
+            "instructions": format!(
+                "Fork created. To start the replay proxy, run:\n  rewind replay {} --from {} --port {} --upstream {}",
+                &sess.id[..8.min(sess.id.len())], params.from_step, params.port, params.upstream
+            ),
+            "message": format!(
+                "Replay set up: steps 1-{} will be served from cache (0ms, 0 tokens). Steps {}+ will hit {}.",
+                params.from_step, params.from_step + 1, params.upstream
             ),
         });
         ok_json(&json)

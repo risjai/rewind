@@ -17,7 +17,7 @@ Usage:
     crew = rewind_agent.wrap_crew(crew)
 """
 
-from .patch import init, uninit, session
+from .patch import init, uninit, session, replay
 from .hooks import (
     step,
     node,
@@ -34,6 +34,7 @@ __all__ = [
     "init",
     "uninit",
     "session",
+    "replay",
     "step",
     "node",
     "tool",

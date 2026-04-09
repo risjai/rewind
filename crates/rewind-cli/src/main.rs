@@ -58,6 +58,29 @@ enum Commands {
         session: String,
     },
 
+    /// Replay a session from a fork point — cached steps served instantly, live from fork point onward
+    Replay {
+        /// Session ID or "latest"
+        #[arg(default_value = "latest")]
+        session: String,
+
+        /// Step number to replay from (steps before this are served from cache)
+        #[arg(long)]
+        from: u32,
+
+        /// Upstream LLM API base URL
+        #[arg(short, long, default_value = "https://api.openai.com")]
+        upstream: String,
+
+        /// Proxy listen port
+        #[arg(short, long, default_value = "8443")]
+        port: u16,
+
+        /// Label for the forked timeline
+        #[arg(short, long, default_value = "replayed")]
+        label: String,
+    },
+
     /// Fork a timeline at a specific step
     Fork {
         /// Session ID or "latest"
@@ -185,6 +208,7 @@ async fn main() -> Result<()> {
         Commands::Sessions => cmd_sessions(),
         Commands::Inspect { session } => cmd_inspect(session),
         Commands::Show { session } => cmd_show(session),
+        Commands::Replay { session, from, upstream, port, label } => cmd_replay(session, from, upstream, port, label).await,
         Commands::Fork { session, at, label } => cmd_fork(session, at, label),
         Commands::Diff { session, left, right } => cmd_diff(session, left, right),
         Commands::Snapshot { directory, label } => cmd_snapshot(directory, label),
@@ -219,6 +243,57 @@ async fn cmd_record(name: String, port: u16, upstream: String, replay: bool) -> 
     println!("    {}", format!("export OPENAI_BASE_URL=http://127.0.0.1:{}/v1", port).green());
     println!();
     println!("  {} to stop recording.", "Ctrl+C".yellow().bold());
+    println!();
+
+    let addr: SocketAddr = format!("127.0.0.1:{}", port).parse()?;
+    proxy.run(addr).await
+}
+
+async fn cmd_replay(session_ref: String, from_step: u32, upstream: String, port: u16, label: String) -> Result<()> {
+    let store = Store::open_default()?;
+    let session = resolve_session(&store, &session_ref)?;
+    let timeline = store.get_root_timeline(&session.id)?
+        .context("No timeline found for session")?;
+
+    // Load all parent steps
+    let engine = ReplayEngine::new(&store);
+    let parent_steps = engine.get_full_timeline_steps(&timeline.id, &session.id)?;
+
+    if from_step == 0 || from_step as usize > parent_steps.len() {
+        bail!(
+            "Invalid --from step {}. Session has {} steps (use 1-{}).",
+            from_step, parent_steps.len(), parent_steps.len()
+        );
+    }
+
+    // Create a forked timeline
+    let fork = engine.fork(&session.id, &timeline.id, from_step, &label)?;
+
+    // Start proxy in fork-and-execute mode
+    let proxy = ProxyServer::new_fork_execute(
+        store,
+        &session.id,
+        &fork.id,
+        parent_steps.clone(),
+        from_step,
+        &upstream,
+    )?;
+
+    println!("{}", "⏪ Rewind — Fork & Execute Replay".cyan().bold());
+    println!();
+    println!("  {} {}", "Session:".dimmed(), session.name.white().bold());
+    println!("  {} {}", "Fork at:".dimmed(), format!("Step {}", from_step).yellow());
+    println!("  {} {}", "Cached:".dimmed(), format!("Steps 1-{} (0ms, 0 tokens)", from_step).green().bold());
+    println!("  {} {}", "Live:".dimmed(), format!("Steps {}+ (forwarded to upstream)", from_step + 1).cyan());
+    println!("  {} {}", "Fork ID:".dimmed(), fork.id[..12].to_string().dimmed());
+    println!("  {} {}", "Proxy:".dimmed(), format!("http://127.0.0.1:{}", port).yellow());
+    println!("  {} {}", "Upstream:".dimmed(), upstream.dimmed());
+    println!();
+    println!("  {} Point your agent at this proxy:", "→".cyan());
+    println!("    {}", format!("export OPENAI_BASE_URL=http://127.0.0.1:{}/v1", port).green());
+    println!();
+    println!("  {} to stop. Then diff with:", "Ctrl+C".yellow().bold());
+    println!("    {}", format!("rewind diff {} {} {}", &session.id[..8], &timeline.id[..8], &fork.id[..8]).green());
     println!();
 
     let addr: SocketAddr = format!("127.0.0.1:{}", port).parse()?;

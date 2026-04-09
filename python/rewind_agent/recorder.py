@@ -314,15 +314,21 @@ class Recorder:
     """
     Monkey-patches OpenAI/Anthropic SDK clients to record every LLM call
     directly to the Rewind store. Thread-safe.
+
+    In replay mode (replay_steps + fork_at_step set), steps <= fork_at_step
+    return cached responses from the parent timeline without calling the LLM.
     """
 
-    def __init__(self, store: Store, session_id: str, timeline_id: str):
+    def __init__(self, store: Store, session_id: str, timeline_id: str,
+                 replay_steps: list = None, fork_at_step: int = None):
         self._store = store
         self._session_id = session_id
         self._timeline_id = timeline_id
         self._step_counter = 0
         self._lock = threading.Lock()
         self._originals = {}
+        self._replay_steps = replay_steps  # list of parent step dicts
+        self._fork_at_step = fork_at_step  # step cutoff for cached replay
 
     def patch_all(self):
         """Patch all supported SDK clients."""
@@ -337,6 +343,81 @@ class Recorder:
             setattr(cls, method_name, original)
         self._originals.clear()
 
+    # ── Replay helpers ─────────────────────────────────────────
+
+    def _try_replay_cached(self, provider: str):
+        """
+        Check if the next step should be served from cache (fork-and-execute mode).
+        Returns a fake SDK response object if cached, or None if live call needed.
+        """
+        if self._replay_steps is None or self._fork_at_step is None:
+            return None
+
+        with self._lock:
+            next_step = self._step_counter + 1
+            if next_step > self._fork_at_step:
+                return None
+
+            # Find parent step
+            parent = None
+            for s in self._replay_steps:
+                if s["step_number"] == next_step:
+                    parent = s
+                    break
+            if parent is None:
+                return None
+
+            # Load cached response from blob store
+            resp_bytes = self._store.blobs.get(parent["response_blob"])
+            resp_data = json.loads(resp_bytes)
+
+            # Record the replayed step
+            self._step_counter += 1
+            step_number = self._step_counter
+
+            req_hash = self._store.blobs.put_json({"_replay": True, "step": step_number})
+            self._store.create_step(
+                session_id=self._session_id,
+                timeline_id=self._timeline_id,
+                step_number=step_number,
+                step_type=parent.get("step_type", "llm_call"),
+                status=parent.get("status", "success"),
+                model=parent.get("model", "unknown"),
+                duration_ms=0,
+                tokens_in=parent.get("tokens_in", 0),
+                tokens_out=parent.get("tokens_out", 0),
+                request_blob=req_hash,
+                response_blob=parent["response_blob"],
+                error=None,
+            )
+            self._store.update_session_stats(self._session_id, step_number, 0)
+
+            logger.info(
+                "Rewind: fork replay — served cached step %d/%d (0ms, 0 tokens)",
+                step_number, self._fork_at_step,
+            )
+
+            return resp_data
+
+    @staticmethod
+    def _build_openai_response(resp_data: dict):
+        """Build a fake OpenAI ChatCompletion from stored JSON."""
+        try:
+            from openai.types.chat import ChatCompletion
+            return ChatCompletion.model_validate(resp_data)
+        except Exception:
+            # Fallback: return the dict wrapped in a simple namespace
+            return type("CachedResponse", (), resp_data)()
+
+    @staticmethod
+    def _build_anthropic_response(resp_data: dict):
+        """Build a fake Anthropic Message from stored JSON."""
+        try:
+            from anthropic.types import Message
+            return Message.model_validate(resp_data)
+        except Exception:
+            return type("CachedResponse", (), resp_data)()
+
     # ── OpenAI sync ───────────────────────────────────────────
 
     def _patch_openai_sync(self):
@@ -350,6 +431,11 @@ class Recorder:
 
         @functools.wraps(original)
         def patched(completions_self, *args, **kwargs):
+            # Fork-and-execute: serve cached response if within replay range
+            cached = recorder._try_replay_cached("openai")
+            if cached is not None:
+                return recorder._build_openai_response(cached)
+
             request_data = _serialize_request(kwargs)
             model = kwargs.get("model", "unknown")
             is_streaming = kwargs.get("stream", False)
@@ -384,6 +470,10 @@ class Recorder:
 
         @functools.wraps(original)
         async def patched(completions_self, *args, **kwargs):
+            cached = recorder._try_replay_cached("openai")
+            if cached is not None:
+                return recorder._build_openai_response(cached)
+
             request_data = _serialize_request(kwargs)
             model = kwargs.get("model", "unknown")
             is_streaming = kwargs.get("stream", False)
@@ -418,6 +508,10 @@ class Recorder:
 
         @functools.wraps(original)
         def patched(messages_self, *args, **kwargs):
+            cached = recorder._try_replay_cached("anthropic")
+            if cached is not None:
+                return recorder._build_anthropic_response(cached)
+
             request_data = _serialize_request(kwargs)
             model = kwargs.get("model", "unknown")
             is_streaming = kwargs.get("stream", False)
@@ -452,6 +546,10 @@ class Recorder:
 
         @functools.wraps(original)
         async def patched(messages_self, *args, **kwargs):
+            cached = recorder._try_replay_cached("anthropic")
+            if cached is not None:
+                return recorder._build_anthropic_response(cached)
+
             request_data = _serialize_request(kwargs)
             model = kwargs.get("model", "unknown")
             is_streaming = kwargs.get("stream", False)

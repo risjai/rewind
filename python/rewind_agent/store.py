@@ -255,6 +255,98 @@ class Store:
         )
         self._conn.commit()
 
+    # ── Query methods for replay ────────────────────────────────
+
+    def get_latest_session(self) -> dict | None:
+        """Return the most recent session as a dict, or None."""
+        row = self._conn.execute(
+            "SELECT id, name, status, total_steps, total_tokens "
+            "FROM sessions ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        if not row:
+            return None
+        return {"id": row[0], "name": row[1], "status": row[2],
+                "total_steps": row[3], "total_tokens": row[4]}
+
+    def get_session(self, session_ref: str) -> dict | None:
+        """Resolve a session by ID, prefix, or 'latest'."""
+        if session_ref == "latest":
+            return self.get_latest_session()
+        row = self._conn.execute(
+            "SELECT id, name, status, total_steps, total_tokens "
+            "FROM sessions WHERE id = ?", (session_ref,)
+        ).fetchone()
+        if row:
+            return {"id": row[0], "name": row[1], "status": row[2],
+                    "total_steps": row[3], "total_tokens": row[4]}
+        # prefix match
+        row = self._conn.execute(
+            "SELECT id, name, status, total_steps, total_tokens "
+            "FROM sessions WHERE id LIKE ? ORDER BY created_at DESC LIMIT 1",
+            (session_ref + "%",)
+        ).fetchone()
+        if row:
+            return {"id": row[0], "name": row[1], "status": row[2],
+                    "total_steps": row[3], "total_tokens": row[4]}
+        return None
+
+    def get_root_timeline(self, session_id: str) -> dict | None:
+        """Return the root timeline for a session."""
+        row = self._conn.execute(
+            "SELECT id, session_id, parent_timeline_id, fork_at_step, label "
+            "FROM timelines WHERE session_id = ? AND parent_timeline_id IS NULL "
+            "ORDER BY created_at LIMIT 1", (session_id,)
+        ).fetchone()
+        if not row:
+            return None
+        return {"id": row[0], "session_id": row[1],
+                "parent_timeline_id": row[2], "fork_at_step": row[3], "label": row[4]}
+
+    def get_steps(self, timeline_id: str) -> list[dict]:
+        """Return all steps for a timeline, ordered by step_number."""
+        rows = self._conn.execute(
+            "SELECT id, timeline_id, session_id, step_number, step_type, status, "
+            "duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error "
+            "FROM steps WHERE timeline_id = ? ORDER BY step_number", (timeline_id,)
+        ).fetchall()
+        return [
+            {"id": r[0], "timeline_id": r[1], "session_id": r[2],
+             "step_number": r[3], "step_type": r[4], "status": r[5],
+             "duration_ms": r[6], "tokens_in": r[7], "tokens_out": r[8],
+             "model": r[9], "request_blob": r[10], "response_blob": r[11],
+             "error": r[12]}
+            for r in rows
+        ]
+
+    def get_full_timeline_steps(self, timeline_id: str, session_id: str) -> list[dict]:
+        """Get all steps for a timeline, including inherited parent steps for forks."""
+        row = self._conn.execute(
+            "SELECT parent_timeline_id, fork_at_step FROM timelines WHERE id = ?",
+            (timeline_id,)
+        ).fetchone()
+        if row and row[0] is not None and row[1] is not None:
+            parent_id, fork_at = row[0], row[1]
+            parent_steps = [s for s in self.get_steps(parent_id) if s["step_number"] <= fork_at]
+            own_steps = self.get_steps(timeline_id)
+            combined = parent_steps + own_steps
+            combined.sort(key=lambda s: s["step_number"])
+            return combined
+        return self.get_steps(timeline_id)
+
+    def create_fork_timeline(self, session_id: str, parent_timeline_id: str,
+                             fork_at_step: int, label: str = "replayed") -> str:
+        """Create a forked timeline. Returns the new timeline ID."""
+        timeline_id = _new_id()
+        now = _now_rfc3339()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO timelines (id, session_id, parent_timeline_id, fork_at_step, created_at, label) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (timeline_id, session_id, parent_timeline_id, fork_at_step, now, label),
+            )
+            self._conn.commit()
+        return timeline_id
+
     def close(self):
         """Close the database connection."""
         try:

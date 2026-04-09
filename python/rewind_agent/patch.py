@@ -98,6 +98,83 @@ def session(name: str = "default", mode: str = "direct", proxy_url: str = None):
         uninit()
 
 
+@contextlib.contextmanager
+def replay(session_ref: str = "latest", from_step: int = None):
+    """
+    Context manager for fork-and-execute replay.
+
+    Steps 1 through from_step are served from cache (0ms, 0 tokens).
+    Steps after from_step call the real LLM and are recorded into a new forked timeline.
+
+    Usage:
+        with rewind_agent.replay("latest", from_step=4):
+            result = my_agent.run("Research Tokyo population")
+            # Steps 1-4: instant cached responses
+            # Step 5+: live LLM calls
+    """
+    from .store import Store
+    from .recorder import Recorder
+
+    store = Store()
+
+    # Resolve session
+    sess = store.get_session(session_ref)
+    if sess is None:
+        raise ValueError(f"Session not found: {session_ref}")
+
+    # Get root timeline and its steps
+    root_tl = store.get_root_timeline(sess["id"])
+    if root_tl is None:
+        raise ValueError(f"No timeline found for session {sess['id']}")
+
+    parent_steps = store.get_full_timeline_steps(root_tl["id"], sess["id"])
+    if not parent_steps:
+        raise ValueError("Session has no steps to replay")
+
+    # Determine fork point
+    if from_step is None:
+        from_step = len(parent_steps)
+    if from_step < 1 or from_step > len(parent_steps):
+        raise ValueError(
+            f"Invalid from_step={from_step}. Session has {len(parent_steps)} steps (use 1-{len(parent_steps)})."
+        )
+
+    # Create forked timeline
+    fork_tl_id = store.create_fork_timeline(
+        sess["id"], root_tl["id"], from_step, "replayed"
+    )
+
+    # Create recorder in replay mode
+    recorder = Recorder(
+        store, sess["id"], fork_tl_id,
+        replay_steps=parent_steps,
+        fork_at_step=from_step,
+    )
+    recorder.patch_all()
+
+    _print_replay_banner(sess["name"], from_step, len(parent_steps))
+
+    try:
+        yield
+    finally:
+        recorder.unpatch_all()
+        try:
+            store.update_session_status(sess["id"], "completed")
+        except Exception:
+            pass
+        store.close()
+
+
+def _print_replay_banner(session_name: str, from_step: int, total_steps: int):
+    _print_logo()
+    print(f"  \033[36m\033[1mFork & Execute Replay\033[0m")
+    print()
+    print(f"  \033[90m  Session:\033[0m  {session_name}")
+    print(f"  \033[90m  Cached:\033[0m   \033[32mSteps 1-{from_step} (0ms, 0 tokens)\033[0m")
+    print(f"  \033[90m  Live:\033[0m     \033[36mSteps {from_step + 1}+ (real LLM calls)\033[0m")
+    print()
+
+
 def _init_direct(session_name: str, auto_patch: bool):
     """Initialize direct recording mode."""
     global _recorder, _store, _session_id
