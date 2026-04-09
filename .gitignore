@@ -21,6 +21,9 @@ __pycache__/
 dist/
 build/
 
+# Internal research (not public)
+/research/
+
 # Env
 .env
 .env.local
