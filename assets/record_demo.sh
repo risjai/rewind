@@ -1,41 +1,28 @@
 #!/bin/bash
-# This script is recorded by asciinema to produce the demo GIF.
-# It runs non-interactively — no TUI (can't record interactive TUI via script).
-
+# Demo recording script — proper pacing, highlighted commands
 REWIND="$HOME/workspace/rewind/target/release/rewind"
 
-sleep 0.5
+# Bold green for commands, cyan for prompt
+P='\033[1;36m'  # cyan prompt
+G='\033[1;32m'  # green command
+X='\033[0m'     # reset
 
-# Show the trace
-echo "$ rewind show latest"
+# Command 1: Show the full trace — the hero output
+echo -e "${P}❯${X} ${G}rewind show latest${X}"
 sleep 0.3
 $REWIND show latest
-sleep 2
+sleep 4
 
-# Show the diff
+# Command 2: Diff the main vs fixed timeline
 echo ""
-echo "$ rewind diff latest main fixed"
+echo -e "${P}❯${X} ${G}rewind diff latest main fixed${X}"
 sleep 0.3
 $REWIND diff latest main fixed
-sleep 2
+sleep 3.5
 
-# Show instant replay cache
+# Command 3: List sessions
 echo ""
-echo "$ rewind cache"
-sleep 0.3
-$REWIND cache
-sleep 1.5
-
-# Show snapshots
-echo ""
-echo "$ rewind snapshots"
-sleep 0.3
-$REWIND snapshots 2>/dev/null || echo "  (no snapshots yet — use: rewind snapshot . --label checkpoint)"
-sleep 1.5
-
-# Show sessions
-echo ""
-echo "$ rewind sessions"
+echo -e "${P}❯${X} ${G}rewind sessions${X}"
 sleep 0.3
 $REWIND sessions
-sleep 1.5
+sleep 2.5
