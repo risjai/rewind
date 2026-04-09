@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
+use rewind_assert::{AssertionEngine, BaselineManager, Tolerance};
 use rewind_proxy::ProxyServer;
 use rewind_replay::ReplayEngine;
 use rewind_store::Store;
@@ -108,6 +109,64 @@ enum Commands {
 
     /// Seed demo data to showcase the tool
     Demo,
+
+    /// Regression testing — create baselines and check sessions against them
+    Assert {
+        #[command(subcommand)]
+        action: AssertAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum AssertAction {
+    /// Create a baseline from a recorded session
+    Baseline {
+        /// Session ID, prefix, or "latest"
+        #[arg(default_value = "latest")]
+        session: String,
+
+        /// Unique name for this baseline
+        #[arg(short, long)]
+        name: String,
+
+        /// Optional description
+        #[arg(short, long, default_value = "")]
+        description: String,
+    },
+
+    /// Check a session against a baseline for regressions
+    Check {
+        /// Session ID, prefix, or "latest"
+        #[arg(default_value = "latest")]
+        session: String,
+
+        /// Baseline name to check against
+        #[arg(long)]
+        against: String,
+
+        /// Token tolerance percentage (default: 20)
+        #[arg(long, default_value = "20")]
+        token_tolerance: u32,
+
+        /// Treat model changes as warnings instead of failures
+        #[arg(long)]
+        warn_model_change: bool,
+    },
+
+    /// List all baselines
+    List,
+
+    /// Show baseline details
+    Show {
+        /// Baseline name
+        name: String,
+    },
+
+    /// Delete a baseline
+    Delete {
+        /// Baseline name
+        name: String,
+    },
 }
 
 #[tokio::main]
@@ -133,6 +192,13 @@ async fn main() -> Result<()> {
         Commands::Snapshots => cmd_snapshots(),
         Commands::Cache => cmd_cache(),
         Commands::Demo => cmd_demo(),
+        Commands::Assert { action } => match action {
+            AssertAction::Baseline { session, name, description } => cmd_assert_baseline(session, name, description),
+            AssertAction::Check { session, against, token_tolerance, warn_model_change } => cmd_assert_check(session, against, token_tolerance, warn_model_change),
+            AssertAction::List => cmd_assert_list(),
+            AssertAction::Show { name } => cmd_assert_show(name),
+            AssertAction::Delete { name } => cmd_assert_delete(name),
+        },
     }
 }
 
@@ -373,12 +439,23 @@ fn cmd_demo() -> Result<()> {
     let store = Store::open_default()?;
     seed_demo_data(&store)?;
 
+    // Create a demo baseline from the session
+    let session = store.get_latest_session()?.context("No session after demo seed")?;
+    let timeline = store.get_root_timeline(&session.id)?.context("No timeline")?;
+    let manager = BaselineManager::new(&store);
+    // Only create if it doesn't already exist
+    if manager.get_baseline("demo-baseline")?.is_none() {
+        manager.create_baseline(&session.id, &timeline.id, "demo-baseline", "Demo baseline for regression testing")?;
+        println!("  {} Created demo baseline: {}", "✓".green(), "demo-baseline".cyan());
+    }
+
     println!("  {} Demo session created!", "✓".green().bold());
     println!();
     println!("  Try these commands:");
     println!("    {} — list all sessions", "rewind sessions".green());
     println!("    {} — see the trace", "rewind show latest".green());
     println!("    {} — interactive TUI", "rewind inspect latest".green());
+    println!("    {} — check for regressions", "rewind assert check latest --against demo-baseline".green());
     println!();
     Ok(())
 }
@@ -531,6 +608,250 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0))
     }
+}
+
+// ── Assert commands ──────────────────────────────────────────
+
+fn cmd_assert_baseline(session_ref: String, name: String, description: String) -> Result<()> {
+    let store = Store::open_default()?;
+    let session = resolve_session(&store, &session_ref)?;
+    let timeline = store.get_root_timeline(&session.id)?
+        .context("No timeline found for session")?;
+
+    let manager = BaselineManager::new(&store);
+    let baseline = manager.create_baseline(&session.id, &timeline.id, &name, &description)?;
+
+    println!("{}", "⏪ Rewind — Baseline Created".cyan().bold());
+    println!();
+    println!("  {} {}", "Name:".dimmed(), baseline.name.white().bold());
+    println!("  {} {}", "Source:".dimmed(), session.name.dimmed());
+    println!("  {} {}", "Steps:".dimmed(), baseline.step_count.to_string().yellow());
+    println!("  {} {}", "Tokens:".dimmed(), baseline.total_tokens.to_string().blue());
+    println!();
+    println!("  Check against it: {}", format!("rewind assert check latest --against {}", name).green());
+    Ok(())
+}
+
+fn cmd_assert_check(session_ref: String, against: String, token_tolerance: u32, warn_model_change: bool) -> Result<()> {
+    let store = Store::open_default()?;
+    let session = resolve_session(&store, &session_ref)?;
+    let timeline = store.get_root_timeline(&session.id)?
+        .context("No timeline found for session")?;
+
+    let manager = BaselineManager::new(&store);
+    let baseline = manager.get_baseline(&against)?
+        .context(format!("Baseline '{}' not found", against))?;
+    let baseline_steps = manager.get_baseline_steps(&baseline.id)?;
+
+    let engine = ReplayEngine::new(&store);
+    let actual_steps = engine.get_full_timeline_steps(&timeline.id, &session.id)?;
+
+    let tolerance = Tolerance::default()
+        .with_token_pct(token_tolerance);
+    let tolerance = Tolerance {
+        model_change_is_warning: warn_model_change,
+        ..tolerance
+    };
+
+    let checker = AssertionEngine::new(&store, tolerance);
+    let result = checker.check(
+        &baseline.id,
+        &baseline.name,
+        &baseline_steps,
+        &actual_steps,
+        &session.id,
+        &timeline.id,
+    )?;
+
+    // Print header
+    println!("{}", "⏪ Rewind — Assertion Check".cyan().bold());
+    println!();
+    println!(
+        "  {} {} ({})",
+        "Baseline:".dimmed(),
+        baseline.name.white().bold(),
+        format!("{} steps", baseline.step_count).dimmed(),
+    );
+    let short_id = &session.id[..12.min(session.id.len())];
+    println!(
+        "  {} {} ({})",
+        "Session:".dimmed(),
+        short_id.white().bold(),
+        session.name.dimmed(),
+    );
+    println!(
+        "  {} tokens ±{}%, model changes = {}",
+        "Tolerance:".dimmed(),
+        token_tolerance,
+        if warn_model_change { "warn" } else { "fail" },
+    );
+    println!();
+
+    // Print per-step results
+    use rewind_assert::checker::StepVerdict;
+    for (i, step_result) in result.step_results.iter().enumerate() {
+        let connector = if i == 0 {
+            "┌"
+        } else if i == result.step_results.len() - 1 {
+            "└"
+        } else {
+            "├"
+        };
+
+        let verdict_str = match &step_result.verdict {
+            StepVerdict::Pass => format!("{} PASS", "✓".green()),
+            StepVerdict::Warn => format!("{} WARN", "⚠".yellow()),
+            StepVerdict::Fail => format!("{} FAIL", "✗".red().bold()),
+            StepVerdict::Missing => format!("{} MISSING", "∅".red()),
+            StepVerdict::Extra => format!("{} EXTRA", "+".yellow()),
+        };
+
+        // Find step type from baseline or actual
+        let step_type_label = if let Some(bs) = baseline_steps.iter().find(|s| s.step_number == step_result.step_number) {
+            match bs.step_type.as_str() {
+                "llm_call" => "🧠 LLM Call",
+                "tool_call" => "🔧 Tool Call",
+                "tool_result" => "📋 Tool Result",
+                _ => "  Step",
+            }
+        } else {
+            "  Step"
+        };
+
+        // Find the most important check message
+        let detail = step_result.checks.iter()
+            .find(|c| !c.passed)
+            .or_else(|| step_result.checks.first())
+            .map(|c| c.message.clone())
+            .unwrap_or_default();
+
+        println!(
+            "  {} Step {:>2}  {}  {}  {}",
+            connector.dimmed(),
+            step_result.step_number,
+            step_type_label,
+            verdict_str,
+            detail.dimmed(),
+        );
+    }
+
+    // Summary
+    println!();
+    if result.passed {
+        println!(
+            "  {} {} ({} passed, {} warnings)",
+            "Result:".dimmed(),
+            "PASSED".green().bold(),
+            result.summary.passed_checks,
+            result.summary.warnings,
+        );
+    } else {
+        println!(
+            "  {} {} ({} passed, {} failed, {} warnings)",
+            "Result:".dimmed(),
+            "FAILED".red().bold(),
+            result.summary.passed_checks,
+            result.summary.failed_checks,
+            result.summary.warnings,
+        );
+    }
+    println!();
+
+    if !result.passed {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn cmd_assert_list() -> Result<()> {
+    let store = Store::open_default()?;
+    let manager = BaselineManager::new(&store);
+    let baselines = manager.list_baselines()?;
+
+    if baselines.is_empty() {
+        println!("{}", "No baselines yet.".dimmed());
+        println!("  Create one: {}", "rewind assert baseline latest --name my-baseline".green());
+        return Ok(());
+    }
+
+    println!("{}", "⏪ Rewind Baselines".cyan().bold());
+    println!();
+    println!(
+        "  {:>20} {:>12} {:>6} {:>10} {}",
+        "NAME".dimmed(), "SOURCE".dimmed(), "STEPS".dimmed(), "TOKENS".dimmed(), "CREATED".dimmed(),
+    );
+    println!("  {}", "─".repeat(65).dimmed());
+
+    for bl in &baselines {
+        let short_src = &bl.source_session_id[..12.min(bl.source_session_id.len())];
+        let ago = format_time_ago(bl.created_at);
+        println!(
+            "  {:>20} {:>12} {:>6} {:>10} {}",
+            bl.name.white().bold(),
+            short_src.dimmed(),
+            bl.step_count.to_string().yellow(),
+            bl.total_tokens.to_string().blue(),
+            ago.dimmed(),
+        );
+    }
+    println!();
+    Ok(())
+}
+
+fn cmd_assert_show(name: String) -> Result<()> {
+    let store = Store::open_default()?;
+    let manager = BaselineManager::new(&store);
+    let baseline = manager.get_baseline(&name)?
+        .context(format!("Baseline '{}' not found", name))?;
+    let steps = manager.get_baseline_steps(&baseline.id)?;
+
+    println!("{}", "⏪ Rewind — Baseline Detail".cyan().bold());
+    println!();
+    println!("  {} {}", "Name:".dimmed(), baseline.name.white().bold());
+    println!("  {} {}", "ID:".dimmed(), baseline.id.dimmed());
+    println!("  {} {}", "Source Session:".dimmed(), baseline.source_session_id.dimmed());
+    println!("  {} {}", "Steps:".dimmed(), baseline.step_count.to_string().yellow());
+    println!("  {} {}", "Tokens:".dimmed(), baseline.total_tokens.to_string().blue());
+    if !baseline.description.is_empty() {
+        println!("  {} {}", "Description:".dimmed(), baseline.description);
+    }
+    println!();
+    println!("  {}", "Expected Steps:".dimmed());
+
+    for step in &steps {
+        let type_icon = match step.step_type.as_str() {
+            "llm_call" => "🧠",
+            "tool_call" => "🔧",
+            "tool_result" => "📋",
+            _ => "  ",
+        };
+
+        let tool_info = step.tool_name.as_deref()
+            .map(|t| format!(" → {}", t.cyan()))
+            .unwrap_or_default();
+
+        println!(
+            "    Step {:>2}  {} {:>10}  {}↓ {}↑{}{}",
+            step.step_number,
+            type_icon,
+            step.expected_model.magenta(),
+            step.tokens_in.to_string().blue(),
+            step.tokens_out.to_string().blue(),
+            tool_info,
+            if step.has_error { format!(" {}", "ERROR".red()) } else { String::new() },
+        );
+    }
+    println!();
+    Ok(())
+}
+
+fn cmd_assert_delete(name: String) -> Result<()> {
+    let store = Store::open_default()?;
+    let manager = BaselineManager::new(&store);
+    manager.delete_baseline(&name)?;
+
+    println!("  {} Baseline '{}' deleted.", "✓".green(), name);
+    Ok(())
 }
 
 // ── Demo data seeding ─────────────────────────────────────────

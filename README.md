@@ -137,6 +137,43 @@ rewind cache   # see stats
 
 This is especially useful for iterative development — re-run your agent 20 times while tweaking a prompt, and only the changed steps hit the LLM.
 
+### Regression Testing — assert your agent still works
+
+Turn any recorded session into a regression baseline. After changing prompts or code, check the new behavior against the baseline:
+
+```bash
+# Create a baseline from a known-good session
+rewind assert baseline latest --name "booking-happy-path"
+
+# After changes, check the new session for regressions
+rewind assert check latest --against "booking-happy-path"
+```
+
+```
+⏪ Rewind — Assertion Check
+
+  Baseline: booking-happy-path (5 steps)
+  Session:  a3f9e28c (latest)
+  Tolerance: tokens ±20%, model changes = fail
+
+  ┌ Step  1  🧠 LLM Call   ✓ PASS  match
+  ├ Step  2  📋 Tool Result ✓ PASS  match
+  ├ Step  3  🧠 LLM Call   ✓ PASS  tokens OK (312→298, -4.5%)
+  ├ Step  4  📋 Tool Result ✓ PASS  match
+  └ Step  5  🧠 LLM Call   ✗ FAIL  NEW ERROR: hallucination
+
+  Result: FAILED (4 passed, 1 failed, 0 warnings)
+```
+
+Checks step types, models, tool calls, error status, and token usage. Use in CI:
+
+```python
+from rewind_agent import Assertions
+
+result = Assertions().check("booking-happy-path", "latest")
+assert result.passed, f"Regression: {result.failed_checks} checks failed"
+```
+
 ### Snapshots — workspace checkpoint/restore
 
 Before your agent starts modifying files, take a snapshot. If it goes wrong, restore in one command.
@@ -350,6 +387,11 @@ result = crew.kickoff()
 | `rewind restore <id\|label>` | Restore workspace from a snapshot |
 | `rewind snapshots` | List all snapshots |
 | `rewind cache` | Show instant replay cache statistics |
+| `rewind assert baseline <id> --name <name>` | Create a regression baseline from a session |
+| `rewind assert check <id> --against <name>` | Check a session against a baseline |
+| `rewind assert list` | List all baselines |
+| `rewind assert show <name>` | Show baseline step signatures |
+| `rewind assert delete <name>` | Delete a baseline |
 | `rewind demo` | Seed demo data to explore without API keys |
 
 ## Compatibility
@@ -372,6 +414,7 @@ rewind/
 │   ├── rewind-proxy/      HTTP proxy with SSE streaming
 │   ├── rewind-store/      SQLite + content-addressed blob store
 │   ├── rewind-replay/     Fork engine, timeline DAG, diffing
+│   ├── rewind-assert/     Regression testing — baselines and assertion checks
 │   ├── rewind-tui/        Interactive terminal UI (ratatui)
 │   └── rewind-mcp/        MCP server for AI assistant integration
 ├── python/
@@ -428,6 +471,11 @@ cargo build --release -p rewind-mcp
 | `fork_timeline` | Create a fork at a specific step |
 | `list_snapshots` | List workspace snapshots |
 | `cache_stats` | Instant Replay cache statistics |
+| `create_baseline` | Create a regression baseline from a session |
+| `check_baseline` | Check a session against a baseline for regressions |
+| `list_baselines` | List all baselines |
+| `show_baseline` | Show baseline details and expected step signatures |
+| `delete_baseline` | Delete a baseline |
 
 ### Example
 
@@ -452,7 +500,7 @@ Rewind is in active development. Here's what's coming:
 - [ ] **Web UI** — Browser-based timeline explorer with interactive context window viewer
 - [ ] **Fork-and-execute** — Edit context at a fork point, re-run live from there (hermetic replay + live execution)
 - [ ] **Live breakpoints** — Pause a running agent at any step, inspect state, modify, resume
-- [ ] **Semantic regression** — "This agent handled this input correctly last week — what changed?"
+- [x] **Semantic regression** — `rewind assert` baseline/check for regression testing
 - [ ] **Rewind Cloud** — Share sessions with teammates, persistent storage, alerts on agent failures
 
 ## Why "Rewind"?

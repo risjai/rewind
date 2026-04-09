@@ -6,6 +6,7 @@ use rmcp::{
     model::*,
     tool, tool_handler, tool_router,
 };
+use rewind_assert::{AssertionEngine, BaselineManager, Tolerance};
 use rewind_replay::ReplayEngine;
 use rewind_store::Store;
 use schemars::JsonSchema;
@@ -51,6 +52,38 @@ pub struct ForkTimelineParams {
 
 fn default_fork_label() -> String {
     "fork".to_string()
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CreateBaselineParams {
+    /// Session ID, prefix, or "latest"
+    pub session: String,
+    /// Unique name for this baseline
+    pub name: String,
+    /// Optional description
+    #[serde(default)]
+    pub description: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CheckBaselineParams {
+    /// Session ID, prefix, or "latest" — the session to check
+    pub session: String,
+    /// Baseline name to check against
+    pub against: String,
+    /// Token tolerance percentage (default: 20)
+    #[serde(default = "default_token_tolerance")]
+    pub token_tolerance: u32,
+}
+
+fn default_token_tolerance() -> u32 {
+    20
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BaselineNameParam {
+    /// Baseline name
+    pub name: String,
 }
 
 // ── Response types ───────────────────────────────────────────
@@ -355,6 +388,199 @@ impl RewindMcp {
         });
         ok_json(&json)
     }
+
+    // ── Assertion / Baseline tools ──────────────────────────
+
+    #[tool(
+        name = "create_baseline",
+        description = "Create an assertion baseline from a recorded session. \
+            Extracts step signatures (types, models, tool names, token counts) \
+            for regression comparison. The baseline name must be unique."
+    )]
+    async fn create_baseline(
+        &self,
+        params: Parameters<CreateBaselineParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let params = &params.0;
+        let store = self.lock_store()?;
+        let sess = resolve_session(&store, &params.session)?;
+        let root = store
+            .get_root_timeline(&sess.id)
+            .map_err(|e| mcp_err(&e))?
+            .ok_or_else(|| mcp_err_str("No root timeline found"))?;
+
+        let manager = BaselineManager::new(&store);
+        let baseline = manager
+            .create_baseline(&sess.id, &root.id, &params.name, &params.description)
+            .map_err(|e| mcp_err(&e))?;
+
+        let json = serde_json::json!({
+            "baseline": {
+                "id": baseline.id,
+                "name": baseline.name,
+                "source_session_id": baseline.source_session_id,
+                "step_count": baseline.step_count,
+                "total_tokens": baseline.total_tokens,
+            },
+            "message": format!(
+                "Baseline '{}' created with {} steps. Check with: check_baseline(session, against='{}')",
+                baseline.name, baseline.step_count, baseline.name
+            ),
+        });
+        ok_json(&json)
+    }
+
+    #[tool(
+        name = "check_baseline",
+        description = "Check a session against a baseline for regressions. \
+            Compares step types, models, error status, tool names, and token usage. \
+            Returns per-step pass/warn/fail verdicts and an overall result."
+    )]
+    async fn check_baseline(
+        &self,
+        params: Parameters<CheckBaselineParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let params = &params.0;
+        let store = self.lock_store()?;
+        let sess = resolve_session(&store, &params.session)?;
+        let root = store
+            .get_root_timeline(&sess.id)
+            .map_err(|e| mcp_err(&e))?
+            .ok_or_else(|| mcp_err_str("No root timeline found"))?;
+
+        let manager = BaselineManager::new(&store);
+        let baseline = manager
+            .get_baseline(&params.against)
+            .map_err(|e| mcp_err(&e))?
+            .ok_or_else(|| mcp_err_str(&format!("Baseline '{}' not found", params.against)))?;
+        let baseline_steps = manager
+            .get_baseline_steps(&baseline.id)
+            .map_err(|e| mcp_err(&e))?;
+
+        let engine = ReplayEngine::new(&store);
+        let actual_steps = engine
+            .get_full_timeline_steps(&root.id, &sess.id)
+            .map_err(|e| mcp_err(&e))?;
+
+        let tolerance = Tolerance::default().with_token_pct(params.token_tolerance);
+        let checker = AssertionEngine::new(&store, tolerance);
+        let result = checker
+            .check(
+                &baseline.id,
+                &baseline.name,
+                &baseline_steps,
+                &actual_steps,
+                &sess.id,
+                &root.id,
+            )
+            .map_err(|e| mcp_err(&e))?;
+
+        let json = serde_json::to_value(&result).map_err(|e| mcp_err(&e))?;
+        ok_json(&json)
+    }
+
+    #[tool(
+        name = "list_baselines",
+        description = "List all assertion baselines with names, source sessions, \
+            step counts, and creation times."
+    )]
+    async fn list_baselines(&self) -> Result<CallToolResult, McpError> {
+        let store = self.lock_store()?;
+        let manager = BaselineManager::new(&store);
+        let baselines = manager.list_baselines().map_err(|e| mcp_err(&e))?;
+
+        let items: Vec<serde_json::Value> = baselines
+            .iter()
+            .map(|b| {
+                serde_json::json!({
+                    "name": b.name,
+                    "source_session_id": b.source_session_id,
+                    "step_count": b.step_count,
+                    "total_tokens": b.total_tokens,
+                    "description": b.description,
+                    "created_at": b.created_at.to_rfc3339(),
+                })
+            })
+            .collect();
+
+        let json = serde_json::json!({
+            "baselines": items,
+            "count": items.len(),
+        });
+        ok_json(&json)
+    }
+
+    #[tool(
+        name = "show_baseline",
+        description = "Show detailed baseline information including all expected \
+            step signatures (types, models, tool names, token expectations)."
+    )]
+    async fn show_baseline(
+        &self,
+        params: Parameters<BaselineNameParam>,
+    ) -> Result<CallToolResult, McpError> {
+        let store = self.lock_store()?;
+        let manager = BaselineManager::new(&store);
+        let baseline = manager
+            .get_baseline(&params.0.name)
+            .map_err(|e| mcp_err(&e))?
+            .ok_or_else(|| mcp_err_str(&format!("Baseline '{}' not found", params.0.name)))?;
+        let steps = manager
+            .get_baseline_steps(&baseline.id)
+            .map_err(|e| mcp_err(&e))?;
+
+        let step_items: Vec<serde_json::Value> = steps
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "step_number": s.step_number,
+                    "step_type": s.step_type,
+                    "expected_status": s.expected_status,
+                    "expected_model": s.expected_model,
+                    "tokens_in": s.tokens_in,
+                    "tokens_out": s.tokens_out,
+                    "tool_name": s.tool_name,
+                    "has_error": s.has_error,
+                })
+            })
+            .collect();
+
+        let json = serde_json::json!({
+            "baseline": {
+                "id": baseline.id,
+                "name": baseline.name,
+                "source_session_id": baseline.source_session_id,
+                "source_timeline_id": baseline.source_timeline_id,
+                "step_count": baseline.step_count,
+                "total_tokens": baseline.total_tokens,
+                "description": baseline.description,
+                "created_at": baseline.created_at.to_rfc3339(),
+            },
+            "expected_steps": step_items,
+        });
+        ok_json(&json)
+    }
+
+    #[tool(
+        name = "delete_baseline",
+        description = "Delete an assertion baseline by name."
+    )]
+    async fn delete_baseline(
+        &self,
+        params: Parameters<BaselineNameParam>,
+    ) -> Result<CallToolResult, McpError> {
+        let store = self.lock_store()?;
+        let manager = BaselineManager::new(&store);
+        manager
+            .delete_baseline(&params.0.name)
+            .map_err(|e| mcp_err(&e))?;
+
+        let json = serde_json::json!({
+            "deleted": params.0.name,
+            "message": format!("Baseline '{}' deleted.", params.0.name),
+        });
+        ok_json(&json)
+    }
 }
 
 // ── ServerHandler implementation ─────────────────────────────
@@ -367,7 +593,9 @@ impl ServerHandler for RewindMcp {
             "Rewind is a time-travel debugger for AI agents. \
              Use these tools to inspect recorded agent sessions, \
              view step-by-step traces, examine full request/response content, \
-             diff timelines, and create forks to explore alternative paths."
+             diff timelines, and create forks to explore alternative paths. \
+             Use assertion baselines to create regression tests from known-good sessions \
+             and check new sessions for regressions."
                 .to_string(),
         );
         info

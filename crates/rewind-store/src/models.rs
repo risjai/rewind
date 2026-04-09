@@ -252,3 +252,69 @@ impl Step {
         }
     }
 }
+
+// ── Assertion Baselines ──────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Baseline {
+    pub id: String,
+    pub name: String,
+    pub source_session_id: String,
+    pub source_timeline_id: String,
+    pub created_at: DateTime<Utc>,
+    pub description: String,
+    pub step_count: u32,
+    pub total_tokens: u64,
+    pub metadata: serde_json::Value,
+}
+
+impl Baseline {
+    pub fn new(name: &str, source_session_id: &str, source_timeline_id: &str, description: &str, step_count: u32, total_tokens: u64) -> Self {
+        Baseline {
+            id: Uuid::new_v4().to_string(),
+            name: name.to_string(),
+            source_session_id: source_session_id.to_string(),
+            source_timeline_id: source_timeline_id.to_string(),
+            created_at: Utc::now(),
+            description: description.to_string(),
+            step_count,
+            total_tokens,
+            metadata: serde_json::json!({}),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BaselineStep {
+    pub id: String,
+    pub baseline_id: String,
+    pub step_number: u32,
+    pub step_type: String,
+    pub expected_status: String,
+    pub expected_model: String,
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    pub tool_name: Option<String>,
+    pub response_blob: String,
+    pub request_blob: String,
+    pub has_error: bool,
+}
+
+impl BaselineStep {
+    pub fn from_step(baseline_id: &str, step: &Step, tool_name: Option<String>) -> Self {
+        BaselineStep {
+            id: Uuid::new_v4().to_string(),
+            baseline_id: baseline_id.to_string(),
+            step_number: step.step_number,
+            step_type: step.step_type.as_str().to_string(),
+            expected_status: step.status.as_str().to_string(),
+            expected_model: step.model.clone(),
+            tokens_in: step.tokens_in,
+            tokens_out: step.tokens_out,
+            tool_name,
+            response_blob: step.response_blob.clone(),
+            request_blob: step.request_blob.clone(),
+            has_error: step.error.is_some(),
+        }
+    }
+}

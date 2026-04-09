@@ -12,6 +12,7 @@ rewind-store = { path = "../rewind-store" }
 rewind-proxy = { path = "../rewind-proxy" }
 rewind-replay = { path = "../rewind-replay" }
 rewind-tui = { path = "../rewind-tui" }
+rewind-assert = { path = "../rewind-assert" }
 tokio = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }

@@ -6,6 +6,7 @@ members = [
     "crates/rewind-tui",
     "crates/rewind-replay",
     "crates/rewind-mcp",
+    "crates/rewind-assert",
 ]
 resolver = "2"
 

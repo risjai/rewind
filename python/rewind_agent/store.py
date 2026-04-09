@@ -117,6 +117,38 @@ CREATE TABLE IF NOT EXISTS snapshots (
     size_bytes INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS baselines (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    source_session_id TEXT NOT NULL REFERENCES sessions(id),
+    source_timeline_id TEXT NOT NULL REFERENCES timelines(id),
+    created_at TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    step_count INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0,
+    metadata TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_baselines_name ON baselines(name);
+
+CREATE TABLE IF NOT EXISTS baseline_steps (
+    id TEXT PRIMARY KEY,
+    baseline_id TEXT NOT NULL REFERENCES baselines(id) ON DELETE CASCADE,
+    step_number INTEGER NOT NULL,
+    step_type TEXT NOT NULL,
+    expected_status TEXT NOT NULL,
+    expected_model TEXT NOT NULL DEFAULT '',
+    tokens_in INTEGER NOT NULL DEFAULT 0,
+    tokens_out INTEGER NOT NULL DEFAULT 0,
+    tool_name TEXT,
+    response_blob TEXT NOT NULL DEFAULT '',
+    request_blob TEXT NOT NULL DEFAULT '',
+    has_error INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_baseline_steps_baseline
+    ON baseline_steps(baseline_id, step_number);
 """
 
 

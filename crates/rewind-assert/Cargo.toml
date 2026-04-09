@@ -1,21 +1,14 @@
 [package]
-name = "rewind-mcp"
+name = "rewind-assert"
 version.workspace = true
 edition.workspace = true
-
-[[bin]]
-name = "rewind-mcp"
-path = "src/main.rs"
 
 [dependencies]
 rewind-store = { path = "../rewind-store" }
 rewind-replay = { path = "../rewind-replay" }
-rewind-assert = { path = "../rewind-assert" }
-rmcp = { workspace = true }
-schemars = { workspace = true }
-tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }

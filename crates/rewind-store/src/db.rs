@@ -105,6 +105,40 @@ impl Store {
                 size_bytes INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             );
+
+            -- Assertion baselines: extracted from known-good sessions
+            CREATE TABLE IF NOT EXISTS baselines (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                source_session_id TEXT NOT NULL REFERENCES sessions(id),
+                source_timeline_id TEXT NOT NULL REFERENCES timelines(id),
+                created_at TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                step_count INTEGER NOT NULL DEFAULT 0,
+                total_tokens INTEGER NOT NULL DEFAULT 0,
+                metadata TEXT NOT NULL DEFAULT '{}'
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_baselines_name ON baselines(name);
+
+            -- Baseline steps: expected step signatures for regression checks
+            CREATE TABLE IF NOT EXISTS baseline_steps (
+                id TEXT PRIMARY KEY,
+                baseline_id TEXT NOT NULL REFERENCES baselines(id) ON DELETE CASCADE,
+                step_number INTEGER NOT NULL,
+                step_type TEXT NOT NULL,
+                expected_status TEXT NOT NULL,
+                expected_model TEXT NOT NULL DEFAULT '',
+                tokens_in INTEGER NOT NULL DEFAULT 0,
+                tokens_out INTEGER NOT NULL DEFAULT 0,
+                tool_name TEXT,
+                response_blob TEXT NOT NULL DEFAULT '',
+                request_blob TEXT NOT NULL DEFAULT '',
+                has_error INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_baseline_steps_baseline
+                ON baseline_steps(baseline_id, step_number);
             ",
         )?;
         Ok(())
@@ -430,6 +464,148 @@ impl Store {
             return Ok(Some(s.clone()));
         }
         Ok(None)
+    }
+
+    // ── Baselines ─────────────────────────────────────────────
+
+    pub fn create_baseline(&self, baseline: &Baseline) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO baselines (id, name, source_session_id, source_timeline_id, created_at, description, step_count, total_tokens, metadata)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                baseline.id,
+                baseline.name,
+                baseline.source_session_id,
+                baseline.source_timeline_id,
+                baseline.created_at.to_rfc3339(),
+                baseline.description,
+                baseline.step_count,
+                baseline.total_tokens,
+                baseline.metadata.to_string(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_baselines(&self) -> Result<Vec<Baseline>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, source_session_id, source_timeline_id, created_at, description, step_count, total_tokens, metadata
+             FROM baselines ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(Baseline {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                source_session_id: row.get(2)?,
+                source_timeline_id: row.get(3)?,
+                created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
+                    .unwrap()
+                    .with_timezone(&chrono::Utc),
+                description: row.get(5)?,
+                step_count: row.get(6)?,
+                total_tokens: row.get(7)?,
+                metadata: serde_json::from_str(&row.get::<_, String>(8)?).unwrap_or_default(),
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn get_baseline_by_name(&self, name: &str) -> Result<Option<Baseline>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, source_session_id, source_timeline_id, created_at, description, step_count, total_tokens, metadata
+             FROM baselines WHERE name = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![name], |row| {
+            Ok(Baseline {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                source_session_id: row.get(2)?,
+                source_timeline_id: row.get(3)?,
+                created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
+                    .unwrap()
+                    .with_timezone(&chrono::Utc),
+                description: row.get(5)?,
+                step_count: row.get(6)?,
+                total_tokens: row.get(7)?,
+                metadata: serde_json::from_str(&row.get::<_, String>(8)?).unwrap_or_default(),
+            })
+        })?;
+        Ok(rows.next().transpose()?)
+    }
+
+    pub fn get_baseline(&self, id: &str) -> Result<Option<Baseline>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, source_session_id, source_timeline_id, created_at, description, step_count, total_tokens, metadata
+             FROM baselines WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![id], |row| {
+            Ok(Baseline {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                source_session_id: row.get(2)?,
+                source_timeline_id: row.get(3)?,
+                created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
+                    .unwrap()
+                    .with_timezone(&chrono::Utc),
+                description: row.get(5)?,
+                step_count: row.get(6)?,
+                total_tokens: row.get(7)?,
+                metadata: serde_json::from_str(&row.get::<_, String>(8)?).unwrap_or_default(),
+            })
+        })?;
+        Ok(rows.next().transpose()?)
+    }
+
+    pub fn delete_baseline(&self, id: &str) -> Result<()> {
+        // baseline_steps cascade on delete
+        self.conn.execute("DELETE FROM baselines WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn create_baseline_step(&self, step: &BaselineStep) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO baseline_steps (id, baseline_id, step_number, step_type, expected_status, expected_model, tokens_in, tokens_out, tool_name, response_blob, request_blob, has_error)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                step.id,
+                step.baseline_id,
+                step.step_number,
+                step.step_type,
+                step.expected_status,
+                step.expected_model,
+                step.tokens_in,
+                step.tokens_out,
+                step.tool_name,
+                step.response_blob,
+                step.request_blob,
+                step.has_error as i32,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_baseline_steps(&self, baseline_id: &str) -> Result<Vec<BaselineStep>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, baseline_id, step_number, step_type, expected_status, expected_model, tokens_in, tokens_out, tool_name, response_blob, request_blob, has_error
+             FROM baseline_steps WHERE baseline_id = ?1 ORDER BY step_number",
+        )?;
+        let rows = stmt.query_map(params![baseline_id], |row| {
+            Ok(BaselineStep {
+                id: row.get(0)?,
+                baseline_id: row.get(1)?,
+                step_number: row.get(2)?,
+                step_type: row.get(3)?,
+                expected_status: row.get(4)?,
+                expected_model: row.get(5)?,
+                tokens_in: row.get(6)?,
+                tokens_out: row.get(7)?,
+                tool_name: row.get(8)?,
+                response_blob: row.get(9)?,
+                request_blob: row.get(10)?,
+                has_error: row.get::<_, i32>(11)? != 0,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 }
 

@@ -28,6 +28,7 @@ from .hooks import (
     wrap_langgraph,
     wrap_crew,
 )
+from .assertions import Assertions, AssertionResult
 
 __all__ = [
     "init",
@@ -41,5 +42,7 @@ __all__ = [
     "get_annotations",
     "wrap_langgraph",
     "wrap_crew",
+    "Assertions",
+    "AssertionResult",
 ]
 __version__ = "0.3.1"
