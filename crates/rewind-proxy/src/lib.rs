@@ -152,8 +152,8 @@ async fn handle_request(
     let streaming = is_stream_request(&body_bytes);
 
     // ── Instant Replay: check cache before hitting upstream ──
-    if state.instant_replay && !streaming {
-        if let Some(cached) = {
+    if state.instant_replay && !streaming
+        && let Some(cached) = {
             let store = state.store.lock().unwrap();
             store.cache_get(&request_hash).ok().flatten()
         } {
@@ -195,7 +195,6 @@ async fn handle_request(
                 .unwrap();
             return Ok(response);
         }
-    }
 
     let upstream_url = format!("{}{}", state.upstream_base, path);
     let client = make_client();
@@ -501,12 +500,11 @@ fn parse_sse_event(
                 }
             }
             "content_block_start" => {
-                if let Some(block) = event.get("content_block") {
-                    if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                if let Some(block) = event.get("content_block")
+                    && block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
                         *has_tool_calls = true;
                         tool_calls.push(block.clone());
                     }
-                }
             }
             "content_block_delta" => {
                 if let Some(delta) = event.get("delta") {
@@ -529,11 +527,10 @@ fn parse_sse_event(
     }
 
     // Model field at top level (OpenAI)
-    if let Some(m) = event.get("model").and_then(|m| m.as_str()) {
-        if !m.is_empty() {
+    if let Some(m) = event.get("model").and_then(|m| m.as_str())
+        && !m.is_empty() {
             *model = m.to_string();
         }
-    }
 }
 
 /// Build a synthetic complete response from accumulated streaming data
@@ -649,11 +646,10 @@ fn is_tool_call_response(resp_bytes: &[u8]) -> bool {
 
     if let Some(choices) = val.get("choices").and_then(|c| c.as_array()) {
         for choice in choices {
-            if let Some(msg) = choice.get("message") {
-                if msg.get("tool_calls").and_then(|t| t.as_array()).map_or(false, |a| !a.is_empty()) {
+            if let Some(msg) = choice.get("message")
+                && msg.get("tool_calls").and_then(|t| t.as_array()).is_some_and(|a| !a.is_empty()) {
                     return true;
                 }
-            }
         }
     }
 

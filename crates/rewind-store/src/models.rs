@@ -33,7 +33,7 @@ impl SessionStatus {
         }
     }
 
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         match s {
             "recording" => SessionStatus::Recording,
             "completed" => SessionStatus::Completed,
@@ -89,7 +89,7 @@ impl StepType {
         }
     }
 
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         match s {
             "llm_call" => StepType::LlmCall,
             "tool_call" => StepType::ToolCall,
@@ -131,7 +131,7 @@ impl StepStatus {
         }
     }
 
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         match s {
             "success" => StepStatus::Success,
             "error" => StepStatus::Error,

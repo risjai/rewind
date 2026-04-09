@@ -153,24 +153,22 @@ impl<'a> ReplayEngine<'a> {
             .and_then(|json_str| {
                 let val: serde_json::Value = serde_json::from_str(&json_str).ok()?;
                 // OpenAI format
-                if let Some(choices) = val.get("choices").and_then(|c| c.as_array()) {
-                    if let Some(msg) = choices.first()
+                if let Some(choices) = val.get("choices").and_then(|c| c.as_array())
+                    && let Some(msg) = choices.first()
                         .and_then(|c| c.get("message"))
                         .and_then(|m| m.get("content"))
                         .and_then(|c| c.as_str())
                     {
                         return Some(msg.chars().take(150).collect());
                     }
-                }
                 // Anthropic format
-                if let Some(content) = val.get("content").and_then(|c| c.as_array()) {
-                    if let Some(text) = content.first()
+                if let Some(content) = val.get("content").and_then(|c| c.as_array())
+                    && let Some(text) = content.first()
                         .and_then(|b| b.get("text"))
                         .and_then(|t| t.as_str())
                     {
                         return Some(text.chars().take(150).collect());
                     }
-                }
                 Some(json_str.chars().take(150).collect())
             })
             .unwrap_or_else(|| "(no response)".to_string());

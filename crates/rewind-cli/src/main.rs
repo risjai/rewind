@@ -266,17 +266,15 @@ fn cmd_show(session_ref: String) -> Result<()> {
         }
 
         // Show response preview
-        if let Ok(data) = store.blobs.get(&step.response_blob) {
-            if let Ok(json_str) = String::from_utf8(data) {
-                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&json_str) {
+        if let Ok(data) = store.blobs.get(&step.response_blob)
+            && let Ok(json_str) = String::from_utf8(data)
+                && let Ok(val) = serde_json::from_str::<serde_json::Value>(&json_str) {
                     let preview = extract_response_preview(&val);
                     if !preview.is_empty() {
                         let truncated: String = preview.chars().take(100).collect();
                         println!("  │   {} {}", "→".dimmed(), truncated.dimmed());
                     }
                 }
-            }
-        }
     }
 
     println!();
@@ -687,6 +685,7 @@ fn seed_demo_data(store: &Store) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_step_with_blobs(
     store: &Store,
     timeline_id: &str,
@@ -775,11 +774,10 @@ fn extract_response_preview(val: &serde_json::Value) -> String {
         return format!("tool_calls: {}", names.join(", "));
     }
     // Anthropic
-    if let Some(content) = val.get("content").and_then(|c| c.as_array()) {
-        if let Some(text) = content.first().and_then(|b| b.get("text")).and_then(|t| t.as_str()) {
+    if let Some(content) = val.get("content").and_then(|c| c.as_array())
+        && let Some(text) = content.first().and_then(|b| b.get("text")).and_then(|t| t.as_str()) {
             return text.replace('\n', " ").chars().take(100).collect();
         }
-    }
     String::new()
 }
 

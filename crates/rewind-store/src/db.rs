@@ -165,7 +165,7 @@ impl Store {
                 updated_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(3)?)
                     .unwrap()
                     .with_timezone(&chrono::Utc),
-                status: SessionStatus::from_str(&row.get::<_, String>(4)?),
+                status: SessionStatus::parse(&row.get::<_, String>(4)?),
                 total_steps: row.get(5)?,
                 total_cost_usd: row.get(6)?,
                 total_tokens: row.get(7)?,
@@ -190,7 +190,7 @@ impl Store {
                 updated_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(3)?)
                     .unwrap()
                     .with_timezone(&chrono::Utc),
-                status: SessionStatus::from_str(&row.get::<_, String>(4)?),
+                status: SessionStatus::parse(&row.get::<_, String>(4)?),
                 total_steps: row.get(5)?,
                 total_cost_usd: row.get(6)?,
                 total_tokens: row.get(7)?,
@@ -286,8 +286,8 @@ impl Store {
                 timeline_id: row.get(1)?,
                 session_id: row.get(2)?,
                 step_number: row.get(3)?,
-                step_type: StepType::from_str(&row.get::<_, String>(4)?),
-                status: StepStatus::from_str(&row.get::<_, String>(5)?),
+                step_type: StepType::parse(&row.get::<_, String>(4)?),
+                status: StepStatus::parse(&row.get::<_, String>(5)?),
                 created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(6)?)
                     .unwrap()
                     .with_timezone(&chrono::Utc),
@@ -315,8 +315,8 @@ impl Store {
                 timeline_id: row.get(1)?,
                 session_id: row.get(2)?,
                 step_number: row.get(3)?,
-                step_type: StepType::from_str(&row.get::<_, String>(4)?),
-                status: StepStatus::from_str(&row.get::<_, String>(5)?),
+                step_type: StepType::parse(&row.get::<_, String>(4)?),
+                status: StepStatus::parse(&row.get::<_, String>(5)?),
                 created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(6)?)
                     .unwrap()
                     .with_timezone(&chrono::Utc),
