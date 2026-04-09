@@ -1,10 +1,10 @@
 #!/bin/sh
 # ⏪ Rewind — Install Script
-# Usage: curl -fsSL https://raw.githubusercontent.com/risjai/rewind/master/install.sh | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/agentoptics/rewind/master/install.sh | sh
 
 set -e
 
-REPO="risjai/rewind"
+REPO="agentoptics/rewind"
 BINARY="rewind"
 INSTALL_DIR="${REWIND_INSTALL_DIR:-/usr/local/bin}"
 

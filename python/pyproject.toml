@@ -48,10 +48,10 @@ anthropic = ["anthropic>=0.18"]
 all = ["openai>=1.0", "anthropic>=0.18"]
 
 [project.urls]
-Homepage = "https://github.com/risjai/rewind"
-Repository = "https://github.com/risjai/rewind"
-Issues = "https://github.com/risjai/rewind/issues"
-Changelog = "https://github.com/risjai/rewind/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/agentoptics/rewind"
+Repository = "https://github.com/agentoptics/rewind"
+Issues = "https://github.com/agentoptics/rewind/issues"
+Changelog = "https://github.com/agentoptics/rewind/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["rewind_agent"]
