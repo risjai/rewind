@@ -9,7 +9,7 @@
   <br/>
   <strong>The time-travel debugger for AI agents</strong>
   <br/>
-  <em>Record. Inspect. Fork. Replay. Diff.</em>
+  <em>Record. Inspect. Fork. Replay from failure. Diff.</em>
   <br/>
   <br/>
   <a href="#the-problem">Why</a> &nbsp;&bull;&nbsp;
@@ -54,7 +54,9 @@ It records every LLM call your agent makes — the full request, response, conte
 | **Inspect** | See the *exact* context window at each step. Every message, system prompt, and tool response the model saw — displayed as human-readable, color-coded views. |
 | **Fork** | Branch the execution timeline at any step. Edit the context (fix a stale tool response, tweak the prompt). Resume from there — re-run only the new steps. |
 | **Diff** | Compare the original and forked timelines. See exactly where they diverge and why. |
+| **Replay from Failure** | Agent fails at step 5? Fix your code, run `rewind replay --from 4`. Steps 1-4 served instantly from cache (0 tokens, 0ms). Only step 5 re-runs live. Diff the result. |
 | **Instant Replay** | Identical requests are served from cache at **0 tokens, 0ms latency**. Run the same agent 10 times — only the first run hits the LLM. |
+| **Regression Testing** | Turn any session into a baseline. After code changes, check the new behavior: step types, models, tool calls, token counts. Run in CI. |
 | **Snapshots** | Capture your entire workspace at any point. Restore in one command if your agent breaks something. No git dependency. |
 
 ### The before/after
@@ -63,11 +65,11 @@ It records every LLM call your agent makes — the full request, response, conte
 Without Rewind                         With Rewind
 ─────────────────                      ─────────────────
 Agent fails on step 5.                 Agent fails on step 5.
-Re-run all 5 steps.                    rewind fork --at 4
-Burn tokens on all 5 calls.            Fix the stale tool response.
-Wait 30 seconds.                       Re-run only step 5.
-Hope it works this time.               1 LLM call. 5 seconds.
-No idea what changed.                  Diff shows exactly what diverged.
+Re-run all 5 steps.                    Fix your code.
+Burn tokens on all 5 calls.            rewind replay latest --from 4
+Wait 30 seconds.                       Steps 1-4: cached (0ms, 0 tokens)
+Hope it works this time.               Step 5: live (1 LLM call, 5 sec)
+No idea what changed.                  rewind diff → see exactly what diverged.
 ```
 
 ## See It in Action
@@ -112,6 +114,44 @@ The trace shows the agent succeeded on steps 1-4, then hallucinated on step 5 be
 ```
 
 Steps 1-4 are shared (zero re-execution). Only step 5 was re-run with corrected context.
+
+### Replay from failure — fix and re-run from any step
+
+The headline feature. Your agent failed at step 5? Fix your code, then replay — steps 1-4 are served from cache (instant, free), only step 5 re-runs live.
+
+```bash
+# Agent failed at step 5 — fix your code, then:
+rewind replay latest --from 4
+```
+
+```
+⏪ Rewind — Fork & Execute Replay
+
+  Session: research-agent
+  Fork at: Step 4
+  Cached:  Steps 1-4 (0ms, 0 tokens)
+  Live:    Steps 5+ (forwarded to upstream)
+
+  → Point your agent at this proxy:
+    export OPENAI_BASE_URL=http://127.0.0.1:8443/v1
+```
+
+Or from Python — no proxy needed:
+
+```python
+import rewind_agent
+
+with rewind_agent.replay("latest", from_step=4):
+    result = my_agent.run("Research Tokyo population")
+    # Steps 1-4: instant cached responses (0ms, 0 tokens)
+    # Step 5+: live LLM calls, recorded to new forked timeline
+```
+
+After the replay, diff the original against the replayed timeline:
+
+```bash
+rewind diff <session> main replayed
+```
 
 ### Instant Replay — same task, 0 tokens
 
@@ -215,6 +255,25 @@ The `rewind inspect` command opens a full terminal UI:
   <img src="https://raw.githubusercontent.com/agentoptics/rewind/master/assets/tui-screenshot.svg" alt="Rewind TUI — interactive debugger" width="800">
 </p>
 
+### Direct recording — zero setup, one line of Python
+
+No proxy, no second terminal, no environment variables. Just add one line and every LLM call is recorded:
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/agentoptics/rewind/master/assets/demo-direct.gif" alt="Rewind direct mode — one line, no proxy" width="800">
+</p>
+
+```python
+import rewind_agent
+import openai
+
+rewind_agent.init()  # that's it — all LLM calls are now recorded
+
+client = openai.OpenAI()
+client.chat.completions.create(model="gpt-4o", messages=[...])
+# Recorded to ~/.rewind/ — inspect with: rewind show latest
+```
+
 ## Install
 
 ### pip (recommended)
@@ -295,23 +354,43 @@ rewind record --upstream https://your-bedrock-gateway.com
 rewind record --upstream http://localhost:11434
 ```
 
-### Python SDK (optional)
+### Two ways to record
+
+Choose the approach that fits your stack:
+
+| | **Direct mode** (Python) | **Proxy mode** (any language) |
+|:---|:---|:---|
+| **Setup** | `rewind_agent.init()` — one line | `rewind record` in a second terminal |
+| **Languages** | Python (OpenAI + Anthropic SDKs) | Any language that makes HTTP calls |
+| **How it works** | Monkey-patches SDK clients in-process | HTTP proxy intercepts LLM traffic |
+| **Streaming** | Captured via stream wrappers | SSE pass-through, zero added latency |
+| **Best for** | Quick iteration, Python agents | Polyglot teams, non-Python agents |
+
+**Direct mode** — add one line, everything is recorded:
 
 ```python
 import rewind_agent
 
-# Auto-patches OpenAI/Anthropic clients to route through the proxy
-rewind_agent.init()
+rewind_agent.init()  # patches OpenAI + Anthropic automatically
 
-# Or use as a context manager
+# Or as a scoped session:
 with rewind_agent.session("my-agent"):
     client = openai.OpenAI()
     client.chat.completions.create(model="gpt-4o", messages=[...])
 ```
 
+**Proxy mode** — works with any language or framework:
+
+```bash
+rewind record --name "my-agent" --upstream https://api.openai.com
+# In another terminal:
+export OPENAI_BASE_URL=http://127.0.0.1:8443/v1
+python3 my_agent.py   # or node, go, rust — anything that calls the LLM
+```
+
 ### Agent hooks — enrich recordings with semantic labels
 
-Without hooks, the proxy records "LLM Call 1", "LLM Call 2". With hooks, steps show up as "search", "plan", "execute" — much more useful when debugging.
+Without hooks, the recording shows "LLM Call 1", "LLM Call 2". With hooks, steps show up as "search", "plan", "execute" — much more useful when debugging.
 
 ```python
 import rewind_agent
@@ -381,6 +460,7 @@ result = crew.kickoff()
 | `rewind sessions` | List all recorded sessions |
 | `rewind show <id\|latest>` | Print a session's step-by-step trace |
 | `rewind inspect <id\|latest>` | Open the interactive TUI |
+| `rewind replay <id> --from <step>` | Replay from a fork point — cached steps instant, live from fork onward |
 | `rewind fork <id> --at <step>` | Create a timeline branch at a specific step |
 | `rewind diff <id> <left> <right>` | Compare two timelines side by side |
 | `rewind snapshot [dir] --label <name>` | Capture workspace state as a checkpoint |
@@ -469,6 +549,7 @@ cargo build --release -p rewind-mcp
 | `get_step_detail` | Full request/response content from blob store |
 | `diff_timelines` | Compare two timelines side by side |
 | `fork_timeline` | Create a fork at a specific step |
+| `replay_session` | Set up fork-and-execute replay with cached/live step split |
 | `list_snapshots` | List workspace snapshots |
 | `cache_stats` | Instant Replay cache statistics |
 | `create_baseline` | Create a regression baseline from a session |
@@ -487,20 +568,21 @@ The assistant calls `show_session` → reads the trace → identifies that step 
 
 ## Roadmap
 
-Rewind is in active development. Here's what's coming:
+Rewind is in active development. Here's what's shipped and what's coming:
 
 | Phase | Features | Status |
 |:------|:---------|:-------|
 | **v0.1** | Record, inspect, fork, diff, TUI, streaming, Instant Replay, Snapshots, Python SDK with hooks, LangGraph + CrewAI adapters | ✅ Shipped |
-| **v0.2** | Web UI, fork-and-execute (live re-run from fork point), multi-agent tracing | Building |
-| **v1.0** | Live breakpoints, Rewind Cloud (team collab), OTel export, semantic regression, on-prem | Planned |
+| **v0.2** | Direct recording (no proxy), fork-and-execute replay, regression testing (`rewind assert`), MCP server, replay context manager | ✅ Shipped |
+| **v0.3** | Web UI, multi-agent tracing, OTel export | Building |
+| **v1.0** | Live breakpoints, Rewind Cloud (team collab), semantic diff, on-prem | Planned |
 
 ### What we're solving next
 
 - [ ] **Web UI** — Browser-based timeline explorer with interactive context window viewer
-- [ ] **Fork-and-execute** — Edit context at a fork point, re-run live from there (hermetic replay + live execution)
+- [ ] **Multi-agent tracing** — Follow execution across parent/child agent handoffs
 - [ ] **Live breakpoints** — Pause a running agent at any step, inspect state, modify, resume
-- [x] **Semantic regression** — `rewind assert` baseline/check for regression testing
+- [ ] **OTel export** — Push traces to Grafana, Datadog, or any OpenTelemetry collector
 - [ ] **Rewind Cloud** — Share sessions with teammates, persistent storage, alerts on agent failures
 
 ## Why "Rewind"?
