@@ -9,37 +9,42 @@ this module handles:
 
 This follows the same pattern as ruff, uv, and deno — a Python entry
 point that bootstraps a native binary on first use.
+
+NOTE: This module intentionally avoids importing `rewind_agent` or
+`urllib` at the top level.  The full package pulls in hooks.py which
+imports urllib.request — a heavy stdlib chain that can hang or crash
+on broken Python installations (e.g. incomplete Homebrew builds).
+Instead we read __version__ from __init__.py with a regex and defer
+urllib to the point where a download is actually needed.
 """
 
+import os
+import platform
+import re
+import shutil
+import stat
+import subprocess
 import sys
-
-try:
-    import hashlib
-    import os
-    import platform
-    import shutil
-    import stat
-    import subprocess
-    import tarfile
-    import tempfile
-    import urllib.request
-
-    from rewind_agent import __version__
-except (ImportError, OSError) as e:
-    print(
-        f"\033[31mrewind: failed to load a required module: {e}\n\n"
-        f"  Your Python installation may be broken or incomplete.\n"
-        f"  Try:\n"
-        f"    brew reinstall python@{sys.version_info.major}.{sys.version_info.minor}\n"
-        f"  or install with a different Python version:\n"
-        f"    pipx install rewind-agent --python python3.12\033[0m",
-        file=sys.stderr,
-    )
-    sys.exit(1)
+import tarfile
+import tempfile
 
 GITHUB_REPO = "agentoptics/rewind"
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".rewind", "bin")
 BINARY_NAME = "rewind"
+
+
+def _read_version() -> str:
+    """Read __version__ from __init__.py without importing the package."""
+    init = os.path.join(os.path.dirname(__file__), "__init__.py")
+    with open(init) as f:
+        for line in f:
+            m = re.match(r'^__version__\s*=\s*["\']([^"\']+)["\']', line)
+            if m:
+                return m.group(1)
+    raise RuntimeError("Cannot find __version__ in __init__.py")
+
+
+__version__ = _read_version()
 
 
 def _get_platform_key() -> str:
@@ -98,7 +103,10 @@ def _ensure_binary() -> str:
         if p and os.path.isfile(p) and os.access(p, os.X_OK):
             return p
 
-    # Download from GitHub Releases
+    # Download from GitHub Releases — import urllib lazily
+    import urllib.request
+    import urllib.error
+
     platform_key = _get_platform_key()
     tag = f"v{__version__}"
     url = _download_url(tag, platform_key)
