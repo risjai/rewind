@@ -403,10 +403,7 @@ impl TuiApp {
                 // Handle string content
                 if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
                     for text_line in content.lines() {
-                        lines.push(Line::from(Span::styled(
-                            format!("  {}", text_line),
-                            Style::default().fg(Color::White),
-                        )));
+                        lines.push(Line::from(style_content_line(text_line)));
                     }
                 }
 
@@ -489,10 +486,7 @@ impl TuiApp {
 
                     if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
                         for text_line in content.lines() {
-                            lines.push(Line::from(Span::styled(
-                                format!("  {}", text_line),
-                                Style::default().fg(Color::White),
-                            )));
+                            lines.push(Line::from(style_content_line(text_line)));
                         }
                     }
 
@@ -532,10 +526,7 @@ impl TuiApp {
                                 Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
                             )));
                             for text_line in text.lines() {
-                                lines.push(Line::from(Span::styled(
-                                    format!("  {}", text_line),
-                                    Style::default().fg(Color::White),
-                                )));
+                                lines.push(Line::from(style_content_line(text_line)));
                             }
                         }
                     }
@@ -592,5 +583,21 @@ impl TuiApp {
         ]))
         .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::DarkGray)));
         frame.render_widget(help, area);
+    }
+}
+
+/// Style a content line — highlight error keywords in red.
+fn style_content_line(text: &str) -> Vec<Span<'static>> {
+    let error_keywords = ["ERROR", "HALLUCINATION", "FAIL", "FATAL", "WARN"];
+    let line = format!("  {}", text);
+
+    // Check if line contains any error keyword (case-insensitive for some)
+    let upper = line.to_uppercase();
+    let has_error = error_keywords.iter().any(|kw| upper.contains(kw));
+
+    if has_error {
+        vec![Span::styled(line, Style::default().fg(Color::Red))]
+    } else {
+        vec![Span::styled(line, Style::default().fg(Color::White))]
     }
 }
