@@ -5,6 +5,7 @@ members = [
     "crates/rewind-store",
     "crates/rewind-tui",
     "crates/rewind-replay",
+    "crates/rewind-mcp",
 ]
 resolver = "2"
 
@@ -60,3 +61,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Colored output
 colored = "3"
+
+# MCP (Model Context Protocol)
+rmcp = { version = "1.3", features = ["server", "transport-io", "macros"] }
+schemars = "1.0"

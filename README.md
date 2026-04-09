@@ -372,13 +372,70 @@ rewind/
 │   ├── rewind-proxy/      HTTP proxy with SSE streaming
 │   ├── rewind-store/      SQLite + content-addressed blob store
 │   ├── rewind-replay/     Fork engine, timeline DAG, diffing
-│   └── rewind-tui/        Interactive terminal UI (ratatui)
+│   ├── rewind-tui/        Interactive terminal UI (ratatui)
+│   └── rewind-mcp/        MCP server for AI assistant integration
 ├── python/
 │   └── rewind_agent/      Python SDK
 └── demo/                  Demo scripts, mock servers, test scripts
 ```
 
 **Built with:** Rust (hyper, tokio, ratatui, rusqlite), Python.
+
+## MCP Server — AI Assistant Integration
+
+Rewind ships an MCP (Model Context Protocol) server so AI assistants like **Claude Code**, **Cursor**, and **Windsurf** can query your agent recordings directly.
+
+### Build
+
+```bash
+cargo build --release -p rewind-mcp
+```
+
+### Configure
+
+**Claude Code** — add to `.claude/settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "rewind": {
+      "command": "/path/to/rewind-mcp"
+    }
+  }
+}
+```
+
+**Cursor** — add to `.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "rewind": {
+      "command": "/path/to/rewind-mcp"
+    }
+  }
+}
+```
+
+### Available tools
+
+| Tool | Description |
+|:-----|:------------|
+| `list_sessions` | List all recorded sessions with stats |
+| `show_session` | Step-by-step trace with costs, errors, response previews |
+| `get_step_detail` | Full request/response content from blob store |
+| `diff_timelines` | Compare two timelines side by side |
+| `fork_timeline` | Create a fork at a specific step |
+| `list_snapshots` | List workspace snapshots |
+| `cache_stats` | Instant Replay cache statistics |
+
+### Example
+
+Once configured, ask your AI assistant:
+
+> "Why did my agent fail on the research task?"
+
+The assistant calls `show_session` → reads the trace → identifies that step 4 returned stale data → explains the hallucination in step 5.
 
 ## Roadmap
 

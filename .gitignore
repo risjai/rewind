@@ -27,3 +27,6 @@ build/
 # Env
 .env
 .env.local
+
+# MCP config (contains local paths)
+.mcp.json

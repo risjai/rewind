@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use rewind_store::{Step, Store, Timeline};
 
 /// Diff result between two timelines
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct TimelineDiff {
     pub diverge_at_step: Option<u32>,
     pub left_label: String,
@@ -10,7 +10,7 @@ pub struct TimelineDiff {
     pub step_diffs: Vec<StepDiff>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct StepDiff {
     pub step_number: u32,
     pub diff_type: DiffType,
@@ -18,7 +18,7 @@ pub struct StepDiff {
     pub right: Option<StepSummary>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct StepSummary {
     pub step_type: String,
     pub status: String,
@@ -30,7 +30,7 @@ pub struct StepSummary {
     pub response_preview: String,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, serde::Serialize)]
 pub enum DiffType {
     Same,
     Modified,

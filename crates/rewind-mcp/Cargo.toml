@@ -1,0 +1,20 @@
+[package]
+name = "rewind-mcp"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "rewind-mcp"
+path = "src/main.rs"
+
+[dependencies]
+rewind-store = { path = "../rewind-store" }
+rewind-replay = { path = "../rewind-replay" }
+rmcp = { workspace = true }
+schemars = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

@@ -195,7 +195,7 @@ pub struct CacheEntry {
     pub hit_count: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CacheStats {
     pub entries: u64,
     pub total_hits: u64,
