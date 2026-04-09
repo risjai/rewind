@@ -41,6 +41,22 @@ jobs:
           ./target/release/rewind sessions
           ./target/release/rewind show latest
 
+  version-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: CLI_VERSION matches Cargo.toml
+        run: |
+          cargo_version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          cli_version=$(grep '^CLI_VERSION' python/rewind_cli.py | sed 's/.*"\(.*\)"/\1/')
+          echo "Cargo.toml version: $cargo_version"
+          echo "CLI_VERSION:        $cli_version"
+          if [ "$cargo_version" != "$cli_version" ]; then
+            echo "::error::CLI_VERSION in python/rewind_cli.py ($cli_version) does not match Cargo.toml ($cargo_version). Update CLI_VERSION and create a new GitHub Release."
+            exit 1
+          fi
+
   python:
     runs-on: ubuntu-latest
     steps:

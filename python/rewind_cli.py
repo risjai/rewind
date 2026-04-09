@@ -19,7 +19,6 @@ bootstrap for a native binary and must never touch the SDK.
 
 import os
 import platform
-import re
 import shutil
 import stat
 import subprocess
@@ -31,19 +30,9 @@ GITHUB_REPO = "agentoptics/rewind"
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".rewind", "bin")
 BINARY_NAME = "rewind"
 
-
-def _read_version() -> str:
-    """Read __version__ from rewind_agent/__init__.py without importing."""
-    init = os.path.join(os.path.dirname(__file__), "rewind_agent", "__init__.py")
-    with open(init) as f:
-        for line in f:
-            m = re.match(r'^__version__\s*=\s*["\']([^"\']+)["\']', line)
-            if m:
-                return m.group(1)
-    raise RuntimeError("Cannot find __version__ in rewind_agent/__init__.py")
-
-
-__version__ = _read_version()
+# The native CLI binary version — independent of the Python SDK version.
+# Update this when a new GitHub Release is published with new binaries.
+CLI_VERSION = "0.2.0"
 
 
 def _get_platform_key() -> str:
@@ -72,7 +61,7 @@ def _get_platform_key() -> str:
 
 def _binary_path() -> str:
     """Path where the cached binary lives, versioned to avoid stale binaries."""
-    return os.path.join(CACHE_DIR, f"rewind-{__version__}")
+    return os.path.join(CACHE_DIR, f"rewind-{CLI_VERSION}")
 
 
 def _download_url(tag: str, platform_key: str) -> str:
@@ -93,21 +82,31 @@ def _ensure_binary() -> str:
     if os.path.isfile(bin_path) and os.access(bin_path, os.X_OK):
         return bin_path
 
-    # Check if a locally-built binary exists (dev mode)
+    # Check if a locally-built native binary exists (dev mode).
+    # Only consider actual compiled binaries — skip scripts (e.g. the pipx
+    # wrapper itself) to avoid infinite recursion.
     local_paths = [
         os.path.join(os.path.dirname(__file__), "rewind_agent", "..", "..", "target", "release", BINARY_NAME),
         shutil.which(BINARY_NAME) or "",
     ]
     for p in local_paths:
         if p and os.path.isfile(p) and os.access(p, os.X_OK):
-            return p
+            # Skip text scripts — only accept compiled binaries
+            try:
+                with open(p, "rb") as f:
+                    header = f.read(4)
+                # Mach-O: \xcf\xfa\xed\xfe or \xce\xfa\xed\xfe  ELF: \x7fELF
+                if header in (b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe", b"\x7fELF"):
+                    return p
+            except OSError:
+                continue
 
     # Download from GitHub Releases — import urllib lazily
     import urllib.request
     import urllib.error
 
     platform_key = _get_platform_key()
-    tag = f"v{__version__}"
+    tag = f"v{CLI_VERSION}"
     url = _download_url(tag, platform_key)
 
     print()
