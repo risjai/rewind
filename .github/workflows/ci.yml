@@ -35,6 +35,9 @@ jobs:
       - name: Clippy
         run: cargo clippy -- -D warnings
 
+      - name: Test
+        run: cargo test
+
       - name: Test demo command
         run: |
           ./target/release/rewind demo
@@ -73,3 +76,9 @@ jobs:
           pip install -e .
           python -c "import rewind_agent; print(f'rewind-agent v{rewind_agent.__version__}')"
           python -c "from rewind_agent import step, node, tool, trace, annotate, wrap_langgraph, wrap_crew; print('All imports OK')"
+
+      - name: Run Python tests
+        run: |
+          cd python
+          pip install pytest -q
+          python -m pytest tests/ -v
