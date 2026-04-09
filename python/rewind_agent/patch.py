@@ -190,7 +190,28 @@ def _init_direct(session_name: str, auto_patch: bool):
     if auto_patch:
         _recorder.patch_all()
 
+    # Auto-register OpenAI Agents SDK tracing if available
+    _try_register_openai_agents(tid)
+
     _print_direct_banner(session_name)
+
+
+def _try_register_openai_agents(timeline_id: str):
+    """Register Rewind tracing with the OpenAI Agents SDK if it's installed.
+    When active, the TracingProcessor captures LLM calls with richer agent-level
+    metadata, so we skip monkey-patching the OpenAI client to avoid duplicates."""
+    try:
+        from .openai_agents import register_tracing_processor
+        processor = register_tracing_processor(_store, _session_id, timeline_id, _recorder)
+        if processor is not None and _recorder is not None:
+            # Unpatch OpenAI to avoid duplicate recordings — the TracingProcessor
+            # captures the same LLM calls with richer agent context (names, handoffs)
+            for key in list(_recorder._originals.keys()):
+                if key.startswith("openai_"):
+                    cls, method_name, original = _recorder._originals.pop(key)
+                    setattr(cls, method_name, original)
+    except Exception:
+        pass  # agents SDK not installed or other import issue — skip silently
 
 
 def _init_proxy(proxy_url: str, auto_patch: bool):

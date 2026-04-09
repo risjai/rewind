@@ -29,6 +29,7 @@ from .hooks import (
     wrap_crew,
 )
 from .assertions import Assertions, AssertionResult
+from .openai_agents import openai_agents_hooks
 
 __all__ = [
     "init",
@@ -43,7 +44,8 @@ __all__ = [
     "get_annotations",
     "wrap_langgraph",
     "wrap_crew",
+    "openai_agents_hooks",
     "Assertions",
     "AssertionResult",
 ]
-__version__ = "0.5.0"
+__version__ = "0.5.1"
