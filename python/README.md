@@ -1,6 +1,6 @@
 # rewind-agent
 
-**Python SDK for [Rewind](https://github.com/risjai/rewind) — the time-travel debugger for AI agents.**
+**Python SDK for [Rewind](https://github.com/agentoptics/rewind) — the time-travel debugger for AI agents.**
 
 Record every LLM call. See the exact context window. Fork, fix, replay — without re-running.
 
@@ -13,7 +13,7 @@ pip install rewind-agent
 Requires the Rewind CLI for recording. Install with:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/risjai/rewind/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/agentoptics/rewind/main/install.sh | sh
 ```
 
 ## Quick Start
@@ -59,6 +59,6 @@ crew = rewind_agent.wrap_crew(crew)
 
 ## Learn More
 
-- [GitHub](https://github.com/risjai/rewind)
-- [Changelog](https://github.com/risjai/rewind/blob/main/CHANGELOG.md)
-- [Examples](https://github.com/risjai/rewind/tree/main/examples)
+- [GitHub](https://github.com/agentoptics/rewind)
+- [Changelog](https://github.com/agentoptics/rewind/blob/main/CHANGELOG.md)
+- [Examples](https://github.com/agentoptics/rewind/tree/main/examples)

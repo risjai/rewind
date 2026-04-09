@@ -6,7 +6,7 @@ Thanks for your interest in contributing to Rewind! Here's how to get started.
 
 ```bash
 # Clone the repo
-git clone https://github.com/risjai/rewind.git
+git clone https://github.com/agentoptics/rewind.git
 cd rewind
 
 # Build (requires Rust 1.80+)
@@ -53,7 +53,7 @@ The Python SDK lives in `python/rewind_agent/`.
 
 ## Reporting issues
 
-Open a [GitHub issue](https://github.com/risjai/rewind/issues) with:
+Open a [GitHub issue](https://github.com/agentoptics/rewind/issues) with:
 - What you expected to happen
 - What actually happened
 - Steps to reproduce

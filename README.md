@@ -1,9 +1,9 @@
 <p align="center">
   <br/>
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/risjai/rewind/master/assets/banner-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/risjai/rewind/master/assets/banner-light.svg">
-    <img alt="Rewind" src="https://raw.githubusercontent.com/risjai/rewind/master/assets/banner-light.svg" width="500">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/agentoptics/rewind/master/assets/banner-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/agentoptics/rewind/master/assets/banner-light.svg">
+    <img alt="Rewind" src="https://raw.githubusercontent.com/agentoptics/rewind/master/assets/banner-light.svg" width="500">
   </picture>
   <br/>
   <br/>
@@ -21,11 +21,11 @@
   <br/>
   <br/>
 
-  [![CI](https://github.com/risjai/rewind/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/risjai/rewind/actions)
+  [![CI](https://github.com/agentoptics/rewind/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/agentoptics/rewind/actions)
   [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-  [![GitHub Release](https://img.shields.io/github/v/release/risjai/rewind?label=release)](https://github.com/risjai/rewind/releases)
+  [![GitHub Release](https://img.shields.io/github/v/release/agentoptics/rewind?label=release)](https://github.com/agentoptics/rewind/releases)
   [![PyPI](https://img.shields.io/pypi/v/rewind-agent?style=flat)](https://pypi.org/project/rewind-agent/)
-  [![GitHub stars](https://img.shields.io/github/stars/risjai/rewind?style=social)](https://github.com/risjai/rewind)
+  [![GitHub stars](https://img.shields.io/github/stars/agentoptics/rewind?style=social)](https://github.com/agentoptics/rewind)
   <br/>
   <sub>Single binary &middot; 9 MB &middot; zero dependencies &middot; MIT licensed</sub>
 </p>
@@ -73,7 +73,7 @@ No idea what changed.                  Diff shows exactly what diverged.
 ## See It in Action
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/risjai/rewind/master/assets/demo.gif" alt="Rewind demo — trace, diff, cache" width="800">
+  <img src="https://raw.githubusercontent.com/agentoptics/rewind/master/assets/demo.gif" alt="Rewind demo — trace, diff, cache" width="800">
 </p>
 
 ### Agent trace — see where it went wrong
@@ -175,7 +175,7 @@ The `rewind inspect` command opens a full terminal UI:
 - Navigate with arrow keys, Tab to switch panels, scroll through context
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/risjai/rewind/master/assets/tui-screenshot.svg" alt="Rewind TUI — interactive debugger" width="800">
+  <img src="https://raw.githubusercontent.com/agentoptics/rewind/master/assets/tui-screenshot.svg" alt="Rewind TUI — interactive debugger" width="800">
 </p>
 
 ## Install
@@ -191,19 +191,19 @@ This installs both the Python SDK **and** the `rewind` CLI. The native binary is
 ### Quick install (binary only, macOS / Linux)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/risjai/rewind/master/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/agentoptics/rewind/master/install.sh | sh
 ```
 
 ### From source (requires Rust)
 
 ```bash
-cargo install --git https://github.com/risjai/rewind rewind-cli
+cargo install --git https://github.com/agentoptics/rewind rewind-cli
 ```
 
 ### Build locally
 
 ```bash
-git clone https://github.com/risjai/rewind.git
+git clone https://github.com/agentoptics/rewind.git
 cd rewind
 cargo build --release
 # Binary at ./target/release/rewind (9 MB, no dependencies)
@@ -466,7 +466,7 @@ Rewind brings that same leap to AI agents. It's not a log viewer. It's not a das
 We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ```bash
-git clone https://github.com/risjai/rewind.git
+git clone https://github.com/agentoptics/rewind.git
 cd rewind
 cargo build          # build all crates
 cargo run -- demo    # seed demo data

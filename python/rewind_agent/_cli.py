@@ -24,7 +24,7 @@ import urllib.request
 
 from rewind_agent import __version__
 
-GITHUB_REPO = "risjai/rewind"
+GITHUB_REPO = "agentoptics/rewind"
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".rewind", "bin")
 BINARY_NAME = "rewind"
 
