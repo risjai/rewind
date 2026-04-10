@@ -9,7 +9,7 @@
   <br/>
   <strong>The time-travel debugger for AI agents</strong>
   <br/>
-  <em>Record. Inspect. Fork. Replay from failure. Diff.</em>
+  <em>Record. Inspect. Fork. Replay from failure. Diff. Evaluate.</em>
   <br/>
   <br/>
   <a href="#the-problem">Why</a> &nbsp;&bull;&nbsp;
@@ -57,6 +57,7 @@ It records every LLM call your agent makes — the full request, response, conte
 | **Replay from Failure** | Agent fails at step 5? Fix your code, run `rewind replay --from 4`. Steps 1-4 served instantly from cache (0 tokens, 0ms). Only step 5 re-runs live. Diff the result. |
 | **Instant Replay** | Identical requests are served from cache at **0 tokens, 0ms latency**. Run the same agent 10 times — only the first run hits the LLM. |
 | **Regression Testing** | Turn any session into a baseline. After code changes, check the new behavior: step types, models, tool calls, token counts. Run in CI. |
+| **Evaluation** | Create datasets of test cases, run your agent against them, score with built-in evaluators (exact match, contains, regex, JSON schema, tool use), compare experiments side-by-side. CI-ready with `--fail-below` thresholds. |
 | **Snapshots** | Capture your entire workspace at any point. Restore in one command if your agent breaks something. No git dependency. |
 
 ### The before/after
@@ -223,6 +224,106 @@ assert result.passed, f"Regression: {result.failed_checks} checks failed"
 ```
 
 The action installs Rewind, runs `rewind assert check` against your baseline, and fails the job if regressions are found. Results are written to the GitHub Step Summary. See [action/README.md](action/README.md) for full docs.
+
+### Evaluation — measure agent quality, not just structure
+
+Go beyond structural regression checks. Create datasets of test cases, run your agent against them, score the outputs, and compare experiments side-by-side.
+
+```bash
+# 1. Create a dataset with test cases
+rewind eval dataset create "booking-test" -d "Booking agent eval"
+
+# 2. Import test cases from a JSONL file
+cat > test_cases.jsonl << 'EOF'
+{"input":{"query":"Book a table for 2 at 7pm"},"expected":{"action":"create_booking","guests":2}}
+{"input":{"query":"Cancel my reservation"},"expected":{"action":"cancel_booking"}}
+EOF
+rewind eval dataset import "booking-test" test_cases.jsonl
+
+# 3. Create evaluators
+rewind eval evaluator create "action-check" -t contains -c '{"substring":"booking"}'
+rewind eval evaluator create "schema-valid" -t json_schema -c '{"schema":{"required":["action"]}}'
+
+# 4. Run your agent against the dataset
+rewind eval run "booking-test" -c "python my_agent.py" \
+    -e action-check -e schema-valid --name "v1-baseline"
+```
+
+```
+⏪ Rewind — Running Experiment
+
+  Dataset: booking-test
+  Command: python my_agent.py
+  Evaluators: action-check, schema-valid
+
+  Experiment: v1-baseline
+  Status: completed
+  Examples: 2
+  Avg Score: 0.750
+  Pass Rate: 75.0%
+
+  ✓ #1   1.000 1.00 | 1.00
+  ✓ #2   0.500 0.00 | 1.00
+```
+
+#### Compare experiments — PR vs main
+
+After code changes, run a new experiment and compare:
+
+```bash
+# Run candidate experiment
+rewind eval run "booking-test" -c "python my_agent_v2.py" \
+    -e action-check -e schema-valid --name "v2-candidate"
+
+# Compare side-by-side
+rewind eval compare "v1-baseline" "v2-candidate"
+```
+
+```
+⏪ Rewind — Experiment Comparison
+
+  Comparing: v1-baseline (avg: 0.750) vs v2-candidate (avg: 1.000)
+
+  Overall delta: +0.250
+  Summary: 0 regressions, 1 improvements, 1 unchanged
+
+  Changes:
+    ▲ #2   0.50 → 1.00 (+0.500) {"query":"Cancel my reservation...
+```
+
+#### CI integration — fail the build if quality drops
+
+```bash
+rewind eval run "booking-test" -c "./agent" \
+    -e action-check --fail-below 0.8 --json
+# Exit code 1 if avg_score < 0.8
+# JSON output for dashboard ingestion
+```
+
+#### Python SDK — evaluate in-process
+
+```python
+import rewind_agent
+
+ds = rewind_agent.Dataset("my-test")
+ds.add(input={"q": "hello"}, expected={"a": "hi"})
+
+@rewind_agent.evaluator("custom_check")
+def custom_check(input, output, expected):
+    return rewind_agent.EvalScore(
+        score=1.0 if output.get("a") == expected.get("a") else 0.0,
+        passed=output.get("a") == expected.get("a"),
+        reasoning="Answer match check"
+    )
+
+result = rewind_agent.evaluate(
+    dataset=ds,
+    target_fn=my_agent,
+    evaluators=[custom_check, "exact_match"],
+    fail_below=0.8,
+)
+print(f"Score: {result.avg_score:.2f}, Pass rate: {result.pass_rate:.0%}")
+```
 
 ### Snapshots — workspace checkpoint/restore
 
@@ -541,6 +642,14 @@ result = crew.kickoff()
 | `rewind assert list` | List all baselines |
 | `rewind assert show <name>` | Show baseline step signatures |
 | `rewind assert delete <name>` | Delete a baseline |
+| `rewind eval dataset create <name>` | Create a new evaluation dataset |
+| `rewind eval dataset import <name> <file.jsonl>` | Import test cases from JSONL |
+| `rewind eval dataset show <name>` | Show dataset with example previews |
+| `rewind eval evaluator create <name> -t <type>` | Create an evaluator (exact_match, contains, regex, json_schema, tool_use_match) |
+| `rewind eval run <dataset> -c <cmd> -e <evaluator>` | Run experiment — execute command per example, score, aggregate |
+| `rewind eval compare <left> <right>` | Compare two experiments side-by-side |
+| `rewind eval show <experiment>` | Show detailed experiment results |
+| `rewind eval experiments` | List all experiments |
 | `rewind query "SQL"` | Run a read-only SQL query against the Rewind database |
 | `rewind query --tables` | Show all tables and their column schemas |
 | `rewind web [--port 8080]` | Start the web dashboard (flight recorder + live) |
@@ -596,6 +705,7 @@ rewind/
 │   ├── rewind-store/      SQLite + content-addressed blob store
 │   ├── rewind-replay/     Fork engine, timeline DAG, diffing
 │   ├── rewind-assert/     Regression testing — baselines and assertion checks
+│   ├── rewind-eval/       Evaluation system — datasets, evaluators, experiments
 │   ├── rewind-tui/        Interactive terminal UI (ratatui)
 │   └── rewind-mcp/        MCP server for AI assistant integration
 ├── python/
@@ -658,6 +768,11 @@ cargo build --release -p rewind-mcp
 | `list_baselines` | List all baselines |
 | `show_baseline` | Show baseline details and expected step signatures |
 | `delete_baseline` | Delete a baseline |
+| `list_eval_datasets` | List evaluation datasets with example counts |
+| `show_eval_dataset` | Show dataset details with example previews |
+| `list_eval_experiments` | List experiments, filter by dataset |
+| `show_eval_experiment` | Show experiment results with per-example scores |
+| `compare_eval_experiments` | Compare two experiments side-by-side |
 
 ### Example
 
@@ -676,8 +791,9 @@ Rewind is in active development. Here's what's shipped and what's coming:
 | **v0.1** | Record, inspect, fork, diff, TUI, streaming, Instant Replay, Snapshots, Python SDK with hooks, LangGraph + CrewAI adapters | ✅ Shipped |
 | **v0.2** | Direct recording (no proxy), fork-and-execute replay, regression testing (`rewind assert`), MCP server, replay context manager | ✅ Shipped |
 | **v0.3** | Web UI (flight recorder + live dashboard), `rewind web`, `rewind record --web` | ✅ Shipped |
-| **v0.4** | Multi-agent tracing, OTel export | Building |
-| **v1.0** | Live breakpoints, Rewind Cloud (team collab), semantic diff, on-prem | Planned |
+| **v0.4** | Evaluation system — datasets, evaluators, experiments, comparison, CI integration, Python SDK, web dashboard | ✅ Shipped |
+| **v0.5** | Multi-agent tracing, OTel export | Building |
+| **v1.0** | LLM-as-judge evaluator, live breakpoints, Rewind Cloud (team collab), semantic diff, on-prem | Planned |
 
 ### What we're solving next
 

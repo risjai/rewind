@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use rewind_assert::{AssertionEngine, BaselineManager, Tolerance};
+use rewind_eval::{DatasetManager, EvaluatorRegistry, ExperimentRunner, RunConfig};
 use rewind_proxy::ProxyServer;
 use rewind_replay::ReplayEngine;
 use rewind_store::Store;
@@ -155,6 +156,12 @@ enum Commands {
         port: u16,
     },
 
+    /// Evaluation system — datasets, evaluators, experiments, comparisons
+    Eval {
+        #[command(subcommand)]
+        action: EvalAction,
+    },
+
     /// Run a SQL query against the Rewind database (read-only)
     ///
     /// Examples:
@@ -223,6 +230,180 @@ enum AssertAction {
     },
 }
 
+#[derive(Subcommand)]
+enum EvalAction {
+    /// Manage evaluation datasets
+    Dataset {
+        #[command(subcommand)]
+        action: DatasetAction,
+    },
+
+    /// Manage evaluators (scoring functions)
+    Evaluator {
+        #[command(subcommand)]
+        action: EvaluatorAction,
+    },
+
+    /// Run an experiment: execute target command against a dataset and score results
+    Run {
+        /// Dataset name (or name@version)
+        dataset: String,
+
+        /// Command to run as the application under test
+        #[arg(short, long)]
+        command: String,
+
+        /// Evaluator names (can specify multiple: -e exact_match -e contains)
+        #[arg(short, long)]
+        evaluator: Vec<String>,
+
+        /// Experiment name (auto-generated if omitted)
+        #[arg(short, long)]
+        name: Option<String>,
+
+        /// Fail if average score drops below this threshold (0.0-1.0)
+        #[arg(long)]
+        fail_below: Option<f64>,
+
+        /// Timeout per example in seconds
+        #[arg(long, default_value = "300")]
+        timeout: u64,
+
+        /// Output results as JSON (for CI pipelines)
+        #[arg(long)]
+        json: bool,
+
+        /// Metadata tags as JSON (e.g., '{"branch":"main","category":"booking"}')
+        #[arg(long, default_value = "{}")]
+        metadata: String,
+    },
+
+    /// Compare two experiments side-by-side
+    Compare {
+        /// First experiment name or ID
+        left: String,
+
+        /// Second experiment name or ID
+        right: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Allow comparison across different dataset versions
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// List experiments
+    Experiments {
+        /// Filter by dataset name
+        #[arg(long)]
+        dataset: Option<String>,
+    },
+
+    /// Show detailed experiment results
+    Show {
+        /// Experiment name or ID
+        experiment: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum DatasetAction {
+    /// Create a new empty dataset
+    Create {
+        /// Dataset name
+        name: String,
+
+        /// Description
+        #[arg(short, long, default_value = "")]
+        description: String,
+    },
+
+    /// Add an example from a recorded session step
+    AddFromSession {
+        /// Dataset name
+        dataset: String,
+
+        /// Session ID, prefix, or "latest"
+        #[arg(default_value = "latest")]
+        session: String,
+
+        /// Step number to extract input from
+        #[arg(long)]
+        input_step: u32,
+
+        /// Step number to extract expected output from
+        #[arg(long)]
+        expected_step: Option<u32>,
+    },
+
+    /// Import examples from a JSONL file
+    Import {
+        /// Dataset name (created if doesn't exist)
+        dataset: String,
+
+        /// Path to JSONL file (each line: {"input": ..., "expected": ...})
+        file: String,
+    },
+
+    /// Export a dataset to JSONL
+    Export {
+        /// Dataset name (or name@version)
+        dataset: String,
+
+        /// Output file path ("-" for stdout)
+        #[arg(short, long, default_value = "-")]
+        output: String,
+    },
+
+    /// List all datasets
+    List,
+
+    /// Show dataset details with example previews
+    Show {
+        /// Dataset name (or name@version)
+        dataset: String,
+    },
+
+    /// Delete a dataset (all versions)
+    Delete {
+        /// Dataset name
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum EvaluatorAction {
+    /// Create an evaluator
+    Create {
+        /// Evaluator name
+        name: String,
+
+        /// Type: exact_match, contains, regex, json_schema, tool_use_match
+        #[arg(short = 't', long = "type")]
+        evaluator_type: String,
+
+        /// Configuration JSON (depends on type, e.g., '{"substring": "hello"}')
+        #[arg(short, long)]
+        config: Option<String>,
+
+        /// Description
+        #[arg(short, long, default_value = "")]
+        description: String,
+    },
+
+    /// List evaluators
+    List,
+
+    /// Delete an evaluator
+    Delete {
+        /// Evaluator name
+        name: String,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -253,6 +434,26 @@ async fn main() -> Result<()> {
             AssertAction::List => cmd_assert_list(),
             AssertAction::Show { name } => cmd_assert_show(name),
             AssertAction::Delete { name } => cmd_assert_delete(name),
+        },
+        Commands::Eval { action } => match action {
+            EvalAction::Dataset { action } => match action {
+                DatasetAction::Create { name, description } => cmd_eval_dataset_create(name, description),
+                DatasetAction::AddFromSession { dataset, session, input_step, expected_step } => cmd_eval_dataset_add_from_session(dataset, session, input_step, expected_step),
+                DatasetAction::Import { dataset, file } => cmd_eval_dataset_import(dataset, file),
+                DatasetAction::Export { dataset, output } => cmd_eval_dataset_export(dataset, output),
+                DatasetAction::List => cmd_eval_dataset_list(),
+                DatasetAction::Show { dataset } => cmd_eval_dataset_show(dataset),
+                DatasetAction::Delete { name } => cmd_eval_dataset_delete(name),
+            },
+            EvalAction::Evaluator { action } => match action {
+                EvaluatorAction::Create { name, evaluator_type, config, description } => cmd_eval_evaluator_create(name, evaluator_type, config, description),
+                EvaluatorAction::List => cmd_eval_evaluator_list(),
+                EvaluatorAction::Delete { name } => cmd_eval_evaluator_delete(name),
+            },
+            EvalAction::Run { dataset, command, evaluator, name, fail_below, timeout, json, metadata } => cmd_eval_run(dataset, command, evaluator, name, fail_below, timeout, json, metadata),
+            EvalAction::Compare { left, right, json, force } => cmd_eval_compare(left, right, json, force),
+            EvalAction::Experiments { dataset } => cmd_eval_experiments(dataset),
+            EvalAction::Show { experiment } => cmd_eval_show(experiment),
         },
         Commands::Web { port } => cmd_web(port).await,
         Commands::Query { sql, tables } => cmd_query(sql, tables),
@@ -1079,6 +1280,610 @@ fn cmd_assert_delete(name: String) -> Result<()> {
 
     println!("  {} Baseline '{}' deleted.", "✓".green(), name);
     Ok(())
+}
+
+// ── Eval commands ────────────────────────────────────────────
+
+fn cmd_eval_dataset_create(name: String, description: String) -> Result<()> {
+    let store = Store::open_default()?;
+    let mgr = DatasetManager::new(&store);
+    let dataset = mgr.create(&name, &description)?;
+
+    println!("{}", "⏪ Rewind — Dataset Created".cyan().bold());
+    println!();
+    println!("  {} {}", "Name:".dimmed(), dataset.name.white().bold());
+    println!("  {} {}", "Version:".dimmed(), dataset.version.to_string().yellow());
+    if !description.is_empty() {
+        println!("  {} {}", "Description:".dimmed(), description);
+    }
+    println!();
+    println!("  Add examples: {}", format!("rewind eval dataset import {} examples.jsonl", name).green());
+    Ok(())
+}
+
+fn cmd_eval_dataset_add_from_session(dataset: String, session: String, input_step: u32, expected_step: Option<u32>) -> Result<()> {
+    let store = Store::open_default()?;
+    let mgr = DatasetManager::new(&store);
+    let example = mgr.import_from_session(&dataset, &session, input_step, expected_step)?;
+
+    println!("{}", "⏪ Rewind — Example Added from Session".cyan().bold());
+    println!();
+    println!("  {} {}", "Dataset:".dimmed(), dataset.white().bold());
+    println!("  {} {}", "Ordinal:".dimmed(), example.ordinal.to_string().yellow());
+    println!("  {} step {}", "Input from:".dimmed(), input_step.to_string().cyan());
+    println!("  {} step {}", "Expected from:".dimmed(), expected_step.unwrap_or(input_step).to_string().cyan());
+    println!();
+    Ok(())
+}
+
+fn cmd_eval_dataset_import(dataset: String, file: String) -> Result<()> {
+    let store = Store::open_default()?;
+    let mgr = DatasetManager::new(&store);
+    let path = std::path::Path::new(&file);
+    let ds = mgr.import_from_jsonl(&dataset, path)?;
+
+    println!("{}", "⏪ Rewind — Dataset Imported".cyan().bold());
+    println!();
+    println!("  {} {}", "Dataset:".dimmed(), ds.name.white().bold());
+    println!("  {} {}", "Version:".dimmed(), ds.version.to_string().yellow());
+    println!("  {} {}", "Examples:".dimmed(), ds.example_count.to_string().green().bold());
+    println!("  {} {}", "Source:".dimmed(), file.dimmed());
+    println!();
+    Ok(())
+}
+
+fn cmd_eval_dataset_export(dataset_ref: String, output: String) -> Result<()> {
+    let store = Store::open_default()?;
+    let mgr = DatasetManager::new(&store);
+    let (name, version) = rewind_eval::dataset::parse_dataset_ref(&dataset_ref);
+
+    if output == "-" {
+        let stdout = std::io::stdout();
+        let mut handle = stdout.lock();
+        mgr.export_jsonl(name, version, &mut handle)?;
+    } else {
+        let mut file = std::fs::File::create(&output)?;
+        mgr.export_jsonl(name, version, &mut file)?;
+        println!("  {} Exported to {}", "✓".green(), output);
+    }
+    Ok(())
+}
+
+fn cmd_eval_dataset_list() -> Result<()> {
+    let store = Store::open_default()?;
+    let mgr = DatasetManager::new(&store);
+    let datasets = mgr.list()?;
+
+    if datasets.is_empty() {
+        println!("{}", "No datasets yet.".dimmed());
+        println!("  Create one: {}", "rewind eval dataset create my-dataset".green());
+        return Ok(());
+    }
+
+    println!("{}", "⏪ Rewind — Evaluation Datasets".cyan().bold());
+    println!();
+    println!(
+        "  {:>20} {:>8} {:>10} {}",
+        "NAME".dimmed(), "VERSION".dimmed(), "EXAMPLES".dimmed(), "UPDATED".dimmed(),
+    );
+    println!("  {}", "─".repeat(55).dimmed());
+
+    for ds in &datasets {
+        let ago = format_time_ago(ds.updated_at);
+        println!(
+            "  {:>20} {:>8} {:>10} {}",
+            ds.name.white().bold(),
+            format!("v{}", ds.version).yellow(),
+            ds.example_count.to_string().green(),
+            ago.dimmed(),
+        );
+    }
+    println!();
+    Ok(())
+}
+
+fn cmd_eval_dataset_show(dataset_ref: String) -> Result<()> {
+    let store = Store::open_default()?;
+    let mgr = DatasetManager::new(&store);
+    let (name, version) = rewind_eval::dataset::parse_dataset_ref(&dataset_ref);
+    let dataset = mgr.get(name, version)?
+        .context(format!("Dataset '{}' not found", dataset_ref))?;
+    let examples = mgr.get_examples(&dataset.id)?;
+
+    println!("{}", "⏪ Rewind — Dataset Detail".cyan().bold());
+    println!();
+    println!("  {} {}", "Name:".dimmed(), dataset.name.white().bold());
+    println!("  {} {}", "Version:".dimmed(), format!("v{}", dataset.version).yellow());
+    println!("  {} {}", "Examples:".dimmed(), dataset.example_count.to_string().green());
+    if !dataset.description.is_empty() {
+        println!("  {} {}", "Description:".dimmed(), dataset.description);
+    }
+    println!();
+
+    if examples.is_empty() {
+        println!("  {}", "(no examples)".dimmed());
+    } else {
+        println!("  {}", "Examples:".dimmed());
+        for ex in &examples {
+            let (input, expected) = mgr.resolve_example(ex)?;
+            let input_str = serde_json::to_string(&input).unwrap_or_default();
+            let expected_str = serde_json::to_string(&expected).unwrap_or_default();
+            let input_preview: String = input_str.chars().take(60).collect();
+            let expected_preview: String = expected_str.chars().take(60).collect();
+            println!(
+                "    {} {} → {}",
+                format!("#{}", ex.ordinal).yellow(),
+                input_preview.cyan(),
+                expected_preview.dimmed(),
+            );
+        }
+    }
+    println!();
+    Ok(())
+}
+
+fn cmd_eval_dataset_delete(name: String) -> Result<()> {
+    let store = Store::open_default()?;
+    let mgr = DatasetManager::new(&store);
+    mgr.delete(&name)?;
+    println!("  {} Dataset '{}' deleted.", "✓".green(), name);
+    Ok(())
+}
+
+fn cmd_eval_evaluator_create(name: String, evaluator_type: String, config: Option<String>, description: String) -> Result<()> {
+    if !EvaluatorRegistry::is_valid_type(&evaluator_type) {
+        bail!(
+            "Unknown evaluator type '{}'. Valid types: {}",
+            evaluator_type,
+            EvaluatorRegistry::builtin_types().join(", ")
+        );
+    }
+
+    let store = Store::open_default()?;
+
+    // Store config in blob store if provided
+    let config_blob = match config {
+        Some(ref c) => {
+            // Try to parse as JSON first
+            let config_val: serde_json::Value = if c.starts_with('{') || c.starts_with('[') {
+                serde_json::from_str(c)
+                    .map_err(|e| anyhow::anyhow!("Invalid config JSON: {}", e))?
+            } else if std::path::Path::new(c).exists() {
+                // If it's a file path, read and parse it
+                let content = std::fs::read_to_string(c)?;
+                serde_json::from_str(&content)?
+            } else {
+                // Treat as a simple string value based on type
+                match evaluator_type.as_str() {
+                    "contains" => serde_json::json!({"substring": c}),
+                    "regex" => serde_json::json!({"pattern": c}),
+                    _ => serde_json::json!({"value": c}),
+                }
+            };
+            store.blobs.put_json(&config_val)?
+        }
+        None => String::new(),
+    };
+
+    let evaluator = rewind_store::Evaluator::new(&name, &evaluator_type, &config_blob, &description);
+    store.create_evaluator(&evaluator)?;
+
+    println!("{}", "⏪ Rewind — Evaluator Created".cyan().bold());
+    println!();
+    println!("  {} {}", "Name:".dimmed(), evaluator.name.white().bold());
+    println!("  {} {}", "Type:".dimmed(), evaluator_type.cyan());
+    if config.is_some() {
+        println!("  {} {}", "Config:".dimmed(), "stored".dimmed());
+    }
+    println!();
+    Ok(())
+}
+
+fn cmd_eval_evaluator_list() -> Result<()> {
+    let store = Store::open_default()?;
+    let evaluators = store.list_evaluators()?;
+
+    if evaluators.is_empty() {
+        println!("{}", "No evaluators yet.".dimmed());
+        println!("  Create one: {}", "rewind eval evaluator create my-eval -t exact_match".green());
+        return Ok(());
+    }
+
+    println!("{}", "⏪ Rewind — Evaluators".cyan().bold());
+    println!();
+    println!(
+        "  {:>20} {:>15} {}",
+        "NAME".dimmed(), "TYPE".dimmed(), "DESCRIPTION".dimmed(),
+    );
+    println!("  {}", "─".repeat(55).dimmed());
+
+    for ev in &evaluators {
+        println!(
+            "  {:>20} {:>15} {}",
+            ev.name.white().bold(),
+            ev.evaluator_type.cyan(),
+            ev.description.dimmed(),
+        );
+    }
+    println!();
+    Ok(())
+}
+
+fn cmd_eval_evaluator_delete(name: String) -> Result<()> {
+    let store = Store::open_default()?;
+    store.delete_evaluator(&name)?;
+    println!("  {} Evaluator '{}' deleted.", "✓".green(), name);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_eval_run(
+    dataset_ref: String,
+    command: String,
+    evaluator_names: Vec<String>,
+    name: Option<String>,
+    fail_below: Option<f64>,
+    timeout: u64,
+    json_output: bool,
+    metadata_str: String,
+) -> Result<()> {
+    if evaluator_names.is_empty() {
+        bail!("At least one evaluator is required. Use -e <name> to specify.");
+    }
+
+    let store = Store::open_default()?;
+    let (ds_name, ds_version) = rewind_eval::dataset::parse_dataset_ref(&dataset_ref);
+
+    let metadata: serde_json::Value = serde_json::from_str(&metadata_str)
+        .unwrap_or(serde_json::json!({}));
+
+    let runner = ExperimentRunner::new(&store);
+    let config = RunConfig {
+        dataset_name: ds_name.to_string(),
+        dataset_version: ds_version,
+        evaluator_names: evaluator_names.clone(),
+        command: command.clone(),
+        name,
+        fail_below,
+        timeout_per_example_secs: timeout,
+        metadata,
+    };
+
+    if !json_output {
+        println!("{}", "⏪ Rewind — Running Experiment".cyan().bold());
+        println!();
+        println!("  {} {}", "Dataset:".dimmed(), ds_name.white().bold());
+        println!("  {} {}", "Command:".dimmed(), command.cyan());
+        println!("  {} {}", "Evaluators:".dimmed(), evaluator_names.join(", ").yellow());
+        if let Some(threshold) = fail_below {
+            println!("  {} {}", "Fail below:".dimmed(), format!("{:.1}%", threshold * 100.0).red());
+        }
+        println!();
+    }
+
+    let experiment = runner.run(config)?;
+
+    if json_output {
+        let output = serde_json::json!({
+            "schema_version": 1,
+            "experiment_id": experiment.id,
+            "experiment_name": experiment.name,
+            "dataset_version": experiment.dataset_version,
+            "status": experiment.status.as_str(),
+            "total_examples": experiment.total_examples,
+            "avg_score": experiment.avg_score,
+            "min_score": experiment.min_score,
+            "max_score": experiment.max_score,
+            "pass_rate": experiment.pass_rate,
+            "total_duration_ms": experiment.total_duration_ms,
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        let avg = experiment.avg_score.unwrap_or(0.0);
+        let pass_rate = experiment.pass_rate.unwrap_or(0.0);
+
+        println!("  {} {}", "Experiment:".dimmed(), experiment.name.white().bold());
+        println!("  {} {}", "Status:".dimmed(), experiment.status.as_str().green());
+        println!("  {} {}", "Examples:".dimmed(), experiment.total_examples.to_string().yellow());
+        println!(
+            "  {} {}",
+            "Avg Score:".dimmed(),
+            format_score(avg),
+        );
+        println!(
+            "  {} {}",
+            "Pass Rate:".dimmed(),
+            format!("{:.1}%", pass_rate * 100.0).white().bold(),
+        );
+        println!(
+            "  {} {}",
+            "Duration:".dimmed(),
+            format!("{}ms", experiment.total_duration_ms).dimmed(),
+        );
+        println!();
+
+        // Show per-example results
+        let results = store.get_experiment_results(&experiment.id)?;
+        for result in &results {
+            let scores = store.get_experiment_scores(&result.id)?;
+            let avg_score = if scores.is_empty() {
+                0.0
+            } else {
+                scores.iter().map(|s| s.score).sum::<f64>() / scores.len() as f64
+            };
+
+            let status_icon = match result.status.as_str() {
+                "success" => "✓".green(),
+                "error" => "✗".red(),
+                _ => "…".yellow(),
+            };
+
+            let score_details: Vec<String> = scores
+                .iter()
+                .map(|s| {
+                    let ev = store.get_evaluator_by_name("").ok().flatten(); // We'll use the id
+                    let _ = ev;
+                    format!("{:.2}", s.score)
+                })
+                .collect();
+
+            println!(
+                "  {} #{:<3} {} {}",
+                status_icon,
+                result.ordinal,
+                format_score(avg_score),
+                if let Some(ref err) = result.error {
+                    err.red().to_string()
+                } else {
+                    score_details.join(" | ").dimmed().to_string()
+                },
+            );
+        }
+        println!();
+    }
+
+    // Check fail_below threshold
+    if let Some(threshold) = fail_below {
+        let avg = experiment.avg_score.unwrap_or(0.0);
+        if avg < threshold {
+            if !json_output {
+                println!(
+                    "  {} avg_score {:.3} < threshold {:.3}",
+                    "FAILED:".red().bold(),
+                    avg,
+                    threshold,
+                );
+            }
+            std::process::exit(1);
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_eval_compare(left_ref: String, right_ref: String, json_output: bool, force: bool) -> Result<()> {
+    let store = Store::open_default()?;
+
+    // Resolve experiment references by name or ID
+    let left = resolve_experiment(&store, &left_ref)?;
+    let right = resolve_experiment(&store, &right_ref)?;
+
+    let comparison = rewind_eval::compare_experiments(&store, &left.id, &right.id, force)?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&comparison)?);
+        return Ok(());
+    }
+
+    println!("{}", "⏪ Rewind — Experiment Comparison".cyan().bold());
+    println!();
+    println!(
+        "  {} {} (avg: {}) vs {} (avg: {})",
+        "Comparing:".dimmed(),
+        comparison.left_name.cyan().bold(),
+        format_score(comparison.left_avg_score),
+        comparison.right_name.yellow().bold(),
+        format_score(comparison.right_avg_score),
+    );
+    println!();
+
+    let delta_str = if comparison.overall_delta > 0.0 {
+        format!("+{:.3}", comparison.overall_delta).green().bold().to_string()
+    } else if comparison.overall_delta < 0.0 {
+        format!("{:.3}", comparison.overall_delta).red().bold().to_string()
+    } else {
+        "0.000".dimmed().to_string()
+    };
+    println!("  {} {}", "Overall delta:".dimmed(), delta_str);
+    println!(
+        "  {} {} regressions, {} improvements, {} unchanged",
+        "Summary:".dimmed(),
+        comparison.regressions.to_string().red(),
+        comparison.improvements.to_string().green(),
+        comparison.unchanged.to_string().dimmed(),
+    );
+    println!();
+
+    // Show per-example diffs (only changes)
+    let changes: Vec<_> = comparison
+        .example_diffs
+        .iter()
+        .filter(|d| d.direction != rewind_eval::DiffDirection::Unchanged)
+        .collect();
+
+    if !changes.is_empty() {
+        println!("  {}", "Changes:".dimmed());
+        for diff in changes {
+            let icon = match diff.direction {
+                rewind_eval::DiffDirection::Regression => "▼".red(),
+                rewind_eval::DiffDirection::Improvement => "▲".green(),
+                rewind_eval::DiffDirection::Unchanged => "═".dimmed(),
+            };
+            let delta = if diff.delta > 0.0 {
+                format!("+{:.3}", diff.delta).green().to_string()
+            } else {
+                format!("{:.3}", diff.delta).red().to_string()
+            };
+            println!(
+                "    {} #{:<3} {:.2} → {:.2} ({}) {}",
+                icon,
+                diff.ordinal,
+                diff.left_score,
+                diff.right_score,
+                delta,
+                diff.input_preview.dimmed(),
+            );
+        }
+    } else {
+        println!("  {}", "No changes detected.".dimmed());
+    }
+
+    println!();
+    Ok(())
+}
+
+fn cmd_eval_experiments(dataset_filter: Option<String>) -> Result<()> {
+    let store = Store::open_default()?;
+    let experiments = match dataset_filter {
+        Some(ref name) => store.list_experiments_by_dataset(name)?,
+        None => store.list_experiments()?,
+    };
+
+    if experiments.is_empty() {
+        println!("{}", "No experiments yet.".dimmed());
+        println!("  Run one: {}", "rewind eval run <dataset> -c <command> -e <evaluator>".green());
+        return Ok(());
+    }
+
+    println!("{}", "⏪ Rewind — Experiments".cyan().bold());
+    println!();
+    println!(
+        "  {:>25} {:>10} {:>8} {:>10} {:>10} {}",
+        "NAME".dimmed(), "STATUS".dimmed(), "EXAMPLES".dimmed(), "AVG SCORE".dimmed(), "PASS RATE".dimmed(), "CREATED".dimmed(),
+    );
+    println!("  {}", "─".repeat(80).dimmed());
+
+    for exp in &experiments {
+        let status_str = match exp.status {
+            rewind_store::ExperimentStatus::Completed => exp.status.as_str().green(),
+            rewind_store::ExperimentStatus::Failed => exp.status.as_str().red(),
+            rewind_store::ExperimentStatus::Running => exp.status.as_str().yellow(),
+            _ => exp.status.as_str().dimmed(),
+        };
+        let ago = format_time_ago(exp.created_at);
+        println!(
+            "  {:>25} {:>10} {:>8} {:>10} {:>10} {}",
+            exp.name.white().bold(),
+            status_str,
+            exp.total_examples.to_string().yellow(),
+            exp.avg_score.map(|s| format!("{:.3}", s)).unwrap_or("-".to_string()),
+            exp.pass_rate.map(|r| format!("{:.0}%", r * 100.0)).unwrap_or("-".to_string()),
+            ago.dimmed(),
+        );
+    }
+    println!();
+    Ok(())
+}
+
+fn cmd_eval_show(experiment_ref: String) -> Result<()> {
+    let store = Store::open_default()?;
+    let experiment = resolve_experiment(&store, &experiment_ref)?;
+
+    println!("{}", "⏪ Rewind — Experiment Detail".cyan().bold());
+    println!();
+    println!("  {} {}", "Name:".dimmed(), experiment.name.white().bold());
+    println!("  {} {}", "ID:".dimmed(), experiment.id.dimmed());
+    println!("  {} {}", "Status:".dimmed(), experiment.status.as_str().green());
+    println!("  {} {}", "Dataset version:".dimmed(), format!("v{}", experiment.dataset_version).yellow());
+    println!("  {} {}", "Examples:".dimmed(), experiment.total_examples.to_string().yellow());
+    println!(
+        "  {} {}",
+        "Avg Score:".dimmed(),
+        format_score(experiment.avg_score.unwrap_or(0.0)),
+    );
+    println!(
+        "  {} {}",
+        "Pass Rate:".dimmed(),
+        experiment.pass_rate.map(|r| format!("{:.1}%", r * 100.0)).unwrap_or("-".to_string()).white().bold(),
+    );
+    println!(
+        "  {} avg={:.3} / min={:.3} / max={:.3}",
+        "Scores:".dimmed(),
+        experiment.avg_score.unwrap_or(0.0),
+        experiment.min_score.unwrap_or(0.0),
+        experiment.max_score.unwrap_or(0.0),
+    );
+    println!("  {} {}", "Duration:".dimmed(), format!("{}ms", experiment.total_duration_ms).dimmed());
+    println!();
+
+    // Show per-example results
+    let results = store.get_experiment_results(&experiment.id)?;
+    println!("  {}", "Results:".dimmed());
+    for result in &results {
+        let scores = store.get_experiment_scores(&result.id)?;
+        let status_icon = match result.status.as_str() {
+            "success" => "✓".green(),
+            "error" => "✗".red(),
+            _ => "…".yellow(),
+        };
+
+        let score_strs: Vec<String> = scores.iter().map(|s| format!("{:.2}", s.score)).collect();
+        let avg = if scores.is_empty() {
+            0.0
+        } else {
+            scores.iter().map(|s| s.score).sum::<f64>() / scores.len() as f64
+        };
+
+        println!(
+            "    {} #{:<3} {} {}  {}",
+            status_icon,
+            result.ordinal,
+            format_score(avg),
+            format!("({}ms)", result.duration_ms).dimmed(),
+            if let Some(ref err) = result.error {
+                err.red().to_string()
+            } else {
+                score_strs.join(" | ").dimmed().to_string()
+            },
+        );
+
+        // Show reasoning for failed scores
+        for s in &scores {
+            if !s.passed && !s.reasoning.is_empty() {
+                let reason: String = s.reasoning.chars().take(80).collect();
+                println!("          {} {}", "↳".dimmed(), reason.dimmed());
+            }
+        }
+    }
+    println!();
+    Ok(())
+}
+
+fn resolve_experiment(store: &Store, reference: &str) -> Result<rewind_store::Experiment> {
+    // Try by name first, then by ID, then by ID prefix
+    if let Some(exp) = store.get_experiment_by_name(reference)? {
+        return Ok(exp);
+    }
+    if let Some(exp) = store.get_experiment(reference)? {
+        return Ok(exp);
+    }
+    // Try prefix
+    let experiments = store.list_experiments()?;
+    experiments
+        .into_iter()
+        .find(|e| e.id.starts_with(reference))
+        .context(format!("Experiment not found: {}", reference))
+}
+
+fn format_score(score: f64) -> colored::ColoredString {
+    let s = format!("{:.3}", score);
+    if score >= 0.8 {
+        s.green().bold()
+    } else if score >= 0.6 {
+        s.yellow()
+    } else {
+        s.red()
+    }
 }
 
 // ── Demo data seeding ─────────────────────────────────────────

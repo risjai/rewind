@@ -4,7 +4,7 @@ import { useStore } from '@/hooks/use-store'
 import { cn, timeAgo, formatTokens } from '@/lib/utils'
 import {
   PanelLeftClose, PanelLeftOpen, Activity,
-  Shield, ChevronRight, Sun, Moon,
+  Shield, ChevronRight, Sun, Moon, FlaskConical,
 } from 'lucide-react'
 import { useTheme } from '@/hooks/use-theme'
 import type { Session } from '@/types/api'
@@ -27,6 +27,7 @@ export function Sidebar() {
         <div className="mt-4 space-y-2">
           <NavIconButton icon={Activity} active={view === 'sessions'} onClick={() => setView('sessions')} title="Sessions" />
           <NavIconButton icon={Shield} active={view === 'baselines'} onClick={() => setView('baselines')} title="Baselines" />
+          <NavIconButton icon={FlaskConical} active={view === 'evaluations'} onClick={() => setView('evaluations')} title="Evaluations" />
         </div>
       </aside>
     )
@@ -47,6 +48,7 @@ export function Sidebar() {
       <nav className="flex gap-1 px-3 pt-3">
         <NavButton icon={Activity} label="Sessions" active={view === 'sessions'} onClick={() => setView('sessions')} />
         <NavButton icon={Shield} label="Baselines" active={view === 'baselines'} onClick={() => setView('baselines')} />
+        <NavButton icon={FlaskConical} label="Evals" active={view === 'evaluations'} onClick={() => setView('evaluations')} />
       </nav>
 
       <div className="flex-1 overflow-y-auto scrollbar-thin px-2 py-2 space-y-0.5">

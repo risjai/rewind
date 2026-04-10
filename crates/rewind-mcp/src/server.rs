@@ -7,8 +7,9 @@ use rmcp::{
     tool, tool_handler, tool_router,
 };
 use rewind_assert::{AssertionEngine, BaselineManager, Tolerance};
+use rewind_eval::compare_experiments;
 use rewind_replay::ReplayEngine;
-use rewind_store::Store;
+use rewind_store::{Experiment, Store};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -113,6 +114,33 @@ fn default_token_tolerance() -> u32 {
 pub struct BaselineNameParam {
     /// Baseline name
     pub name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DatasetNameParam {
+    /// Dataset name
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListExperimentsParam {
+    /// Filter by dataset name (optional)
+    #[serde(default)]
+    pub dataset: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ExperimentRefParam {
+    /// Experiment name or ID
+    pub experiment: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CompareExperimentsParam {
+    /// Left experiment name or ID
+    pub left: String,
+    /// Right experiment name or ID
+    pub right: String,
 }
 
 // ── Response types ───────────────────────────────────────────
@@ -680,6 +708,247 @@ impl RewindMcp {
         });
         ok_json(&json)
     }
+
+    // ── Evaluation tools ──────────────────────────────────────
+
+    #[tool(
+        name = "list_eval_datasets",
+        description = "List all evaluation datasets with example counts and versions"
+    )]
+    async fn list_eval_datasets(&self) -> Result<CallToolResult, McpError> {
+        let store = self.lock_store()?;
+        let datasets = store.list_datasets().map_err(|e| mcp_err(&e))?;
+
+        let items: Vec<serde_json::Value> = datasets
+            .iter()
+            .map(|d| {
+                serde_json::json!({
+                    "id": d.id,
+                    "name": d.name,
+                    "description": d.description,
+                    "version": d.version,
+                    "example_count": d.example_count,
+                    "created_at": d.created_at.to_rfc3339(),
+                    "updated_at": d.updated_at.to_rfc3339(),
+                })
+            })
+            .collect();
+
+        let json = serde_json::json!({
+            "datasets": items,
+            "count": items.len(),
+        });
+        ok_json(&json)
+    }
+
+    #[tool(
+        name = "show_eval_dataset",
+        description = "Show evaluation dataset details including example previews"
+    )]
+    async fn show_eval_dataset(
+        &self,
+        params: Parameters<DatasetNameParam>,
+    ) -> Result<CallToolResult, McpError> {
+        let store = self.lock_store()?;
+        let dataset = store
+            .get_dataset_by_name(&params.0.name)
+            .map_err(|e| mcp_err(&e))?
+            .ok_or_else(|| mcp_err_str(&format!("Dataset '{}' not found", params.0.name)))?;
+
+        let examples = store
+            .get_dataset_examples(&dataset.id)
+            .map_err(|e| mcp_err(&e))?;
+
+        let example_previews: Vec<serde_json::Value> = examples
+            .iter()
+            .take(10)
+            .map(|ex| {
+                let input_preview = store
+                    .blobs
+                    .get_json::<serde_json::Value>(&ex.input_blob)
+                    .ok()
+                    .map(|v| truncate_json_preview(&v, 200))
+                    .unwrap_or_else(|| "(blob not found)".to_string());
+
+                let expected_preview = store
+                    .blobs
+                    .get_json::<serde_json::Value>(&ex.expected_blob)
+                    .ok()
+                    .map(|v| truncate_json_preview(&v, 200))
+                    .unwrap_or_else(|| "(blob not found)".to_string());
+
+                serde_json::json!({
+                    "id": ex.id,
+                    "ordinal": ex.ordinal,
+                    "input_preview": input_preview,
+                    "expected_preview": expected_preview,
+                    "source_session_id": ex.source_session_id,
+                })
+            })
+            .collect();
+
+        let json = serde_json::json!({
+            "dataset": {
+                "id": dataset.id,
+                "name": dataset.name,
+                "description": dataset.description,
+                "version": dataset.version,
+                "example_count": dataset.example_count,
+                "created_at": dataset.created_at.to_rfc3339(),
+                "updated_at": dataset.updated_at.to_rfc3339(),
+                "metadata": dataset.metadata,
+            },
+            "examples": example_previews,
+            "showing": example_previews.len(),
+            "total": examples.len(),
+        });
+        ok_json(&json)
+    }
+
+    #[tool(
+        name = "list_eval_experiments",
+        description = "List evaluation experiments, optionally filtered by dataset name"
+    )]
+    async fn list_eval_experiments(
+        &self,
+        params: Parameters<ListExperimentsParam>,
+    ) -> Result<CallToolResult, McpError> {
+        let store = self.lock_store()?;
+        let experiments = if let Some(ref dataset_name) = params.0.dataset {
+            store
+                .list_experiments_by_dataset(dataset_name)
+                .map_err(|e| mcp_err(&e))?
+        } else {
+            store.list_experiments().map_err(|e| mcp_err(&e))?
+        };
+
+        let items: Vec<serde_json::Value> = experiments
+            .iter()
+            .map(|exp| {
+                serde_json::json!({
+                    "id": exp.id,
+                    "name": exp.name,
+                    "dataset_id": exp.dataset_id,
+                    "dataset_version": exp.dataset_version,
+                    "status": exp.status.as_str(),
+                    "total_examples": exp.total_examples,
+                    "completed_examples": exp.completed_examples,
+                    "avg_score": exp.avg_score,
+                    "pass_rate": exp.pass_rate,
+                    "total_duration_ms": exp.total_duration_ms,
+                    "total_tokens": exp.total_tokens,
+                    "created_at": exp.created_at.to_rfc3339(),
+                    "completed_at": exp.completed_at.map(|dt| dt.to_rfc3339()),
+                })
+            })
+            .collect();
+
+        let json = serde_json::json!({
+            "experiments": items,
+            "count": items.len(),
+        });
+        ok_json(&json)
+    }
+
+    #[tool(
+        name = "show_eval_experiment",
+        description = "Show experiment results with per-example scores and evaluator details"
+    )]
+    async fn show_eval_experiment(
+        &self,
+        params: Parameters<ExperimentRefParam>,
+    ) -> Result<CallToolResult, McpError> {
+        let store = self.lock_store()?;
+        let exp = resolve_experiment_ref(&store, &params.0.experiment)?;
+
+        let results = store
+            .get_experiment_results(&exp.id)
+            .map_err(|e| mcp_err(&e))?;
+
+        // Build evaluator ID → name lookup
+        let evaluators = store.list_evaluators().map_err(|e| mcp_err(&e))?;
+        let evaluator_names: std::collections::HashMap<String, String> = evaluators
+            .into_iter()
+            .map(|ev| (ev.id.clone(), ev.name))
+            .collect();
+
+        let result_items: Vec<serde_json::Value> = results
+            .iter()
+            .map(|r| {
+                let scores = store
+                    .get_experiment_scores(&r.id)
+                    .unwrap_or_default();
+
+                let score_items: Vec<serde_json::Value> = scores
+                    .iter()
+                    .map(|s| {
+                        let evaluator_name = evaluator_names
+                            .get(&s.evaluator_id)
+                            .cloned()
+                            .unwrap_or_else(|| s.evaluator_id.clone());
+                        serde_json::json!({
+                            "evaluator": evaluator_name,
+                            "score": s.score,
+                            "passed": s.passed,
+                            "reasoning": s.reasoning,
+                        })
+                    })
+                    .collect();
+
+                serde_json::json!({
+                    "ordinal": r.ordinal,
+                    "example_id": r.example_id,
+                    "status": r.status,
+                    "duration_ms": r.duration_ms,
+                    "tokens_in": r.tokens_in,
+                    "tokens_out": r.tokens_out,
+                    "error": r.error,
+                    "scores": score_items,
+                })
+            })
+            .collect();
+
+        let json = serde_json::json!({
+            "experiment": {
+                "id": exp.id,
+                "name": exp.name,
+                "dataset_id": exp.dataset_id,
+                "dataset_version": exp.dataset_version,
+                "status": exp.status.as_str(),
+                "total_examples": exp.total_examples,
+                "completed_examples": exp.completed_examples,
+                "avg_score": exp.avg_score,
+                "min_score": exp.min_score,
+                "max_score": exp.max_score,
+                "pass_rate": exp.pass_rate,
+                "total_duration_ms": exp.total_duration_ms,
+                "total_tokens": exp.total_tokens,
+                "created_at": exp.created_at.to_rfc3339(),
+                "completed_at": exp.completed_at.map(|dt| dt.to_rfc3339()),
+            },
+            "results": result_items,
+        });
+        ok_json(&json)
+    }
+
+    #[tool(
+        name = "compare_eval_experiments",
+        description = "Compare two experiments side-by-side showing regressions and improvements"
+    )]
+    async fn compare_eval_experiments(
+        &self,
+        params: Parameters<CompareExperimentsParam>,
+    ) -> Result<CallToolResult, McpError> {
+        let store = self.lock_store()?;
+        let left = resolve_experiment_ref(&store, &params.0.left)?;
+        let right = resolve_experiment_ref(&store, &params.0.right)?;
+
+        let comparison =
+            compare_experiments(&store, &left.id, &right.id, false).map_err(|e| mcp_err(&e))?;
+
+        let json = serde_json::to_value(&comparison).map_err(|e| mcp_err(&e))?;
+        ok_json(&json)
+    }
 }
 
 // ── ServerHandler implementation ─────────────────────────────
@@ -694,7 +963,9 @@ impl ServerHandler for RewindMcp {
              view step-by-step traces, examine full request/response content, \
              diff timelines, and create forks to explore alternative paths. \
              Use assertion baselines to create regression tests from known-good sessions \
-             and check new sessions for regressions."
+             and check new sessions for regressions. \
+             Use evaluation tools to browse datasets, inspect experiment results with \
+             per-example scores, and compare experiments to find regressions and improvements."
                 .to_string(),
         );
         info
@@ -715,6 +986,24 @@ fn mcp_err(e: &dyn std::fmt::Display) -> McpError {
 
 fn mcp_err_str(msg: &str) -> McpError {
     McpError::internal_error(msg.to_string(), None)
+}
+
+fn resolve_experiment_ref(store: &Store, reference: &str) -> Result<Experiment, McpError> {
+    store
+        .get_experiment_by_name(reference)
+        .ok()
+        .flatten()
+        .or_else(|| store.get_experiment(reference).ok().flatten())
+        .ok_or_else(|| mcp_err_str(&format!("Experiment not found: {}", reference)))
+}
+
+fn truncate_json_preview(value: &serde_json::Value, max_len: usize) -> String {
+    let s = serde_json::to_string(value).unwrap_or_default();
+    if s.len() <= max_len {
+        s
+    } else {
+        format!("{}...", &s[..max_len - 3])
+    }
 }
 
 fn resolve_session(

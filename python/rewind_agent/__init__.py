@@ -31,6 +31,21 @@ from .hooks import (
 from .assertions import Assertions, AssertionResult
 from .openai_agents import openai_agents_hooks
 from .pydantic_ai import pydantic_ai_hooks
+from .evaluation import (
+    Dataset,
+    EvalScore,
+    EvalFailedError,
+    ExperimentResult,
+    ExampleResult,
+    ComparisonResult,
+    evaluate,
+    compare,
+    evaluator,
+    exact_match,
+    contains_match,
+    regex_match,
+    tool_use_match,
+)
 
 __all__ = [
     "init",
@@ -49,5 +64,19 @@ __all__ = [
     "pydantic_ai_hooks",
     "Assertions",
     "AssertionResult",
+    # Evaluation
+    "Dataset",
+    "EvalScore",
+    "EvalFailedError",
+    "ExperimentResult",
+    "ExampleResult",
+    "ComparisonResult",
+    "evaluate",
+    "compare",
+    "evaluator",
+    "exact_match",
+    "contains_match",
+    "regex_match",
+    "tool_use_match",
 ]
 __version__ = "0.6.0"

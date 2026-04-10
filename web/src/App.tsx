@@ -2,6 +2,7 @@ import { Sidebar } from '@/components/Sidebar'
 import { SessionView } from '@/components/SessionView'
 import { DiffView } from '@/components/DiffView'
 import { BaselinesView } from '@/components/BaselinesView'
+import { EvalDashboard } from '@/components/EvalDashboard'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { useStore } from '@/hooks/use-store'
 
@@ -19,6 +20,8 @@ export function App() {
           <DiffView sessionId={selectedSessionId} />
         ) : view === 'baselines' ? (
           <BaselinesView />
+        ) : view === 'evaluations' ? (
+          <EvalDashboard />
         ) : (
           <EmptyState />
         )}

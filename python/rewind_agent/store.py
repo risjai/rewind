@@ -45,6 +45,16 @@ class BlobStore:
         data = json.dumps(obj, separators=(",", ":"), default=str).encode("utf-8")
         return self.put(data)
 
+    def get_json(self, h: str):
+        """Retrieve a JSON object by hash. Returns None if hash is empty or file missing."""
+        if not h:
+            return None
+        try:
+            data = self.get(h)
+            return json.loads(data)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return None
+
     def _blob_path(self, h: str) -> str:
         """Path: {root}/{first 2 hex chars}/{remaining hex chars}"""
         if len(h) < 3:
@@ -149,6 +159,99 @@ CREATE TABLE IF NOT EXISTS baseline_steps (
 
 CREATE INDEX IF NOT EXISTS idx_baseline_steps_baseline
     ON baseline_steps(baseline_id, step_number);
+
+CREATE TABLE IF NOT EXISTS datasets (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    example_count INTEGER NOT NULL DEFAULT 0,
+    metadata TEXT NOT NULL DEFAULT '{}'
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_datasets_name_version
+    ON datasets(name, version);
+
+CREATE TABLE IF NOT EXISTS dataset_examples (
+    id TEXT PRIMARY KEY,
+    dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
+    ordinal INTEGER NOT NULL,
+    input_blob TEXT NOT NULL,
+    expected_blob TEXT NOT NULL DEFAULT '',
+    metadata TEXT NOT NULL DEFAULT '{}',
+    source_session_id TEXT,
+    source_step_id TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE(dataset_id, ordinal)
+);
+CREATE INDEX IF NOT EXISTS idx_dataset_examples_dataset
+    ON dataset_examples(dataset_id, ordinal);
+
+CREATE TABLE IF NOT EXISTS evaluators (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    evaluator_type TEXT NOT NULL,
+    config_blob TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT ''
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_evaluators_name ON evaluators(name);
+
+CREATE TABLE IF NOT EXISTS experiments (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    dataset_id TEXT NOT NULL REFERENCES datasets(id),
+    dataset_version INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    total_examples INTEGER NOT NULL DEFAULT 0,
+    completed_examples INTEGER NOT NULL DEFAULT 0,
+    avg_score REAL,
+    min_score REAL,
+    max_score REAL,
+    pass_rate REAL,
+    total_duration_ms INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0,
+    config_blob TEXT NOT NULL DEFAULT '',
+    metadata TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_experiments_dataset ON experiments(dataset_id);
+CREATE INDEX IF NOT EXISTS idx_experiments_name ON experiments(name);
+
+CREATE TABLE IF NOT EXISTS experiment_results (
+    id TEXT PRIMARY KEY,
+    experiment_id TEXT NOT NULL REFERENCES experiments(id) ON DELETE CASCADE,
+    example_id TEXT NOT NULL REFERENCES dataset_examples(id),
+    ordinal INTEGER NOT NULL,
+    output_blob TEXT NOT NULL DEFAULT '',
+    trace_session_id TEXT,
+    trace_timeline_id TEXT,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    tokens_in INTEGER NOT NULL DEFAULT 0,
+    tokens_out INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'pending',
+    error TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_experiment_results_experiment
+    ON experiment_results(experiment_id, ordinal);
+
+CREATE TABLE IF NOT EXISTS experiment_scores (
+    id TEXT PRIMARY KEY,
+    result_id TEXT NOT NULL REFERENCES experiment_results(id) ON DELETE CASCADE,
+    evaluator_id TEXT NOT NULL REFERENCES evaluators(id),
+    score REAL NOT NULL,
+    passed INTEGER NOT NULL,
+    reasoning TEXT NOT NULL DEFAULT '',
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_experiment_scores_result
+    ON experiment_scores(result_id);
+CREATE INDEX IF NOT EXISTS idx_experiment_scores_evaluator
+    ON experiment_scores(evaluator_id);
 """
 
 
@@ -346,6 +449,242 @@ class Store:
             )
             self._conn.commit()
         return timeline_id
+
+    # ── Evaluation: Datasets ─────────────────────────────────
+
+    def get_dataset_by_name(self, name: str) -> dict | None:
+        """Return the latest version of a dataset by name, or None."""
+        row = self._conn.execute(
+            "SELECT id, name, description, created_at, updated_at, version, example_count, metadata "
+            "FROM datasets WHERE name = ? ORDER BY version DESC LIMIT 1",
+            (name,),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": row[0], "name": row[1], "description": row[2],
+            "created_at": row[3], "updated_at": row[4], "version": row[5],
+            "example_count": row[6], "metadata": row[7],
+        }
+
+    def get_dataset_examples(self, dataset_id: str) -> list:
+        """Return all examples for a dataset, ordered by ordinal."""
+        rows = self._conn.execute(
+            "SELECT id, dataset_id, ordinal, input_blob, expected_blob, metadata, "
+            "source_session_id, source_step_id, created_at "
+            "FROM dataset_examples WHERE dataset_id = ? ORDER BY ordinal",
+            (dataset_id,),
+        ).fetchall()
+        return [
+            {
+                "id": r[0], "dataset_id": r[1], "ordinal": r[2],
+                "input_blob": r[3], "expected_blob": r[4], "metadata": r[5],
+                "source_session_id": r[6], "source_step_id": r[7],
+                "created_at": r[8],
+            }
+            for r in rows
+        ]
+
+    # ── Evaluation: Evaluators ─────────────────────────────────
+
+    def create_evaluator(self, evaluator_id: str, name: str, evaluator_type: str,
+                         config_blob: str = "", description: str = ""):
+        """Register an evaluator in the database."""
+        now = _now_rfc3339()
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO evaluators "
+                "(id, name, evaluator_type, config_blob, created_at, description) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (evaluator_id, name, evaluator_type, config_blob, now, description),
+            )
+            self._conn.commit()
+
+    def get_evaluator_by_name(self, name: str) -> dict | None:
+        """Return an evaluator by name, or None."""
+        row = self._conn.execute(
+            "SELECT id, name, evaluator_type, config_blob, created_at, description "
+            "FROM evaluators WHERE name = ?",
+            (name,),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": row[0], "name": row[1], "evaluator_type": row[2],
+            "config_blob": row[3], "created_at": row[4], "description": row[5],
+        }
+
+    # ── Evaluation: Experiments ─────────────────────────────────
+
+    def create_experiment(self, experiment_id: str, name: str, dataset_id: str,
+                          dataset_version: int, total_examples: int,
+                          config_blob: str = "", metadata: str = "{}"):
+        """Create a new experiment record."""
+        now = _now_rfc3339()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO experiments "
+                "(id, name, dataset_id, dataset_version, status, created_at, "
+                "total_examples, completed_examples, config_blob, metadata) "
+                "VALUES (?, ?, ?, ?, 'running', ?, ?, 0, ?, ?)",
+                (experiment_id, name, dataset_id, dataset_version,
+                 now, total_examples, config_blob, metadata),
+            )
+            self._conn.commit()
+
+    def update_experiment_status(self, experiment_id: str, status: str):
+        """Update experiment status ('running', 'completed', 'failed')."""
+        now = _now_rfc3339()
+        completed_at = now if status in ("completed", "failed") else None
+        with self._lock:
+            self._conn.execute(
+                "UPDATE experiments SET status = ?, completed_at = ? WHERE id = ?",
+                (status, completed_at, experiment_id),
+            )
+            self._conn.commit()
+
+    def update_experiment_progress(self, experiment_id: str, completed_examples: int):
+        """Update the number of completed examples."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE experiments SET completed_examples = ? WHERE id = ?",
+                (completed_examples, experiment_id),
+            )
+            self._conn.commit()
+
+    def update_experiment_aggregates(self, experiment_id: str, avg_score: float,
+                                     min_score: float, max_score: float,
+                                     pass_rate: float, total_duration_ms: int,
+                                     total_tokens: int = 0):
+        """Update experiment aggregate statistics."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE experiments SET avg_score = ?, min_score = ?, max_score = ?, "
+                "pass_rate = ?, total_duration_ms = ?, total_tokens = ? WHERE id = ?",
+                (avg_score, min_score, max_score, pass_rate,
+                 total_duration_ms, total_tokens, experiment_id),
+            )
+            self._conn.commit()
+
+    def get_experiment(self, experiment_id: str) -> dict | None:
+        """Return an experiment by ID, or None."""
+        row = self._conn.execute(
+            "SELECT id, name, dataset_id, dataset_version, status, created_at, "
+            "completed_at, total_examples, completed_examples, avg_score, "
+            "min_score, max_score, pass_rate, total_duration_ms, total_tokens, "
+            "config_blob, metadata "
+            "FROM experiments WHERE id = ?",
+            (experiment_id,),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": row[0], "name": row[1], "dataset_id": row[2],
+            "dataset_version": row[3], "status": row[4],
+            "created_at": row[5], "completed_at": row[6],
+            "total_examples": row[7], "completed_examples": row[8],
+            "avg_score": row[9], "min_score": row[10], "max_score": row[11],
+            "pass_rate": row[12], "total_duration_ms": row[13],
+            "total_tokens": row[14], "config_blob": row[15],
+            "metadata": row[16],
+        }
+
+    def get_experiment_by_name(self, name: str) -> dict | None:
+        """Return the latest experiment with the given name, or None."""
+        row = self._conn.execute(
+            "SELECT id, name, dataset_id, dataset_version, status, created_at, "
+            "completed_at, total_examples, completed_examples, avg_score, "
+            "min_score, max_score, pass_rate, total_duration_ms, total_tokens, "
+            "config_blob, metadata "
+            "FROM experiments WHERE name = ? ORDER BY created_at DESC LIMIT 1",
+            (name,),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": row[0], "name": row[1], "dataset_id": row[2],
+            "dataset_version": row[3], "status": row[4],
+            "created_at": row[5], "completed_at": row[6],
+            "total_examples": row[7], "completed_examples": row[8],
+            "avg_score": row[9], "min_score": row[10], "max_score": row[11],
+            "pass_rate": row[12], "total_duration_ms": row[13],
+            "total_tokens": row[14], "config_blob": row[15],
+            "metadata": row[16],
+        }
+
+    # ── Evaluation: Experiment Results ──────────────────────────
+
+    def create_experiment_result(self, result_id: str, experiment_id: str,
+                                 example_id: str, ordinal: int,
+                                 output_blob: str = "", duration_ms: int = 0,
+                                 tokens_in: int = 0, tokens_out: int = 0,
+                                 status: str = "success", error: str = None):
+        """Create an experiment result record for a single example."""
+        now = _now_rfc3339()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO experiment_results "
+                "(id, experiment_id, example_id, ordinal, output_blob, "
+                "duration_ms, tokens_in, tokens_out, status, error, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (result_id, experiment_id, example_id, ordinal, output_blob,
+                 duration_ms, tokens_in, tokens_out, status, error, now),
+            )
+            self._conn.commit()
+
+    def get_experiment_results(self, experiment_id: str) -> list:
+        """Return all results for an experiment, ordered by ordinal."""
+        rows = self._conn.execute(
+            "SELECT id, experiment_id, example_id, ordinal, output_blob, "
+            "trace_session_id, trace_timeline_id, duration_ms, tokens_in, "
+            "tokens_out, status, error, created_at "
+            "FROM experiment_results WHERE experiment_id = ? ORDER BY ordinal",
+            (experiment_id,),
+        ).fetchall()
+        return [
+            {
+                "id": r[0], "experiment_id": r[1], "example_id": r[2],
+                "ordinal": r[3], "output_blob": r[4],
+                "trace_session_id": r[5], "trace_timeline_id": r[6],
+                "duration_ms": r[7], "tokens_in": r[8], "tokens_out": r[9],
+                "status": r[10], "error": r[11], "created_at": r[12],
+            }
+            for r in rows
+        ]
+
+    # ── Evaluation: Experiment Scores ──────────────────────────
+
+    def create_experiment_score(self, score_id: str, result_id: str,
+                                evaluator_id: str, score: float, passed: bool,
+                                reasoning: str = "", metadata: str = "{}"):
+        """Create a score record for an evaluator on an experiment result."""
+        now = _now_rfc3339()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO experiment_scores "
+                "(id, result_id, evaluator_id, score, passed, reasoning, metadata, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (score_id, result_id, evaluator_id, score,
+                 1 if passed else 0, reasoning, metadata, now),
+            )
+            self._conn.commit()
+
+    def get_experiment_scores(self, result_id: str) -> list:
+        """Return all scores for an experiment result."""
+        rows = self._conn.execute(
+            "SELECT id, result_id, evaluator_id, score, passed, reasoning, "
+            "metadata, created_at "
+            "FROM experiment_scores WHERE result_id = ?",
+            (result_id,),
+        ).fetchall()
+        return [
+            {
+                "id": r[0], "result_id": r[1], "evaluator_id": r[2],
+                "score": r[3], "passed": bool(r[4]), "reasoning": r[5],
+                "metadata": r[6], "created_at": r[7],
+            }
+            for r in rows
+        ]
 
     def close(self):
         """Close the database connection."""

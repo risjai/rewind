@@ -139,6 +139,105 @@ impl Store {
 
             CREATE INDEX IF NOT EXISTS idx_baseline_steps_baseline
                 ON baseline_steps(baseline_id, step_number);
+
+            -- Evaluation: datasets (versioned test-case collections)
+            CREATE TABLE IF NOT EXISTS datasets (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                version INTEGER NOT NULL DEFAULT 1,
+                example_count INTEGER NOT NULL DEFAULT 0,
+                metadata TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_datasets_name_version
+                ON datasets(name, version);
+
+            -- Evaluation: dataset examples (input/expected pairs in blob store)
+            CREATE TABLE IF NOT EXISTS dataset_examples (
+                id TEXT PRIMARY KEY,
+                dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
+                ordinal INTEGER NOT NULL,
+                input_blob TEXT NOT NULL,
+                expected_blob TEXT NOT NULL DEFAULT '',
+                metadata TEXT NOT NULL DEFAULT '{}',
+                source_session_id TEXT,
+                source_step_id TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE(dataset_id, ordinal)
+            );
+            CREATE INDEX IF NOT EXISTS idx_dataset_examples_dataset
+                ON dataset_examples(dataset_id, ordinal);
+
+            -- Evaluation: evaluators (scoring function definitions)
+            CREATE TABLE IF NOT EXISTS evaluators (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                evaluator_type TEXT NOT NULL,
+                config_blob TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT ''
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_evaluators_name ON evaluators(name);
+
+            -- Evaluation: experiments (application runs against datasets)
+            CREATE TABLE IF NOT EXISTS experiments (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                dataset_id TEXT NOT NULL REFERENCES datasets(id),
+                dataset_version INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL,
+                completed_at TEXT,
+                total_examples INTEGER NOT NULL DEFAULT 0,
+                completed_examples INTEGER NOT NULL DEFAULT 0,
+                avg_score REAL,
+                min_score REAL,
+                max_score REAL,
+                pass_rate REAL,
+                total_duration_ms INTEGER NOT NULL DEFAULT 0,
+                total_tokens INTEGER NOT NULL DEFAULT 0,
+                config_blob TEXT NOT NULL DEFAULT '',
+                metadata TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE INDEX IF NOT EXISTS idx_experiments_dataset ON experiments(dataset_id);
+            CREATE INDEX IF NOT EXISTS idx_experiments_name ON experiments(name);
+
+            -- Evaluation: per-example results
+            CREATE TABLE IF NOT EXISTS experiment_results (
+                id TEXT PRIMARY KEY,
+                experiment_id TEXT NOT NULL REFERENCES experiments(id) ON DELETE CASCADE,
+                example_id TEXT NOT NULL REFERENCES dataset_examples(id),
+                ordinal INTEGER NOT NULL,
+                output_blob TEXT NOT NULL DEFAULT '',
+                trace_session_id TEXT,
+                trace_timeline_id TEXT,
+                duration_ms INTEGER NOT NULL DEFAULT 0,
+                tokens_in INTEGER NOT NULL DEFAULT 0,
+                tokens_out INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'pending',
+                error TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_experiment_results_experiment
+                ON experiment_results(experiment_id, ordinal);
+
+            -- Evaluation: per-evaluator scores
+            CREATE TABLE IF NOT EXISTS experiment_scores (
+                id TEXT PRIMARY KEY,
+                result_id TEXT NOT NULL REFERENCES experiment_results(id) ON DELETE CASCADE,
+                evaluator_id TEXT NOT NULL REFERENCES evaluators(id),
+                score REAL NOT NULL,
+                passed INTEGER NOT NULL,
+                reasoning TEXT NOT NULL DEFAULT '',
+                metadata TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_experiment_scores_result
+                ON experiment_scores(result_id);
+            CREATE INDEX IF NOT EXISTS idx_experiment_scores_evaluator
+                ON experiment_scores(evaluator_id);
             ",
         )?;
         Ok(())
@@ -606,6 +705,473 @@ impl Store {
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    // ── Datasets ───────────────────────────────────────────────
+
+    pub fn create_dataset(&self, dataset: &Dataset) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO datasets (id, name, description, created_at, updated_at, version, example_count, metadata)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                dataset.id,
+                dataset.name,
+                dataset.description,
+                dataset.created_at.to_rfc3339(),
+                dataset.updated_at.to_rfc3339(),
+                dataset.version,
+                dataset.example_count,
+                dataset.metadata.to_string(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// List datasets, returning only the latest version of each name.
+    pub fn list_datasets(&self) -> Result<Vec<Dataset>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT d.id, d.name, d.description, d.created_at, d.updated_at, d.version, d.example_count, d.metadata
+             FROM datasets d
+             INNER JOIN (SELECT name, MAX(version) as max_ver FROM datasets GROUP BY name) latest
+             ON d.name = latest.name AND d.version = latest.max_ver
+             ORDER BY d.updated_at DESC",
+        )?;
+        let rows = stmt.query_map([], Self::row_to_dataset)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Get the latest version of a dataset by name.
+    pub fn get_dataset_by_name(&self, name: &str) -> Result<Option<Dataset>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, description, created_at, updated_at, version, example_count, metadata
+             FROM datasets WHERE name = ?1 ORDER BY version DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map(params![name], Self::row_to_dataset)?;
+        Ok(rows.next().transpose()?)
+    }
+
+    /// Get a specific version of a dataset.
+    pub fn get_dataset_by_name_version(&self, name: &str, version: u32) -> Result<Option<Dataset>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, description, created_at, updated_at, version, example_count, metadata
+             FROM datasets WHERE name = ?1 AND version = ?2",
+        )?;
+        let mut rows = stmt.query_map(params![name, version], Self::row_to_dataset)?;
+        Ok(rows.next().transpose()?)
+    }
+
+    pub fn get_dataset(&self, id: &str) -> Result<Option<Dataset>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, description, created_at, updated_at, version, example_count, metadata
+             FROM datasets WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![id], Self::row_to_dataset)?;
+        Ok(rows.next().transpose()?)
+    }
+
+    pub fn delete_dataset_by_name(&self, name: &str) -> Result<()> {
+        // Cascades to dataset_examples
+        self.conn.execute("DELETE FROM datasets WHERE name = ?1", params![name])?;
+        Ok(())
+    }
+
+    pub fn update_dataset_example_count(&self, dataset_id: &str, count: u32) -> Result<()> {
+        self.conn.execute(
+            "UPDATE datasets SET example_count = ?1, updated_at = ?2 WHERE id = ?3",
+            params![count, chrono::Utc::now().to_rfc3339(), dataset_id],
+        )?;
+        Ok(())
+    }
+
+    fn row_to_dataset(row: &rusqlite::Row) -> rusqlite::Result<Dataset> {
+        Ok(Dataset {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            description: row.get(2)?,
+            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(3)?)
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            updated_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            version: row.get(5)?,
+            example_count: row.get(6)?,
+            metadata: serde_json::from_str(&row.get::<_, String>(7)?).unwrap_or_default(),
+        })
+    }
+
+    // ── Dataset Examples ──────────────────────────────────────
+
+    pub fn create_dataset_example(&self, example: &DatasetExample) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO dataset_examples (id, dataset_id, ordinal, input_blob, expected_blob, metadata, source_session_id, source_step_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                example.id,
+                example.dataset_id,
+                example.ordinal,
+                example.input_blob,
+                example.expected_blob,
+                example.metadata.to_string(),
+                example.source_session_id,
+                example.source_step_id,
+                example.created_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_dataset_examples(&self, dataset_id: &str) -> Result<Vec<DatasetExample>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, dataset_id, ordinal, input_blob, expected_blob, metadata, source_session_id, source_step_id, created_at
+             FROM dataset_examples WHERE dataset_id = ?1 ORDER BY ordinal",
+        )?;
+        let rows = stmt.query_map(params![dataset_id], |row| {
+            Ok(DatasetExample {
+                id: row.get(0)?,
+                dataset_id: row.get(1)?,
+                ordinal: row.get(2)?,
+                input_blob: row.get(3)?,
+                expected_blob: row.get(4)?,
+                metadata: serde_json::from_str(&row.get::<_, String>(5)?).unwrap_or_default(),
+                source_session_id: row.get(6)?,
+                source_step_id: row.get(7)?,
+                created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(8)?)
+                    .unwrap()
+                    .with_timezone(&chrono::Utc),
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Copy all examples from one dataset to another (for versioning).
+    pub fn copy_dataset_examples(&self, from_dataset_id: &str, to_dataset_id: &str) -> Result<u32> {
+        let examples = self.get_dataset_examples(from_dataset_id)?;
+        for ex in &examples {
+            let new_ex = DatasetExample {
+                id: uuid::Uuid::new_v4().to_string(),
+                dataset_id: to_dataset_id.to_string(),
+                ordinal: ex.ordinal,
+                input_blob: ex.input_blob.clone(),
+                expected_blob: ex.expected_blob.clone(),
+                metadata: ex.metadata.clone(),
+                source_session_id: ex.source_session_id.clone(),
+                source_step_id: ex.source_step_id.clone(),
+                created_at: ex.created_at,
+            };
+            self.create_dataset_example(&new_ex)?;
+        }
+        Ok(examples.len() as u32)
+    }
+
+    // ── Evaluators ────────────────────────────────────────────
+
+    pub fn create_evaluator(&self, evaluator: &Evaluator) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO evaluators (id, name, evaluator_type, config_blob, created_at, description)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                evaluator.id,
+                evaluator.name,
+                evaluator.evaluator_type,
+                evaluator.config_blob,
+                evaluator.created_at.to_rfc3339(),
+                evaluator.description,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_evaluators(&self) -> Result<Vec<Evaluator>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, evaluator_type, config_blob, created_at, description
+             FROM evaluators ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(Evaluator {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                evaluator_type: row.get(2)?,
+                config_blob: row.get(3)?,
+                created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
+                    .unwrap()
+                    .with_timezone(&chrono::Utc),
+                description: row.get(5)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn get_evaluator_by_name(&self, name: &str) -> Result<Option<Evaluator>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, evaluator_type, config_blob, created_at, description
+             FROM evaluators WHERE name = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![name], |row| {
+            Ok(Evaluator {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                evaluator_type: row.get(2)?,
+                config_blob: row.get(3)?,
+                created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
+                    .unwrap()
+                    .with_timezone(&chrono::Utc),
+                description: row.get(5)?,
+            })
+        })?;
+        Ok(rows.next().transpose()?)
+    }
+
+    pub fn delete_evaluator(&self, name: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM evaluators WHERE name = ?1", params![name])?;
+        Ok(())
+    }
+
+    // ── Experiments ───────────────────────────────────────────
+
+    pub fn create_experiment(&self, exp: &Experiment) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO experiments (id, name, dataset_id, dataset_version, status, created_at, completed_at, total_examples, completed_examples, avg_score, min_score, max_score, pass_rate, total_duration_ms, total_tokens, config_blob, metadata)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            params![
+                exp.id,
+                exp.name,
+                exp.dataset_id,
+                exp.dataset_version,
+                exp.status.as_str(),
+                exp.created_at.to_rfc3339(),
+                exp.completed_at.map(|dt| dt.to_rfc3339()),
+                exp.total_examples,
+                exp.completed_examples,
+                exp.avg_score,
+                exp.min_score,
+                exp.max_score,
+                exp.pass_rate,
+                exp.total_duration_ms,
+                exp.total_tokens,
+                exp.config_blob,
+                exp.metadata.to_string(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_experiments(&self) -> Result<Vec<Experiment>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, dataset_id, dataset_version, status, created_at, completed_at, total_examples, completed_examples, avg_score, min_score, max_score, pass_rate, total_duration_ms, total_tokens, config_blob, metadata
+             FROM experiments ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([], Self::row_to_experiment)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn list_experiments_by_dataset(&self, dataset_name: &str) -> Result<Vec<Experiment>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT e.id, e.name, e.dataset_id, e.dataset_version, e.status, e.created_at, e.completed_at, e.total_examples, e.completed_examples, e.avg_score, e.min_score, e.max_score, e.pass_rate, e.total_duration_ms, e.total_tokens, e.config_blob, e.metadata
+             FROM experiments e
+             INNER JOIN datasets d ON e.dataset_id = d.id
+             WHERE d.name = ?1
+             ORDER BY e.created_at DESC",
+        )?;
+        let rows = stmt.query_map(params![dataset_name], Self::row_to_experiment)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn get_experiment(&self, id: &str) -> Result<Option<Experiment>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, dataset_id, dataset_version, status, created_at, completed_at, total_examples, completed_examples, avg_score, min_score, max_score, pass_rate, total_duration_ms, total_tokens, config_blob, metadata
+             FROM experiments WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![id], Self::row_to_experiment)?;
+        Ok(rows.next().transpose()?)
+    }
+
+    pub fn get_experiment_by_name(&self, name: &str) -> Result<Option<Experiment>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, dataset_id, dataset_version, status, created_at, completed_at, total_examples, completed_examples, avg_score, min_score, max_score, pass_rate, total_duration_ms, total_tokens, config_blob, metadata
+             FROM experiments WHERE name = ?1 ORDER BY created_at DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map(params![name], Self::row_to_experiment)?;
+        Ok(rows.next().transpose()?)
+    }
+
+    pub fn update_experiment_status(&self, id: &str, status: ExperimentStatus) -> Result<()> {
+        let completed_at = if status == ExperimentStatus::Completed || status == ExperimentStatus::Failed {
+            Some(chrono::Utc::now().to_rfc3339())
+        } else {
+            None
+        };
+        self.conn.execute(
+            "UPDATE experiments SET status = ?1, completed_at = ?2 WHERE id = ?3",
+            params![status.as_str(), completed_at, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_experiment_progress(&self, id: &str, completed_examples: u32) -> Result<()> {
+        self.conn.execute(
+            "UPDATE experiments SET completed_examples = ?1 WHERE id = ?2",
+            params![completed_examples, id],
+        )?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_experiment_aggregates(
+        &self,
+        id: &str,
+        avg_score: f64,
+        min_score: f64,
+        max_score: f64,
+        pass_rate: f64,
+        total_duration_ms: u64,
+        total_tokens: u64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE experiments SET avg_score = ?1, min_score = ?2, max_score = ?3, pass_rate = ?4, total_duration_ms = ?5, total_tokens = ?6 WHERE id = ?7",
+            params![avg_score, min_score, max_score, pass_rate, total_duration_ms, total_tokens, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_experiment(&self, id: &str) -> Result<()> {
+        // Cascades to experiment_results → experiment_scores
+        self.conn.execute("DELETE FROM experiments WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    fn row_to_experiment(row: &rusqlite::Row) -> rusqlite::Result<Experiment> {
+        Ok(Experiment {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            dataset_id: row.get(2)?,
+            dataset_version: row.get(3)?,
+            status: ExperimentStatus::parse(&row.get::<_, String>(4)?),
+            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            completed_at: row.get::<_, Option<String>>(6)?
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+                .map(|dt| dt.with_timezone(&chrono::Utc)),
+            total_examples: row.get(7)?,
+            completed_examples: row.get(8)?,
+            avg_score: row.get(9)?,
+            min_score: row.get(10)?,
+            max_score: row.get(11)?,
+            pass_rate: row.get(12)?,
+            total_duration_ms: row.get(13)?,
+            total_tokens: row.get(14)?,
+            config_blob: row.get(15)?,
+            metadata: serde_json::from_str(&row.get::<_, String>(16)?).unwrap_or_default(),
+        })
+    }
+
+    // ── Experiment Results ─────────────────────────────────────
+
+    pub fn create_experiment_result(&self, result: &ExperimentResult) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO experiment_results (id, experiment_id, example_id, ordinal, output_blob, trace_session_id, trace_timeline_id, duration_ms, tokens_in, tokens_out, status, error, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                result.id,
+                result.experiment_id,
+                result.example_id,
+                result.ordinal,
+                result.output_blob,
+                result.trace_session_id,
+                result.trace_timeline_id,
+                result.duration_ms,
+                result.tokens_in,
+                result.tokens_out,
+                result.status,
+                result.error,
+                result.created_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_experiment_results(&self, experiment_id: &str) -> Result<Vec<ExperimentResult>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, experiment_id, example_id, ordinal, output_blob, trace_session_id, trace_timeline_id, duration_ms, tokens_in, tokens_out, status, error, created_at
+             FROM experiment_results WHERE experiment_id = ?1 ORDER BY ordinal",
+        )?;
+        let rows = stmt.query_map(params![experiment_id], |row| {
+            Ok(ExperimentResult {
+                id: row.get(0)?,
+                experiment_id: row.get(1)?,
+                example_id: row.get(2)?,
+                ordinal: row.get(3)?,
+                output_blob: row.get(4)?,
+                trace_session_id: row.get(5)?,
+                trace_timeline_id: row.get(6)?,
+                duration_ms: row.get(7)?,
+                tokens_in: row.get(8)?,
+                tokens_out: row.get(9)?,
+                status: row.get(10)?,
+                error: row.get(11)?,
+                created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(12)?)
+                    .unwrap()
+                    .with_timezone(&chrono::Utc),
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    // ── Experiment Scores ──────────────────────────────────────
+
+    pub fn create_experiment_score(&self, score: &ExperimentScore) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO experiment_scores (id, result_id, evaluator_id, score, passed, reasoning, metadata, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                score.id,
+                score.result_id,
+                score.evaluator_id,
+                score.score,
+                score.passed as i32,
+                score.reasoning,
+                score.metadata.to_string(),
+                score.created_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_experiment_scores(&self, result_id: &str) -> Result<Vec<ExperimentScore>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, result_id, evaluator_id, score, passed, reasoning, metadata, created_at
+             FROM experiment_scores WHERE result_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![result_id], Self::row_to_score)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn get_all_experiment_scores(&self, experiment_id: &str) -> Result<Vec<ExperimentScore>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.id, s.result_id, s.evaluator_id, s.score, s.passed, s.reasoning, s.metadata, s.created_at
+             FROM experiment_scores s
+             INNER JOIN experiment_results r ON s.result_id = r.id
+             WHERE r.experiment_id = ?1
+             ORDER BY r.ordinal",
+        )?;
+        let rows = stmt.query_map(params![experiment_id], Self::row_to_score)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    fn row_to_score(row: &rusqlite::Row) -> rusqlite::Result<ExperimentScore> {
+        Ok(ExperimentScore {
+            id: row.get(0)?,
+            result_id: row.get(1)?,
+            evaluator_id: row.get(2)?,
+            score: row.get(3)?,
+            passed: row.get::<_, i32>(4)? != 0,
+            reasoning: row.get(5)?,
+            metadata: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
+            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(7)?)
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        })
     }
 
     // ── Raw SQL Query (read-only) ─────────────────────────────

@@ -253,6 +253,243 @@ impl Step {
     }
 }
 
+// ── Evaluation: Datasets ─────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Dataset {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub version: u32,
+    pub example_count: u32,
+    pub metadata: serde_json::Value,
+}
+
+impl Dataset {
+    pub fn new(name: &str, description: &str) -> Self {
+        let now = Utc::now();
+        Dataset {
+            id: Uuid::new_v4().to_string(),
+            name: name.to_string(),
+            description: description.to_string(),
+            created_at: now,
+            updated_at: now,
+            version: 1,
+            example_count: 0,
+            metadata: serde_json::json!({}),
+        }
+    }
+
+    pub fn new_version(&self) -> Self {
+        let now = Utc::now();
+        Dataset {
+            id: Uuid::new_v4().to_string(),
+            name: self.name.clone(),
+            description: self.description.clone(),
+            created_at: self.created_at,
+            updated_at: now,
+            version: self.version + 1,
+            example_count: self.example_count,
+            metadata: self.metadata.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatasetExample {
+    pub id: String,
+    pub dataset_id: String,
+    pub ordinal: u32,
+    pub input_blob: String,
+    pub expected_blob: String,
+    pub metadata: serde_json::Value,
+    pub source_session_id: Option<String>,
+    pub source_step_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl DatasetExample {
+    pub fn new(dataset_id: &str, ordinal: u32, input_blob: &str, expected_blob: &str) -> Self {
+        DatasetExample {
+            id: Uuid::new_v4().to_string(),
+            dataset_id: dataset_id.to_string(),
+            ordinal,
+            input_blob: input_blob.to_string(),
+            expected_blob: expected_blob.to_string(),
+            metadata: serde_json::json!({}),
+            source_session_id: None,
+            source_step_id: None,
+            created_at: Utc::now(),
+        }
+    }
+}
+
+// ── Evaluation: Evaluators ───────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Evaluator {
+    pub id: String,
+    pub name: String,
+    pub evaluator_type: String,
+    pub config_blob: String,
+    pub created_at: DateTime<Utc>,
+    pub description: String,
+}
+
+impl Evaluator {
+    pub fn new(name: &str, evaluator_type: &str, config_blob: &str, description: &str) -> Self {
+        Evaluator {
+            id: Uuid::new_v4().to_string(),
+            name: name.to_string(),
+            evaluator_type: evaluator_type.to_string(),
+            config_blob: config_blob.to_string(),
+            created_at: Utc::now(),
+            description: description.to_string(),
+        }
+    }
+}
+
+// ── Evaluation: Experiments ──────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Experiment {
+    pub id: String,
+    pub name: String,
+    pub dataset_id: String,
+    pub dataset_version: u32,
+    pub status: ExperimentStatus,
+    pub created_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub total_examples: u32,
+    pub completed_examples: u32,
+    pub avg_score: Option<f64>,
+    pub min_score: Option<f64>,
+    pub max_score: Option<f64>,
+    pub pass_rate: Option<f64>,
+    pub total_duration_ms: u64,
+    pub total_tokens: u64,
+    pub config_blob: String,
+    pub metadata: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum ExperimentStatus {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+}
+
+impl ExperimentStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ExperimentStatus::Pending => "pending",
+            ExperimentStatus::Running => "running",
+            ExperimentStatus::Completed => "completed",
+            ExperimentStatus::Failed => "failed",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "running" => ExperimentStatus::Running,
+            "completed" => ExperimentStatus::Completed,
+            "failed" => ExperimentStatus::Failed,
+            _ => ExperimentStatus::Pending,
+        }
+    }
+}
+
+impl Experiment {
+    pub fn new(name: &str, dataset_id: &str, dataset_version: u32, total_examples: u32, config_blob: &str) -> Self {
+        Experiment {
+            id: Uuid::new_v4().to_string(),
+            name: name.to_string(),
+            dataset_id: dataset_id.to_string(),
+            dataset_version,
+            status: ExperimentStatus::Pending,
+            created_at: Utc::now(),
+            completed_at: None,
+            total_examples,
+            completed_examples: 0,
+            avg_score: None,
+            min_score: None,
+            max_score: None,
+            pass_rate: None,
+            total_duration_ms: 0,
+            total_tokens: 0,
+            config_blob: config_blob.to_string(),
+            metadata: serde_json::json!({}),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExperimentResult {
+    pub id: String,
+    pub experiment_id: String,
+    pub example_id: String,
+    pub ordinal: u32,
+    pub output_blob: String,
+    pub trace_session_id: Option<String>,
+    pub trace_timeline_id: Option<String>,
+    pub duration_ms: u64,
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    pub status: String,
+    pub error: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl ExperimentResult {
+    pub fn new(experiment_id: &str, example_id: &str, ordinal: u32) -> Self {
+        ExperimentResult {
+            id: Uuid::new_v4().to_string(),
+            experiment_id: experiment_id.to_string(),
+            example_id: example_id.to_string(),
+            ordinal,
+            output_blob: String::new(),
+            trace_session_id: None,
+            trace_timeline_id: None,
+            duration_ms: 0,
+            tokens_in: 0,
+            tokens_out: 0,
+            status: "pending".to_string(),
+            error: None,
+            created_at: Utc::now(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExperimentScore {
+    pub id: String,
+    pub result_id: String,
+    pub evaluator_id: String,
+    pub score: f64,
+    pub passed: bool,
+    pub reasoning: String,
+    pub metadata: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+}
+
+impl ExperimentScore {
+    pub fn new(result_id: &str, evaluator_id: &str, score: f64, passed: bool, reasoning: &str) -> Self {
+        ExperimentScore {
+            id: Uuid::new_v4().to_string(),
+            result_id: result_id.to_string(),
+            evaluator_id: evaluator_id.to_string(),
+            score,
+            passed,
+            reasoning: reasoning.to_string(),
+            metadata: serde_json::json!({}),
+            created_at: Utc::now(),
+        }
+    }
+}
+
 // ── Assertion Baselines ──────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
