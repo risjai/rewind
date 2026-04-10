@@ -60,6 +60,10 @@ def uninit():
     if _mode == "direct":
         if _recorder:
             _recorder.unpatch_all()
+        # Unpatch Pydantic AI if patched
+        for key, (cls, method_name, original) in _pydantic_ai_originals.items():
+            setattr(cls, method_name, original)
+        _pydantic_ai_originals.clear()
         if _store and _session_id:
             try:
                 _store.update_session_status(_session_id, "completed")
@@ -193,6 +197,9 @@ def _init_direct(session_name: str, auto_patch: bool):
     # Auto-register OpenAI Agents SDK tracing if available
     _try_register_openai_agents(tid)
 
+    # Auto-patch Pydantic AI Agent to inject hooks if available
+    _try_patch_pydantic_ai(tid)
+
     _print_direct_banner(session_name)
 
 
@@ -212,6 +219,37 @@ def _try_register_openai_agents(timeline_id: str):
                     setattr(cls, method_name, original)
     except Exception:
         pass  # agents SDK not installed or other import issue — skip silently
+
+
+_pydantic_ai_originals = {}
+
+
+def _try_patch_pydantic_ai(timeline_id: str):
+    """Monkey-patch Pydantic AI Agent.__init__ to auto-inject Rewind hooks.
+    This means every Agent created after init() automatically gets recording."""
+    try:
+        from pydantic_ai import Agent as PydanticAgent
+        from .pydantic_ai import create_rewind_hooks
+    except ImportError:
+        return
+
+    hooks = create_rewind_hooks(_store, _session_id, timeline_id)
+    if hooks is None:
+        return
+
+    import functools
+    original_init = PydanticAgent.__init__
+    _pydantic_ai_originals["init"] = (PydanticAgent, "__init__", original_init)
+
+    @functools.wraps(original_init)
+    def patched_init(self, *args, **kwargs):
+        # Inject Rewind hooks into capabilities
+        capabilities = list(kwargs.get("capabilities", None) or [])
+        capabilities.append(hooks)
+        kwargs["capabilities"] = capabilities
+        return original_init(self, *args, **kwargs)
+
+    PydanticAgent.__init__ = patched_init
 
 
 def _init_proxy(proxy_url: str, auto_patch: bool):

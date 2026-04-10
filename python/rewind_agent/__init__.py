@@ -30,6 +30,7 @@ from .hooks import (
 )
 from .assertions import Assertions, AssertionResult
 from .openai_agents import openai_agents_hooks
+from .pydantic_ai import pydantic_ai_hooks
 
 __all__ = [
     "init",
@@ -45,7 +46,8 @@ __all__ = [
     "wrap_langgraph",
     "wrap_crew",
     "openai_agents_hooks",
+    "pydantic_ai_hooks",
     "Assertions",
     "AssertionResult",
 ]
-__version__ = "0.5.3"
+__version__ = "0.5.4"

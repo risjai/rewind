@@ -459,6 +459,30 @@ result = await Runner.run(agent, input, hooks=hooks)
 
 Install with: `pip install rewind-agent[agents]`
 
+#### Pydantic AI — auto-injected via Hooks
+
+If [Pydantic AI](https://ai.pydantic.dev/) is installed, `init()` auto-patches `Agent.__init__` to inject Rewind's Hooks capability. Every agent gets recording for free:
+
+```python
+import rewind_agent
+from pydantic_ai import Agent
+
+rewind_agent.init()  # auto-patches Pydantic AI Agent
+
+agent = Agent('openai:gpt-4o', system_prompt='You are a research assistant.')
+result = agent.run_sync('What is the population of Tokyo?')
+# rewind show latest → full trace with model, tokens, tool calls
+```
+
+Or pass hooks explicitly as a capability:
+
+```python
+hooks = rewind_agent.pydantic_ai_hooks()
+agent = Agent('openai:gpt-4o', capabilities=[hooks])
+```
+
+Install with: `pip install rewind-agent[pydantic]`
+
 #### LangGraph & CrewAI
 
 ```python
@@ -528,7 +552,7 @@ result = crew.kickoff()
 | AWS Bedrock | ✅ | — |
 | Any OpenAI-compatible (Ollama, vLLM, LiteLLM) | ✅ | ✅ |
 
-Works with any agent framework: **[OpenAI Agents SDK](https://github.com/openai/openai-agents-python)** (native integration), **LangGraph**, **CrewAI**, **Autogen**, **smolagents**, or custom code.
+Works with any agent framework: **[OpenAI Agents SDK](https://github.com/openai/openai-agents-python)** (native integration), **[Pydantic AI](https://ai.pydantic.dev/)** (native integration), **LangGraph**, **CrewAI**, **Autogen**, **smolagents**, or custom code.
 
 ## Architecture
 
