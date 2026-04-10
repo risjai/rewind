@@ -154,6 +154,21 @@ enum Commands {
         #[arg(short, long, default_value = "8080")]
         port: u16,
     },
+
+    /// Run a SQL query against the Rewind database (read-only)
+    ///
+    /// Examples:
+    ///   rewind query "SELECT * FROM sessions"
+    ///   rewind query "SELECT model, COUNT(*) as calls, SUM(tokens_in + tokens_out) as tokens FROM steps GROUP BY model"
+    ///   rewind query --tables
+    Query {
+        /// SQL query to execute (SELECT only)
+        sql: Option<String>,
+
+        /// Show available tables and their schemas
+        #[arg(long)]
+        tables: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -240,6 +255,7 @@ async fn main() -> Result<()> {
             AssertAction::Delete { name } => cmd_assert_delete(name),
         },
         Commands::Web { port } => cmd_web(port).await,
+        Commands::Query { sql, tables } => cmd_query(sql, tables),
     }
 }
 
@@ -712,6 +728,102 @@ fn cmd_cache() -> Result<()> {
         println!("  {} {}", "Tokens saved:".dimmed(), stats.total_tokens_saved.to_string().green().bold());
     }
     println!();
+    Ok(())
+}
+
+fn cmd_query(sql: Option<String>, tables: bool) -> Result<()> {
+    let store = Store::open_default()?;
+
+    if tables {
+        println!("{}", "⏪ Rewind — Database Tables".cyan().bold());
+        println!();
+        let table_names = store.list_tables()?;
+        for name in &table_names {
+            println!("  {}", name.white().bold());
+            // Show column info via PRAGMA
+            let result = store.query_raw(&format!("PRAGMA table_info({})", name))?;
+            for row in &result.rows {
+                // PRAGMA table_info returns: cid, name, type, notnull, dflt_value, pk
+                let col_name = row.get(1).map(|s| s.as_str()).unwrap_or("?");
+                let col_type = row.get(2).map(|s| s.as_str()).unwrap_or("?");
+                let is_pk = row.get(5).map(|s| s == "1").unwrap_or(false);
+                println!(
+                    "    {} {} {}",
+                    col_name.cyan(),
+                    col_type.dimmed(),
+                    if is_pk { "PK".yellow().to_string() } else { String::new() },
+                );
+            }
+            println!();
+        }
+        return Ok(());
+    }
+
+    let sql = match sql {
+        Some(s) => s,
+        None => {
+            println!("{}", "⏪ Rewind — Query".cyan().bold());
+            println!();
+            println!("  {} Provide a SQL query or use {} to see tables.", "Usage:".dimmed(), "--tables".green());
+            println!();
+            println!("  {}", "Examples:".dimmed());
+            println!("    {}", r#"rewind query "SELECT * FROM sessions""#.green());
+            println!("    {}", r#"rewind query "SELECT model, COUNT(*) as calls FROM steps GROUP BY model""#.green());
+            println!("    {}", r#"rewind query "SELECT step_type, AVG(duration_ms) as avg_ms FROM steps GROUP BY step_type""#.green());
+            println!("    {}", r#"rewind query --tables"#.green());
+            println!();
+            return Ok(());
+        }
+    };
+
+    let result = store.query_raw(&sql)?;
+
+    if result.rows.is_empty() {
+        println!("{}", "(no results)".dimmed());
+        return Ok(());
+    }
+
+    // Calculate column widths
+    let mut widths: Vec<usize> = result.columns.iter().map(|c| c.len()).collect();
+    for row in &result.rows {
+        for (i, val) in row.iter().enumerate() {
+            // Truncate display at 60 chars for readability
+            let display_len = val.chars().take(60).count();
+            if display_len > widths[i] {
+                widths[i] = display_len;
+            }
+        }
+    }
+
+    // Print header
+    let header: String = result
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(i, c)| format!("{:width$}", c, width = widths[i]))
+        .collect::<Vec<_>>()
+        .join("  ");
+    println!("  {}", header.dimmed());
+    let separator: String = widths.iter().map(|w| "─".repeat(*w)).collect::<Vec<_>>().join("──");
+    println!("  {}", separator.dimmed());
+
+    // Print rows
+    for row in &result.rows {
+        let line: String = row
+            .iter()
+            .enumerate()
+            .map(|(i, val)| {
+                let truncated: String = val.chars().take(60).collect();
+                let suffix = if val.chars().count() > 60 { "…" } else { "" };
+                format!("{:width$}{}", truncated, suffix, width = widths[i])
+            })
+            .collect::<Vec<_>>()
+            .join("  ");
+        println!("  {}", line);
+    }
+
+    println!();
+    println!("  {} row(s)", result.rows.len().to_string().yellow());
     Ok(())
 }
 

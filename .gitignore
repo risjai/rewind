@@ -30,9 +30,15 @@ dist/
 # Internal research (not public)
 /research/
 
+# Twitter engagement bot (local credentials, not public)
+/twitter-bot/
+
 # Env
 .env
 .env.local
 
 # MCP config (contains local paths)
 .mcp.json
+
+# To-do / internal notes
+/to-do/

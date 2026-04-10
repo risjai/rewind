@@ -541,6 +541,8 @@ result = crew.kickoff()
 | `rewind assert list` | List all baselines |
 | `rewind assert show <name>` | Show baseline step signatures |
 | `rewind assert delete <name>` | Delete a baseline |
+| `rewind query "SQL"` | Run a read-only SQL query against the Rewind database |
+| `rewind query --tables` | Show all tables and their column schemas |
 | `rewind web [--port 8080]` | Start the web dashboard (flight recorder + live) |
 | `rewind record --web` | Start recording with live web dashboard |
 | `rewind demo` | Seed demo data to explore without API keys |
@@ -552,6 +554,26 @@ result = crew.kickoff()
 </p>
 
 Run `rewind web` and open `http://localhost:8080` to explore recorded sessions, inspect context windows, diff timelines, and watch live recordings via WebSocket. Everything is embedded in the single binary — no Docker, no Node.js runtime needed.
+
+### SQL Query Explorer — ad-hoc analytics on your recordings
+
+Query the Rewind database directly with SQL. Explore sessions, steps, token usage, and more:
+
+```bash
+# See all tables and their schemas
+rewind query --tables
+
+# Token usage by model
+rewind query "SELECT model, COUNT(*) as calls, SUM(tokens_in + tokens_out) as tokens FROM steps GROUP BY model"
+
+# Average step duration by type
+rewind query "SELECT step_type, AVG(duration_ms) as avg_ms FROM steps GROUP BY step_type"
+
+# Sessions with errors
+rewind query "SELECT s.name, COUNT(*) as errors FROM steps st JOIN sessions s ON st.session_id = s.id WHERE st.status = 'error' GROUP BY s.name"
+```
+
+Read-only — only SELECT, WITH, EXPLAIN, and PRAGMA statements are allowed.
 
 ## Compatibility
 
