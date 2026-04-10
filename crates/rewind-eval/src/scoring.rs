@@ -88,14 +88,14 @@ pub fn json_schema(output: &Value, _expected: &Value, config: &Value) -> ScoreRe
     // Simple validation: check required fields exist
     if let Some(required) = schema.get("required").and_then(|r| r.as_array()) {
         for field in required {
-            if let Some(field_name) = field.as_str() {
-                if output.get(field_name).is_none() {
-                    return ScoreResult {
-                        score: 0.0,
-                        passed: false,
-                        reasoning: format!("Missing required field '{}'", field_name),
-                    };
-                }
+            if let Some(field_name) = field.as_str()
+                && output.get(field_name).is_none()
+            {
+                return ScoreResult {
+                    score: 0.0,
+                    passed: false,
+                    reasoning: format!("Missing required field '{}'", field_name),
+                };
             }
         }
     }
@@ -103,29 +103,29 @@ pub fn json_schema(output: &Value, _expected: &Value, config: &Value) -> ScoreRe
     // Check properties exist and have correct types if "properties" is specified
     if let Some(props) = schema.get("properties").and_then(|p| p.as_object()) {
         for (key, prop_schema) in props {
-            if let Some(val) = output.get(key) {
-                if let Some(expected_type) = prop_schema.get("type").and_then(|t| t.as_str()) {
-                    let type_ok = match expected_type {
-                        "string" => val.is_string(),
-                        "number" | "integer" => val.is_number(),
-                        "boolean" => val.is_boolean(),
-                        "array" => val.is_array(),
-                        "object" => val.is_object(),
-                        "null" => val.is_null(),
-                        _ => true,
+            if let Some(val) = output.get(key)
+                && let Some(expected_type) = prop_schema.get("type").and_then(|t| t.as_str())
+            {
+                let type_ok = match expected_type {
+                    "string" => val.is_string(),
+                    "number" | "integer" => val.is_number(),
+                    "boolean" => val.is_boolean(),
+                    "array" => val.is_array(),
+                    "object" => val.is_object(),
+                    "null" => val.is_null(),
+                    _ => true,
+                };
+                if !type_ok {
+                    return ScoreResult {
+                        score: 0.0,
+                        passed: false,
+                        reasoning: format!(
+                            "Field '{}' has wrong type: expected {}, got {}",
+                            key,
+                            expected_type,
+                            value_type_name(val)
+                        ),
                     };
-                    if !type_ok {
-                        return ScoreResult {
-                            score: 0.0,
-                            passed: false,
-                            reasoning: format!(
-                                "Field '{}' has wrong type: expected {}, got {}",
-                                key,
-                                expected_type,
-                                value_type_name(val)
-                            ),
-                        };
-                    }
                 }
             }
         }
@@ -179,28 +179,26 @@ pub fn tool_use_match(output: &Value, expected: &Value, _config: &Value) -> Scor
 fn extract_tool_names(value: &Value) -> Vec<String> {
     let mut names = Vec::new();
     // OpenAI format: choices[0].message.tool_calls[*].function.name
-    if let Some(choices) = value.get("choices").and_then(|c| c.as_array()) {
-        if let Some(first) = choices.first() {
-            if let Some(tool_calls) = first
-                .get("message")
-                .and_then(|m| m.get("tool_calls"))
-                .and_then(|tc| tc.as_array())
-            {
-                for tc in tool_calls {
-                    if let Some(name) = tc.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()) {
-                        names.push(name.to_string());
-                    }
-                }
+    if let Some(choices) = value.get("choices").and_then(|c| c.as_array())
+        && let Some(first) = choices.first()
+        && let Some(tool_calls) = first
+            .get("message")
+            .and_then(|m| m.get("tool_calls"))
+            .and_then(|tc| tc.as_array())
+    {
+        for tc in tool_calls {
+            if let Some(name) = tc.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()) {
+                names.push(name.to_string());
             }
         }
     }
     // Anthropic format: content[*] where type == "tool_use"
     if let Some(content) = value.get("content").and_then(|c| c.as_array()) {
         for block in content {
-            if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
-                if let Some(name) = block.get("name").and_then(|n| n.as_str()) {
-                    names.push(name.to_string());
-                }
+            if block.get("type").and_then(|t| t.as_str()) == Some("tool_use")
+                && let Some(name) = block.get("name").and_then(|n| n.as_str())
+            {
+                names.push(name.to_string());
             }
         }
     }

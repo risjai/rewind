@@ -736,7 +736,7 @@ impl Store {
              ON d.name = latest.name AND d.version = latest.max_ver
              ORDER BY d.updated_at DESC",
         )?;
-        let rows = stmt.query_map([], |row| Self::row_to_dataset(row))?;
+        let rows = stmt.query_map([], Self::row_to_dataset)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
@@ -746,7 +746,7 @@ impl Store {
             "SELECT id, name, description, created_at, updated_at, version, example_count, metadata
              FROM datasets WHERE name = ?1 ORDER BY version DESC LIMIT 1",
         )?;
-        let mut rows = stmt.query_map(params![name], |row| Self::row_to_dataset(row))?;
+        let mut rows = stmt.query_map(params![name], Self::row_to_dataset)?;
         Ok(rows.next().transpose()?)
     }
 
@@ -756,7 +756,7 @@ impl Store {
             "SELECT id, name, description, created_at, updated_at, version, example_count, metadata
              FROM datasets WHERE name = ?1 AND version = ?2",
         )?;
-        let mut rows = stmt.query_map(params![name, version], |row| Self::row_to_dataset(row))?;
+        let mut rows = stmt.query_map(params![name, version], Self::row_to_dataset)?;
         Ok(rows.next().transpose()?)
     }
 
@@ -765,7 +765,7 @@ impl Store {
             "SELECT id, name, description, created_at, updated_at, version, example_count, metadata
              FROM datasets WHERE id = ?1",
         )?;
-        let mut rows = stmt.query_map(params![id], |row| Self::row_to_dataset(row))?;
+        let mut rows = stmt.query_map(params![id], Self::row_to_dataset)?;
         Ok(rows.next().transpose()?)
     }
 
@@ -961,7 +961,7 @@ impl Store {
             "SELECT id, name, dataset_id, dataset_version, status, created_at, completed_at, total_examples, completed_examples, avg_score, min_score, max_score, pass_rate, total_duration_ms, total_tokens, config_blob, metadata
              FROM experiments ORDER BY created_at DESC",
         )?;
-        let rows = stmt.query_map([], |row| Self::row_to_experiment(row))?;
+        let rows = stmt.query_map([], Self::row_to_experiment)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
@@ -973,7 +973,7 @@ impl Store {
              WHERE d.name = ?1
              ORDER BY e.created_at DESC",
         )?;
-        let rows = stmt.query_map(params![dataset_name], |row| Self::row_to_experiment(row))?;
+        let rows = stmt.query_map(params![dataset_name], Self::row_to_experiment)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
@@ -982,7 +982,7 @@ impl Store {
             "SELECT id, name, dataset_id, dataset_version, status, created_at, completed_at, total_examples, completed_examples, avg_score, min_score, max_score, pass_rate, total_duration_ms, total_tokens, config_blob, metadata
              FROM experiments WHERE id = ?1",
         )?;
-        let mut rows = stmt.query_map(params![id], |row| Self::row_to_experiment(row))?;
+        let mut rows = stmt.query_map(params![id], Self::row_to_experiment)?;
         Ok(rows.next().transpose()?)
     }
 
@@ -991,7 +991,7 @@ impl Store {
             "SELECT id, name, dataset_id, dataset_version, status, created_at, completed_at, total_examples, completed_examples, avg_score, min_score, max_score, pass_rate, total_duration_ms, total_tokens, config_blob, metadata
              FROM experiments WHERE name = ?1 ORDER BY created_at DESC LIMIT 1",
         )?;
-        let mut rows = stmt.query_map(params![name], |row| Self::row_to_experiment(row))?;
+        let mut rows = stmt.query_map(params![name], Self::row_to_experiment)?;
         Ok(rows.next().transpose()?)
     }
 
@@ -1016,6 +1016,7 @@ impl Store {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn update_experiment_aggregates(
         &self,
         id: &str,
@@ -1142,7 +1143,7 @@ impl Store {
             "SELECT id, result_id, evaluator_id, score, passed, reasoning, metadata, created_at
              FROM experiment_scores WHERE result_id = ?1",
         )?;
-        let rows = stmt.query_map(params![result_id], |row| Self::row_to_score(row))?;
+        let rows = stmt.query_map(params![result_id], Self::row_to_score)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
@@ -1154,7 +1155,7 @@ impl Store {
              WHERE r.experiment_id = ?1
              ORDER BY r.ordinal",
         )?;
-        let rows = stmt.query_map(params![experiment_id], |row| Self::row_to_score(row))?;
+        let rows = stmt.query_map(params![experiment_id], Self::row_to_score)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 

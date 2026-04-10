@@ -1807,11 +1807,11 @@ fn cmd_eval_show(experiment_ref: String) -> Result<()> {
         experiment.pass_rate.map(|r| format!("{:.1}%", r * 100.0)).unwrap_or("-".to_string()).white().bold(),
     );
     println!(
-        "  {} {} / {} / {}",
+        "  {} avg={:.3} / min={:.3} / max={:.3}",
         "Scores:".dimmed(),
-        format!("avg={:.3}", experiment.avg_score.unwrap_or(0.0)),
-        format!("min={:.3}", experiment.min_score.unwrap_or(0.0)),
-        format!("max={:.3}", experiment.max_score.unwrap_or(0.0)),
+        experiment.avg_score.unwrap_or(0.0),
+        experiment.min_score.unwrap_or(0.0),
+        experiment.max_score.unwrap_or(0.0),
     );
     println!("  {} {}", "Duration:".dimmed(), format!("{}ms", experiment.total_duration_ms).dimmed());
     println!();
