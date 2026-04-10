@@ -48,4 +48,4 @@ __all__ = [
     "Assertions",
     "AssertionResult",
 ]
-__version__ = "0.5.2"
+__version__ = "0.5.3"
