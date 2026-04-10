@@ -7,7 +7,7 @@ use rmcp::{
     tool, tool_handler, tool_router,
 };
 use rewind_assert::{AssertionEngine, BaselineManager, Tolerance};
-use rewind_eval::compare_experiments;
+use rewind_eval::{compare_experiments, DatasetManager};
 use rewind_replay::ReplayEngine;
 use rewind_store::{Experiment, Store};
 use schemars::JsonSchema;
@@ -141,6 +141,41 @@ pub struct CompareExperimentsParam {
     pub left: String,
     /// Right experiment name or ID
     pub right: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CreateEvalDatasetParams {
+    /// Name for the new dataset
+    pub name: String,
+    /// Optional description of the dataset
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AddEvalExampleParams {
+    /// Dataset name to add the example to
+    pub dataset: String,
+    /// Input value (the request/prompt to test)
+    pub input: serde_json::Value,
+    /// Expected output value (the ideal response)
+    pub expected: serde_json::Value,
+    /// Optional metadata for this example
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DatasetFromSessionParams {
+    /// Dataset name to add the example to
+    pub dataset: String,
+    /// Session ID, prefix, or "latest"
+    pub session: String,
+    /// Step number to use as the input (request blob)
+    pub input_step: u32,
+    /// Step number to use as the expected output (response blob). Defaults to input_step.
+    #[serde(default)]
+    pub expected_step: Option<u32>,
 }
 
 // ── Response types ───────────────────────────────────────────
@@ -949,6 +984,111 @@ impl RewindMcp {
         let json = serde_json::to_value(&comparison).map_err(|e| mcp_err(&e))?;
         ok_json(&json)
     }
+
+    // ── Evaluation write tools ───────────────────────────────
+
+    #[tool(
+        name = "create_eval_dataset",
+        description = "Create a new evaluation dataset for testing agent behavior"
+    )]
+    async fn create_eval_dataset(
+        &self,
+        params: Parameters<CreateEvalDatasetParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let params = &params.0;
+        let store = self.lock_store()?;
+        let manager = DatasetManager::new(&store);
+        let dataset = manager
+            .create(&params.name, params.description.as_deref().unwrap_or(""))
+            .map_err(|e| mcp_err(&e))?;
+
+        let json = serde_json::json!({
+            "dataset": {
+                "id": dataset.id,
+                "name": dataset.name,
+                "description": dataset.description,
+                "version": dataset.version,
+                "example_count": dataset.example_count,
+                "created_at": dataset.created_at.to_rfc3339(),
+            },
+            "message": format!("Dataset '{}' created (v1)", dataset.name),
+        });
+        ok_json(&json)
+    }
+
+    #[tool(
+        name = "add_eval_example",
+        description = "Add an input/expected pair to an evaluation dataset"
+    )]
+    async fn add_eval_example(
+        &self,
+        params: Parameters<AddEvalExampleParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let params = &params.0;
+        let store = self.lock_store()?;
+        let manager = DatasetManager::new(&store);
+        let example = manager
+            .add_example(
+                &params.dataset,
+                params.input.clone(),
+                params.expected.clone(),
+                params.metadata.clone().unwrap_or(serde_json::json!({})),
+            )
+            .map_err(|e| mcp_err(&e))?;
+
+        // Get the updated dataset to show version and count
+        let updated = store
+            .get_dataset_by_name(&params.dataset)
+            .map_err(|e| mcp_err(&e))?
+            .ok_or_else(|| mcp_err_str(&format!("Dataset '{}' not found after add", params.dataset)))?;
+
+        let json = serde_json::json!({
+            "example": {
+                "ordinal": example.ordinal,
+            },
+            "message": format!(
+                "Example added to dataset '{}' (now v{}, {} examples)",
+                params.dataset, updated.version, updated.example_count
+            ),
+        });
+        ok_json(&json)
+    }
+
+    #[tool(
+        name = "dataset_from_session",
+        description = "Extract an evaluation example from a recorded session's request/response"
+    )]
+    async fn dataset_from_session(
+        &self,
+        params: Parameters<DatasetFromSessionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let params = &params.0;
+        let store = self.lock_store()?;
+        let manager = DatasetManager::new(&store);
+        let expected_step_num = params.expected_step.unwrap_or(params.input_step);
+        let example = manager
+            .import_from_session(
+                &params.dataset,
+                &params.session,
+                params.input_step,
+                params.expected_step,
+            )
+            .map_err(|e| mcp_err(&e))?;
+
+        let json = serde_json::json!({
+            "example": {
+                "ordinal": example.ordinal,
+                "source_session": example.source_session_id,
+                "input_step": params.input_step,
+                "expected_step": expected_step_num,
+            },
+            "message": format!(
+                "Example extracted from session (step {} -> {}) and added to dataset '{}'",
+                params.input_step, expected_step_num, params.dataset
+            ),
+        });
+        ok_json(&json)
+    }
 }
 
 // ── ServerHandler implementation ─────────────────────────────
@@ -965,7 +1105,8 @@ impl ServerHandler for RewindMcp {
              Use assertion baselines to create regression tests from known-good sessions \
              and check new sessions for regressions. \
              Use evaluation tools to browse datasets, inspect experiment results with \
-             per-example scores, and compare experiments to find regressions and improvements."
+             per-example scores, and compare experiments to find regressions and improvements. \
+             Use evaluation write tools to create datasets, add examples, and extract examples from sessions."
                 .to_string(),
         );
         info
