@@ -29,6 +29,19 @@ import time
 
 logger = logging.getLogger("rewind")
 
+# Import TracingProcessor base class — required for proper subclassing
+try:
+    from agents.tracing import TracingProcessor as _TracingProcessorBase
+except ImportError:
+    # Agents SDK not installed — define a no-op base so the module loads cleanly
+    class _TracingProcessorBase:
+        def on_trace_start(self, trace): pass
+        def on_trace_end(self, trace): pass
+        def on_span_start(self, span): pass
+        def on_span_end(self, span): pass
+        def shutdown(self): pass
+        def force_flush(self): pass
+
 
 def _safe_json(obj, max_len=2000) -> str:
     """Safely serialize an object to JSON string, truncated."""
@@ -41,16 +54,24 @@ def _safe_json(obj, max_len=2000) -> str:
 
 # ── TracingProcessor ─────────────────────────────────────────
 
-class RewindTracingProcessor:
+class RewindTracingProcessor(_TracingProcessorBase):
     """
-    Implements the OpenAI Agents SDK TracingProcessor interface.
+    Subclasses the OpenAI Agents SDK TracingProcessor to capture all
+    agent spans and record them as Rewind steps.
 
-    Receives span lifecycle events (start/end) and records them as
-    Rewind steps in the store. This gives us:
-    - LLM calls (GenerationSpanData) with model, tokens, prompt, completion
-    - Tool executions (FunctionSpanData) with name, input, output
-    - Agent spans (AgentSpanData) with agent name, handoffs, tools
-    - Handoffs (HandoffSpanData) with from/to agent names
+    Receives span lifecycle events (start/end) and maps them to the
+    Rewind store:
+    - LLM calls (GenerationSpanData) → llm_call steps with model, tokens, prompt, completion
+    - Tool executions (FunctionSpanData) → tool_call steps with name, input, output
+    - Agent spans (AgentSpanData) → metadata on surrounding steps
+    - Handoffs (HandoffSpanData) → handoff steps with from/to agent names
+
+    Usage:
+        from rewind_agent.openai_agents import RewindTracingProcessor
+        from agents.tracing import add_trace_processor
+
+        processor = RewindTracingProcessor(store, session_id, timeline_id)
+        add_trace_processor(processor)
     """
 
     def __init__(self, store, session_id, timeline_id, recorder=None):
