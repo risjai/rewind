@@ -14,7 +14,7 @@ rewind query --tables
 
 ### Sessions overview
 
-```sql
+```bash
 rewind query "
   SELECT name, status, total_steps, total_tokens, created_at
   FROM sessions
@@ -24,7 +24,7 @@ rewind query "
 
 ### Token usage by model
 
-```sql
+```bash
 rewind query "
   SELECT model,
          COUNT(*) as calls,
@@ -39,7 +39,7 @@ rewind query "
 
 ### Step-by-step trace with timing
 
-```sql
+```bash
 rewind query "
   SELECT step_number, step_type, status, model,
          tokens_in || '↓ ' || tokens_out || '↑' as tokens,
@@ -54,7 +54,7 @@ rewind query "
 
 ### Find failing steps
 
-```sql
+```bash
 rewind query "
   SELECT s.name as session,
          st.step_number,
@@ -68,7 +68,7 @@ rewind query "
 
 ### Average duration by step type
 
-```sql
+```bash
 rewind query "
   SELECT step_type,
          COUNT(*) as count,
@@ -81,7 +81,7 @@ rewind query "
 
 ### Timeline comparison (main vs fork)
 
-```sql
+```bash
 rewind query "
   SELECT t.label,
          t.fork_at_step,
@@ -95,7 +95,7 @@ rewind query "
 
 ### Baseline expected step signatures
 
-```sql
+```bash
 rewind query "
   SELECT b.name as baseline,
          bs.step_number,
@@ -111,7 +111,7 @@ rewind query "
 
 ### Cost estimation (GPT-4o pricing)
 
-```sql
+```bash
 rewind query "
   SELECT s.name,
          SUM(st.tokens_in) as input_tokens,

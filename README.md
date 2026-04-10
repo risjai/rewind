@@ -149,7 +149,7 @@ See the [Getting Started guide](docs/getting-started.md) for more options.
 | **Web Dashboard** | Browser-based session explorer with step timeline, context window viewer, timeline diff, and live recording via WebSocket. Everything embedded in the single binary. | [web-ui.md](docs/web-ui.md) | — |
 | **Framework Integrations** | Native support for OpenAI Agents SDK, Pydantic AI, LangGraph, and CrewAI. Auto-detected on `init()` — zero config for most frameworks. | [framework-integrations.md](docs/framework-integrations.md) | [09_pydantic_ai.py](examples/09_pydantic_ai.py), [10_openai_agents_sdk.py](examples/10_openai_agents_sdk.py) |
 | **MCP Server** | 16 tools for AI assistants (Claude Code, Cursor, Windsurf) to query recordings, diff timelines, create baselines, run evals — all from your IDE. | [mcp-server.md](docs/mcp-server.md) | — |
-| **SQL Query Explorer** | Run ad-hoc SQL against the Rewind database. Token usage by model, average step duration, sessions with errors, cost estimation — read-only, safe to explore. | [sql-queries.md](docs/sql-queries.md) | [13_sql_queries.sh](examples/13_sql_queries.sh) |
+| **SQL Query Explorer** | Run ad-hoc SQL against the Rewind database. Token usage by model, average step duration, sessions with errors, cost estimation — read-only, safe to explore. | [sql-queries.md](docs/sql-queries.md) | — |
 | **CLI Reference** | Full command reference for all 28 CLI commands. | [cli-reference.md](docs/cli-reference.md) | — |
 | **Architecture** | Proxy-based instrumentation, content-addressed storage (SHA-256), timeline DAG with structural sharing, streaming SSE pass-through. Single binary, zero dependencies. | [architecture.md](docs/architecture.md) | — |
 
