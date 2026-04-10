@@ -364,7 +364,7 @@ def exact_match(input: dict, output: dict, expected: dict) -> EvalScore:
     return EvalScore(
         score=1.0 if matched else 0.0,
         passed=matched,
-        reasoning="Exact match" if matched else f"Output differs from expected",
+        reasoning="Exact match" if matched else "Output differs from expected",
     )
 
 
@@ -847,11 +847,11 @@ def compare(left, right, store: Store = None) -> ComparisonResult:
         return sum(scores) / len(scores) if scores else 0.0
 
     for ordinal in all_ordinals:
-        l = left_by_ordinal.get(ordinal)
-        r = right_by_ordinal.get(ordinal)
+        left_result = left_by_ordinal.get(ordinal)
+        right_result = right_by_ordinal.get(ordinal)
 
-        l_avg = _avg_scores(l)
-        r_avg = _avg_scores(r)
+        l_avg = _avg_scores(left_result)
+        r_avg = _avg_scores(right_result)
 
         per_example.append({
             "ordinal": ordinal,
