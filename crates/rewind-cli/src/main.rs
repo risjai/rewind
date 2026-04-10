@@ -381,11 +381,11 @@ enum EvaluatorAction {
         /// Evaluator name
         name: String,
 
-        /// Type: exact_match, contains, regex, json_schema, tool_use_match
+        /// Type: exact_match, contains, regex, json_schema, tool_use_match, custom
         #[arg(short = 't', long = "type")]
         evaluator_type: String,
 
-        /// Configuration JSON (depends on type, e.g., '{"substring": "hello"}')
+        /// Configuration JSON (depends on type). For custom: '{"command": "python judge.py"}'
         #[arg(short, long)]
         config: Option<String>,
 
@@ -1457,6 +1457,7 @@ fn cmd_eval_evaluator_create(name: String, evaluator_type: String, config: Optio
                 match evaluator_type.as_str() {
                     "contains" => serde_json::json!({"substring": c}),
                     "regex" => serde_json::json!({"pattern": c}),
+                    "custom" => serde_json::json!({"command": c}),
                     _ => serde_json::json!({"value": c}),
                 }
             };
