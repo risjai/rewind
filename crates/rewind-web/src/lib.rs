@@ -1,4 +1,5 @@
 pub mod api;
+pub mod eval_api;
 mod polling;
 mod spa;
 mod ws;
@@ -91,10 +92,12 @@ impl WebServer {
 
     fn build_router(self) -> Router {
         let api_routes = api::routes(self.state.clone());
+        let eval_routes = eval_api::routes(self.state.clone());
         let ws_route = ws::routes(self.state.clone());
 
         let app = Router::new()
             .nest("/api", api_routes)
+            .nest("/api/eval", eval_routes)
             .merge(ws_route);
 
         if self.dev_mode {

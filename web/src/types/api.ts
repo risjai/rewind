@@ -156,3 +156,81 @@ export interface WsSubscribed {
 }
 
 export type WsServerMessage = WsStepEvent | WsSessionUpdate | WsSubscribed
+
+// --- Eval types ---
+
+export interface EvalDataset {
+  id: string
+  name: string
+  description: string
+  created_at: string
+  updated_at: string
+  version: number
+  example_count: number
+}
+
+export interface DatasetExample {
+  id: string
+  ordinal: number
+  input: unknown
+  expected: unknown
+  metadata: Record<string, unknown>
+}
+
+export interface EvalExperiment {
+  id: string
+  name: string
+  dataset_id: string
+  dataset_version: number
+  status: 'pending' | 'running' | 'completed' | 'failed'
+  created_at: string
+  completed_at: string | null
+  total_examples: number
+  completed_examples: number
+  avg_score: number | null
+  min_score: number | null
+  max_score: number | null
+  pass_rate: number | null
+  total_duration_ms: number
+  total_tokens: number
+  metadata: Record<string, unknown>
+}
+
+export interface ExperimentResultDetail {
+  id: string
+  ordinal: number
+  output_preview: string
+  status: string
+  duration_ms: number
+  error: string | null
+  trace_session_id?: string | null
+  scores: {
+    evaluator_name: string
+    score: number
+    passed: boolean
+    reasoning: string
+  }[]
+}
+
+export interface ExperimentComparisonView {
+  left_id: string
+  left_name: string
+  left_avg_score: number
+  left_pass_rate: number
+  right_id: string
+  right_name: string
+  right_avg_score: number
+  right_pass_rate: number
+  overall_delta: number
+  regressions: number
+  improvements: number
+  unchanged: number
+  example_diffs: {
+    ordinal: number
+    input_preview: string
+    left_score: number
+    right_score: number
+    delta: number
+    direction: 'regression' | 'improvement' | 'unchanged'
+  }[]
+}

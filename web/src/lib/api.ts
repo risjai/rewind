@@ -2,6 +2,8 @@ import type {
   Session, SessionDetail, StepResponse, StepDetail,
   Baseline, BaselineDetail, CacheStats, Snapshot,
   Timeline, TimelineDiff,
+  EvalDataset, DatasetExample, EvalExperiment,
+  ExperimentResultDetail, ExperimentComparisonView,
 } from '@/types/api'
 
 const BASE = '/api'
@@ -31,4 +33,12 @@ export const api = {
   baseline: (name: string) => get<BaselineDetail>(`/baselines/${name}`),
   cacheStats: () => get<CacheStats>('/cache/stats'),
   snapshots: () => get<Snapshot[]>('/snapshots'),
+
+  // Eval
+  evalDatasets: () => get<EvalDataset[]>('/eval/datasets'),
+  evalDataset: (name: string) => get<{ dataset: EvalDataset; examples: DatasetExample[] }>(`/eval/datasets/${name}`),
+  evalExperiments: (dataset?: string) => get<EvalExperiment[]>(`/eval/experiments${dataset ? `?dataset=${dataset}` : ''}`),
+  evalExperiment: (id: string) => get<EvalExperiment>(`/eval/experiments/${id}`),
+  evalExperimentResults: (id: string) => get<ExperimentResultDetail[]>(`/eval/experiments/${id}/results`),
+  evalCompare: (left: string, right: string) => get<ExperimentComparisonView>(`/eval/compare?left=${left}&right=${right}`),
 }

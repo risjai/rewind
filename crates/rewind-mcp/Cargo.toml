@@ -11,6 +11,7 @@ path = "src/main.rs"
 rewind-store = { path = "../rewind-store" }
 rewind-replay = { path = "../rewind-replay" }
 rewind-assert = { path = "../rewind-assert" }
+rewind-eval = { path = "../rewind-eval" }
 rmcp = { workspace = true }
 schemars = { workspace = true }
 tokio = { workspace = true }
