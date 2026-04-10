@@ -135,18 +135,6 @@ curl -fsSL https://raw.githubusercontent.com/agentoptics/rewind/master/install.s
 cargo install --git https://github.com/agentoptics/rewind rewind-cli
 ```
 
-**Optional extras** for framework integrations:
-
-```bash
-pip install rewind-agent[agents]
-```
-```bash
-pip install rewind-agent[pydantic]
-```
-```bash
-pip install rewind-agent[all]
-```
-
 ## Quickstart
 
 **Direct mode** — one line, no proxy:
