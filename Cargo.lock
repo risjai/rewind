@@ -1609,6 +1609,7 @@ dependencies = [
  "rewind-store",
  "serde",
  "serde_json",
+ "tempfile",
  "tracing",
  "uuid",
 ]
@@ -1684,6 +1685,7 @@ dependencies = [
  "rewind-store",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "tokio-stream",

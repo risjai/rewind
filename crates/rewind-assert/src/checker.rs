@@ -383,9 +383,12 @@ impl<'a> AssertionEngine<'a> {
         }
 
         let structural_match = baseline_steps.len() == actual_steps.len();
-        let passed = !step_results
-            .iter()
-            .any(|s| matches!(s.verdict, StepVerdict::Fail | StepVerdict::Missing));
+        let extra_is_failure = !self.tolerance.extra_steps_is_warning;
+        let passed = !step_results.iter().any(|s| match s.verdict {
+            StepVerdict::Fail | StepVerdict::Missing => true,
+            StepVerdict::Extra => extra_is_failure,
+            _ => false,
+        });
 
         Ok(AssertionResult {
             baseline_id: baseline_id.to_string(),

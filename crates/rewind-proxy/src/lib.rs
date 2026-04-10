@@ -593,9 +593,18 @@ fn parse_sse_event(
                     if let Some(t) = delta.get("text").and_then(|t| t.as_str()) {
                         text.push_str(t);
                     }
-                    // tool input JSON delta
-                    if let Some(partial) = delta.get("partial_json").and_then(|p| p.as_str()) {
-                        text.push_str(partial); // accumulate tool args as text for now
+                    // Tool input JSON delta — accumulate into the last tool call's input,
+                    // NOT into the text buffer (which would corrupt content text).
+                    if let Some(partial) = delta.get("partial_json").and_then(|p| p.as_str())
+                        && let Some(last_tc) = tool_calls.last_mut()
+                    {
+                        let existing = last_tc.get("_partial_input")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        last_tc["_partial_input"] = serde_json::Value::String(
+                            format!("{}{}", existing, partial),
+                        );
                     }
                 }
             }
@@ -632,7 +641,17 @@ fn build_synthetic_response(
         }
         if has_tool_calls {
             for tc in tool_calls {
-                content.push(tc.clone());
+                let mut tc = tc.clone();
+                // Finalize accumulated partial_json into the tool call's input field
+                if let Some(partial) = tc.get("_partial_input").and_then(|v| v.as_str()) {
+                    if let Ok(input_val) = serde_json::from_str::<serde_json::Value>(partial) {
+                        tc["input"] = input_val;
+                    } else {
+                        tc["input"] = serde_json::Value::String(partial.to_string());
+                    }
+                    tc.as_object_mut().map(|o| o.remove("_partial_input"));
+                }
+                content.push(tc);
             }
         }
         serde_json::json!({
