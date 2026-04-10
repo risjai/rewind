@@ -183,7 +183,6 @@ See the [Getting Started guide](docs/getting-started.md) for more options.
 | **MCP Server** | 16 tools for AI assistants (Claude Code, Cursor, Windsurf) to query recordings, diff timelines, create baselines, run evals — all from your IDE. | [mcp-server.md](docs/mcp-server.md) | — |
 | **SQL Query Explorer** | Run ad-hoc SQL against the Rewind database. Token usage by model, average step duration, sessions with errors, cost estimation — read-only, safe to explore. | [sql-queries.md](docs/sql-queries.md) | — |
 | **CLI Reference** | Full command reference for all 28 CLI commands. | [cli-reference.md](docs/cli-reference.md) | — |
-| **Architecture** | Proxy-based instrumentation, content-addressed storage (SHA-256), timeline DAG with structural sharing, streaming SSE pass-through. Single binary, zero dependencies. | [architecture.md](docs/architecture.md) | — |
 
 ## Compatibility
 
