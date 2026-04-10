@@ -114,4 +114,4 @@ crew = rewind_agent.wrap_crew(crew)
 ## Learn More
 
 - [GitHub](https://github.com/agentoptics/rewind)
-- [Changelog](https://github.com/agentoptics/rewind/blob/main/CHANGELOG.md)
+- [Changelog](https://github.com/agentoptics/rewind/blob/master/CHANGELOG.md)
