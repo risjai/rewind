@@ -42,3 +42,6 @@ dist/
 
 # To-do / internal notes
 /to-do/
+
+# Internal product summary (not public)
+/docs/PRODUCT-SUMMARY.md
