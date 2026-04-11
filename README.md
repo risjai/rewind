@@ -56,6 +56,7 @@ Every existing observability tool shows you **what happened**. None of them let 
 | **Instant Replay** | Identical requests are served from cache at **0 tokens, 0ms latency**. Run the same agent 10 times — only the first run hits the LLM. |
 | **Regression Testing** | Turn any session into a baseline. After code changes, check the new behavior: step types, models, tool calls, token counts. Run in CI. |
 | **Evaluation** | Create datasets of test cases, run your agent against them, score with built-in evaluators (exact match, contains, regex, JSON schema, tool use), compare experiments side-by-side. CI-ready with `--fail-below` thresholds. |
+| **Multi-Agent Tracing** | See which agent made which decision. Span tree visualization groups LLM calls, tool invocations, and handoffs under their parent agent. Thread view tracks multi-turn conversations across sessions. |
 | **Snapshots** | Capture your entire workspace at any point. Restore in one command if your agent breaks something. No git dependency. |
 
 ## See It in Action
@@ -73,16 +74,24 @@ rewind demo && rewind inspect latest   # try it now — no API keys needed
 ```
 ⏪ Rewind — Session Trace
 
-  Session: research-agent    Steps: 5    Tokens: 1,231
+  Session: customer-service   Steps: 12   Tokens: 3,450
+  Agents: supervisor, researcher, writer
 
-  ┌ ✓ 🧠  Step 1  gpt-4o    320ms   156↓  28↑  → web_search("Tokyo population 2024")
-  ├ ✓ 📋  Step 2  tool        45ms
-  ├ ✓ 🧠  Step 3  gpt-4o    890ms   312↓  35↑  → web_search("Tokyo decade trend")
-  ├ ✓ 📋  Step 4  tool        38ms               ⚠ Stale cached data (2019 dataset)
-  └ ✗ 🧠  Step 5  gpt-4o   1450ms   520↓ 180↑  ERROR: Hallucination — used 2019 data as fact
+  ▼ ✓ 🤖 supervisor (agent)                          1.2s
+    ├ ✓ 🧠  gpt-4o  "Route to researcher"           320ms  156↓ 28↑
+    ▼ ✓ 🤖 researcher (agent)                        2.1s
+    │ ├ ✓ 🧠  gpt-4o  "Search for information"      890ms  312↓ 35↑
+    │ ├ ✓ 🔧  web_search("Tokyo population")          45ms
+    │ └ ✓ 🧠  gpt-4o  "Synthesize results"          650ms  280↓ 95↑
+    ├ ✓ 🔀 handoff: researcher → writer
+    ▼ ✗ 🤖 writer (agent)                            1.8s
+    │ ├ ✓ 🧠  gpt-4o  "Draft article"              1200ms  450↓ 180↑
+    │ └ ✗ 🧠  gpt-4o  "Polish final draft"          600ms  320↓ 120↑
+    │     ERROR: Hallucination — used stale data
+    └ ✓ 🧠  gpt-4o  "Final review"                   400ms  200↓ 45↑
 ```
 
-Step 4 returned stale data. Step 5 hallucinated because of it. Without Rewind, you'd re-run 50 times and never find this.
+The writer agent hallucinated at step 8 because the researcher used stale data. Without the span tree, you'd see a flat list of 12 steps with no agent boundaries.
 
 ### Fix and replay — only re-run what changed
 
@@ -178,8 +187,9 @@ See the [Getting Started guide](docs/getting-started.md) for more options.
 | **Custom Evaluators** | Define domain-specific scoring with `@evaluator()` — check keyword coverage, format compliance, or any custom logic. Plug into the same experiment/comparison pipeline. | [evaluation.md](docs/evaluation.md) | [12_custom_evaluator.py](examples/12_custom_evaluator.py) |
 | **Snapshots** | Checkpoint your entire workspace before an agent runs. If it breaks something, restore in one command. Compressed tar+gz in the blob store — no git required. | [snapshots.md](docs/snapshots.md) | [11_snapshots.sh](examples/11_snapshots.sh) |
 | **Web Dashboard** | Browser-based session explorer with step timeline, context window viewer, timeline diff, and live recording via WebSocket. Everything embedded in the single binary. | [web-ui.md](docs/web-ui.md) | — |
+| **Multi-Agent Tracing** | Hierarchical span tree for multi-agent workflows. Auto-captures agent boundaries, tool calls, and handoffs from OpenAI Agents SDK. Manual `@span()` decorator for custom grouping. Thread view for multi-turn conversations. | [multi-agent-tracing.md](docs/multi-agent-tracing.md) | — |
 | **Framework Integrations** | Native support for OpenAI Agents SDK, Pydantic AI, LangGraph, and CrewAI. Auto-detected on `init()` — zero config for most frameworks. | [framework-integrations.md](docs/framework-integrations.md) | [09_pydantic_ai.py](examples/09_pydantic_ai.py), [10_openai_agents_sdk.py](examples/10_openai_agents_sdk.py) |
-| **MCP Server** | 16 tools for AI assistants (Claude Code, Cursor, Windsurf) to query recordings, diff timelines, create baselines, run evals — all from your IDE. | [mcp-server.md](docs/mcp-server.md) | — |
+| **MCP Server** | 25 tools for AI assistants (Claude Code, Cursor, Windsurf) to query recordings, view span trees, browse threads, diff timelines, create baselines, run evals — all from your IDE. | [mcp-server.md](docs/mcp-server.md) | — |
 | **SQL Query Explorer** | Run ad-hoc SQL against the Rewind database. Token usage by model, average step duration, sessions with errors, cost estimation — read-only, safe to explore. | [sql-queries.md](docs/sql-queries.md) | — |
 | **CLI Reference** | Full command reference for all 28 CLI commands. | [cli-reference.md](docs/cli-reference.md) | — |
 
@@ -202,7 +212,7 @@ Works with any agent framework: **[OpenAI Agents SDK](https://github.com/openai/
 | **v0.2** | Direct recording, fork-and-execute replay, regression testing, MCP server | ✅ Shipped |
 | **v0.3** | Web UI (flight recorder + live dashboard) | ✅ Shipped |
 | **v0.4** | Evaluation system — datasets, evaluators, experiments, comparison, CI | ✅ Shipped |
-| **v0.5** | Multi-agent tracing, OTel export | Building |
+| **v0.5** | Multi-agent tracing (spans, threads, span tree UI), OTel export | Building |
 | **v1.0** | LLM-as-judge, live breakpoints, Rewind Cloud, semantic diff | Planned |
 
 ## Why "Rewind"?
