@@ -44,7 +44,7 @@ pub async fn start_polling(
                                 if step.step_number > prev_steps {
                                     new_events.push(StoreEvent::StepCreated {
                                         session_id: session.id.clone(),
-                                        step,
+                                        step: Box::new(step),
                                     });
                                 }
                             }

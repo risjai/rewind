@@ -18,7 +18,7 @@ pub use api::routes as api_routes;
 pub enum StoreEvent {
     StepCreated {
         session_id: String,
-        step: rewind_store::Step,
+        step: Box<rewind_store::Step>,
     },
     SessionUpdated {
         session_id: String,
