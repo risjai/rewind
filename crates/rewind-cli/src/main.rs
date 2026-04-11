@@ -2190,6 +2190,60 @@ fn seed_demo_data(store: &Store) -> Result<()> {
         "gpt-4o", 1450, 520, 180, &req5, &resp5,
         Some("HALLUCINATION: Agent used stale 2019 projection (14.2M) as current fact, ignored COVID-19 dip to 13.96M, and claimed 'no significant disruptions' despite search result explicitly noting COVID impacts."))?;
 
+    // ── Span tree: give the demo a multi-agent feel ──────────────
+    // Root span: supervisor agent
+    let mut supervisor = Span::new(&session.id, &timeline.id, SpanType::Agent, "supervisor");
+    supervisor.status = "error".to_string();
+    supervisor.duration_ms = 2743;
+    supervisor.ended_at = Some(supervisor.started_at + chrono::Duration::milliseconds(2743));
+    store.create_span(&supervisor)?;
+
+    // Child span: researcher agent (steps 1-4)
+    let mut researcher = Span::new(&session.id, &timeline.id, SpanType::Agent, "researcher");
+    researcher.parent_span_id = Some(supervisor.id.clone());
+    researcher.status = "completed".to_string();
+    researcher.duration_ms = 1293;
+    researcher.ended_at = Some(researcher.started_at + chrono::Duration::milliseconds(1293));
+    store.create_span(&researcher)?;
+
+    // Child span: web_search tool (step 2)
+    let mut tool1 = Span::new(&session.id, &timeline.id, SpanType::Tool, "web_search");
+    tool1.parent_span_id = Some(researcher.id.clone());
+    tool1.status = "completed".to_string();
+    tool1.duration_ms = 45;
+    tool1.ended_at = Some(tool1.started_at + chrono::Duration::milliseconds(45));
+    store.create_span(&tool1)?;
+
+    // Child span: web_search tool (step 4)
+    let mut tool2 = Span::new(&session.id, &timeline.id, SpanType::Tool, "web_search");
+    tool2.parent_span_id = Some(researcher.id.clone());
+    tool2.status = "completed".to_string();
+    tool2.duration_ms = 38;
+    tool2.ended_at = Some(tool2.started_at + chrono::Duration::milliseconds(38));
+    store.create_span(&tool2)?;
+
+    // Child span: writer agent (step 5)
+    let mut writer = Span::new(&session.id, &timeline.id, SpanType::Agent, "writer");
+    writer.parent_span_id = Some(supervisor.id.clone());
+    writer.status = "error".to_string();
+    writer.duration_ms = 1450;
+    writer.ended_at = Some(writer.started_at + chrono::Duration::milliseconds(1450));
+    writer.error = Some("Hallucination — used stale 2019 projection as current fact".to_string());
+    store.create_span(&writer)?;
+
+    // Link steps to spans
+    let steps = store.get_steps(&timeline.id)?;
+    for step in &steps {
+        match step.step_number {
+            1 => store.update_step_span_id(&step.id, &researcher.id)?,
+            2 => store.update_step_span_id(&step.id, &tool1.id)?,
+            3 => store.update_step_span_id(&step.id, &researcher.id)?,
+            4 => store.update_step_span_id(&step.id, &tool2.id)?,
+            5 => store.update_step_span_id(&step.id, &writer.id)?,
+            _ => {}
+        }
+    }
+
     // Update session totals
     store.update_session_stats(
         &session.id,
