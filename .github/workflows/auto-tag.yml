@@ -1,0 +1,33 @@
+name: Auto-tag on version bump
+
+on:
+  push:
+    branches: [master, main]
+    paths:
+      - Cargo.toml
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read version and tag if new
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          TAG="v${VERSION}"
+          echo "Version: $VERSION"
+          echo "Tag: $TAG"
+
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists — skipping"
+          else
+            echo "Creating and pushing tag $TAG"
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
