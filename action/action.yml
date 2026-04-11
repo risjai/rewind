@@ -43,12 +43,14 @@ runs:
   steps:
     - name: Install Rewind CLI
       shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
       run: |
         # Install via pip (includes CLI auto-download)
-        if [ "${{ inputs.version }}" = "latest" ]; then
+        if [ "$INPUT_VERSION" = "latest" ]; then
           pip install rewind-agent -q
         else
-          pip install rewind-agent==${{ inputs.version }} -q
+          pip install "rewind-agent==${INPUT_VERSION}" -q
         fi
 
         # Verify installation
@@ -62,11 +64,15 @@ runs:
       shell: bash
       env:
         REWIND_DATA: ${{ inputs.rewind-data }}
+        INPUT_SESSION: ${{ inputs.session }}
+        INPUT_BASELINE: ${{ inputs.baseline }}
+        INPUT_TOKEN_TOLERANCE: ${{ inputs.token-tolerance }}
+        INPUT_WARN_MODEL_CHANGE: ${{ inputs.warn-model-change }}
       run: |
         # Build command
-        CMD="rewind assert check ${{ inputs.session }} --against ${{ inputs.baseline }} --token-tolerance ${{ inputs.token-tolerance }}"
+        CMD="rewind assert check ${INPUT_SESSION} --against ${INPUT_BASELINE} --token-tolerance ${INPUT_TOKEN_TOLERANCE}"
 
-        if [ "${{ inputs.warn-model-change }}" = "true" ]; then
+        if [ "$INPUT_WARN_MODEL_CHANGE" = "true" ]; then
           CMD="$CMD --warn-model-change"
         fi
 

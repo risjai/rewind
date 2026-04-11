@@ -140,8 +140,11 @@ def _ensure_binary() -> str:
             if rewind_member is None:
                 _die(f"Binary not found in release archive. Contents: {[m.name for m in members]}")
 
+            if os.path.isabs(rewind_member.name) or ".." in rewind_member.name.split("/"):
+                _die(f"Refusing to extract archive entry with path traversal: {rewind_member.name}")
+
             with tempfile.TemporaryDirectory() as extract_dir:
-                tar.extract(rewind_member, path=extract_dir)
+                tar.extract(rewind_member, path=extract_dir, set_attrs=False)
                 extracted = os.path.join(extract_dir, rewind_member.name)
                 shutil.move(extracted, bin_path)
 

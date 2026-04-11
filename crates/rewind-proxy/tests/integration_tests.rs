@@ -164,6 +164,7 @@ async fn buffered_request_records_step() {
         "test-session",
         &format!("http://{}", upstream_addr),
         false,
+        false,
     )
     .unwrap();
     let session_id = proxy.session_id().to_string();
@@ -230,6 +231,7 @@ async fn upstream_error_records_error_step() {
         "test-error",
         &format!("http://{}", upstream_addr),
         false,
+        false,
     )
     .unwrap();
     let timeline_id = proxy.timeline_id().to_string();
@@ -272,6 +274,7 @@ async fn streaming_request_records_synthetic_response() {
         store,
         "test-stream",
         &format!("http://{}", upstream_addr),
+        false,
         false,
     )
     .unwrap();
@@ -338,6 +341,7 @@ async fn instant_replay_cache_hit() {
         "test-cache",
         &format!("http://{}", upstream_addr),
         true, // instant_replay enabled
+        false,
     )
     .unwrap();
     let timeline_id = proxy.timeline_id().to_string();
@@ -401,6 +405,7 @@ async fn step_counter_increments() {
         store,
         "test-counter",
         &format!("http://{}", upstream_addr),
+        false,
         false,
     )
     .unwrap();

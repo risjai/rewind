@@ -82,4 +82,4 @@ __all__ = [
     "regex_match",
     "tool_use_match",
 ]
-__version__ = "0.8.0"
+__version__ = "0.8.1"

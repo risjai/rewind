@@ -49,6 +49,10 @@ enum Commands {
         /// Port for the web dashboard (used with --web)
         #[arg(long, default_value = "8080")]
         web_port: u16,
+
+        /// Skip TLS certificate verification for upstream connections (INSECURE)
+        #[arg(long)]
+        insecure: bool,
     },
 
     /// List recorded sessions
@@ -429,7 +433,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Record { name, port, upstream, replay, web, web_port } => cmd_record(name, port, upstream, replay, web, web_port).await,
+        Commands::Record { name, port, upstream, replay, web, web_port, insecure } => cmd_record(name, port, upstream, replay, web, web_port, insecure).await,
         Commands::Sessions => cmd_sessions(),
         Commands::Inspect { session } => cmd_inspect(session),
         Commands::Show { session, flat } => cmd_show(session, flat),
@@ -475,9 +479,12 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn cmd_record(name: String, port: u16, upstream: String, replay: bool, web: bool, web_port: u16) -> Result<()> {
+async fn cmd_record(name: String, port: u16, upstream: String, replay: bool, web: bool, web_port: u16, insecure: bool) -> Result<()> {
+    if insecure {
+        eprintln!("  {} TLS certificate verification is disabled (--insecure)", "⚠".yellow().bold());
+    }
     let store = Store::open_default()?;
-    let proxy = ProxyServer::new(store, &name, &upstream, replay)?;
+    let proxy = ProxyServer::new(store, &name, &upstream, replay, insecure)?;
 
     println!("{}", "⏪ Rewind — Recording Started".cyan().bold());
     println!();
@@ -1070,8 +1077,23 @@ fn cmd_restore(snapshot_ref: String) -> Result<()> {
     let decoder = flate2::read::GzDecoder::new(&archive_data[..]);
     let mut archive = tar::Archive::new(decoder);
 
-    let target_dir = std::path::Path::new(&snapshot.directory);
-    archive.unpack(target_dir)?;
+    let target_dir = std::path::Path::new(&snapshot.directory)
+        .canonicalize()
+        .unwrap_or_else(|_| std::path::PathBuf::from(&snapshot.directory));
+
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let entry_path = entry.path()?;
+        if entry_path.components().any(|c| c == std::path::Component::ParentDir)
+            || entry_path.is_absolute()
+        {
+            bail!(
+                "Refusing to extract archive entry with path traversal: {}",
+                entry_path.display()
+            );
+        }
+        entry.unpack_in(&target_dir)?;
+    }
 
     println!();
     println!("  {} Restored to {}", "✓".green().bold(), snapshot.directory.white());

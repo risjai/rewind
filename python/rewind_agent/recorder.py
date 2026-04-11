@@ -10,6 +10,7 @@ import json
 import logging
 import threading
 import time
+import types
 
 from .store import Store
 
@@ -27,10 +28,18 @@ def _serialize_response(response) -> dict:
         return {"raw": str(response)}
 
 
+_SENSITIVE_KEYS = frozenset({
+    "api_key", "api_secret", "authorization", "x-api-key",
+    "secret", "password", "token", "access_token", "refresh_token",
+})
+
+
 def _serialize_request(kwargs: dict) -> dict:
-    """Convert create() kwargs to a JSON-serializable dict."""
+    """Convert create() kwargs to a JSON-serializable dict, stripping sensitive keys."""
     result = {}
     for k, v in kwargs.items():
+        if k.lower() in _SENSITIVE_KEYS:
+            continue
         try:
             json.dumps(v, default=str)
             result[k] = v
@@ -406,8 +415,7 @@ class Recorder:
             from openai.types.chat import ChatCompletion
             return ChatCompletion.model_validate(resp_data)
         except Exception:
-            # Fallback: return the dict wrapped in a simple namespace
-            return type("CachedResponse", (), resp_data)()
+            return types.SimpleNamespace(**resp_data)
 
     @staticmethod
     def _build_anthropic_response(resp_data: dict):
@@ -416,7 +424,7 @@ class Recorder:
             from anthropic.types import Message
             return Message.model_validate(resp_data)
         except Exception:
-            return type("CachedResponse", (), resp_data)()
+            return types.SimpleNamespace(**resp_data)
 
     # ── OpenAI sync ───────────────────────────────────────────
 

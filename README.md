@@ -32,7 +32,7 @@
 
 ---
 
-> **If your agent runs 10+ steps, you need a debugger, not `print()`.** Below 10 steps, re-running is fine — $0.10 and 10 seconds. Above 20, each debugging cycle costs $2-5 and 2-5 minutes, repeated 5-15x per bug. That's $50 and 30 minutes to fix one failure. Rewind cuts that to 90 seconds and the cost of a single re-run.
+> **Agent broke at step 30? Fix step 30 — not steps 1 through 29 again.** Each re-run costs tokens, time, and a different answer.
 
 ## The Problem
 

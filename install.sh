@@ -60,6 +60,21 @@ install() {
 
     curl -fsSL "$URL" -o "${TMPDIR}/${TARBALL}" || error "Download failed. URL: ${URL}"
 
+    CHECKSUM_URL="${URL}.sha256"
+    info "Verifying checksum..."
+    curl -fsSL "$CHECKSUM_URL" -o "${TMPDIR}/${TARBALL}.sha256" || error "Checksum download failed. URL: ${CHECKSUM_URL}"
+
+    # Verify checksum (supports both shasum and sha256sum)
+    cd "${TMPDIR}"
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 -c "${TARBALL}.sha256" || error "Checksum verification failed — download may be corrupted or tampered with"
+    elif command -v sha256sum >/dev/null 2>&1; then
+        sha256sum -c "${TARBALL}.sha256" || error "Checksum verification failed — download may be corrupted or tampered with"
+    else
+        info "Warning: no shasum/sha256sum found, skipping checksum verification"
+    fi
+    cd - >/dev/null
+
     info "Installing to ${INSTALL_DIR}..."
 
     tar -xzf "${TMPDIR}/${TARBALL}" -C "${TMPDIR}"

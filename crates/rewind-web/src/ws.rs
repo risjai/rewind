@@ -3,7 +3,8 @@ use axum::{
         ws::{Message, WebSocket},
         State, WebSocketUpgrade,
     },
-    response::Response,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
     routing::get,
     Router,
 };
@@ -18,10 +19,28 @@ pub fn routes(state: AppState) -> Router {
         .with_state(state)
 }
 
+fn is_local_origin(origin: &str) -> bool {
+    if let Some(host_port) = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+    {
+        let host = host_port.split(':').next().unwrap_or("");
+        matches!(host, "localhost" | "127.0.0.1" | "[::1]")
+    } else {
+        false
+    }
+}
+
 async fn ws_handler(
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
 ) -> Response {
+    if let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok())
+        && !is_local_origin(origin)
+    {
+        return (StatusCode::FORBIDDEN, "WebSocket connections from non-localhost origins are rejected").into_response();
+    }
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 

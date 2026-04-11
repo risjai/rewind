@@ -25,6 +25,8 @@ pub struct ProxyServer {
     replay_steps: Option<Vec<Step>>,
     /// Fork-and-execute: step number cutoff — steps <= this are served from cache
     fork_at_step: Option<u32>,
+    /// Skip TLS certificate verification for upstream connections
+    insecure: bool,
 }
 
 #[derive(Clone)]
@@ -37,10 +39,11 @@ struct ProxyState {
     instant_replay: bool,
     replay_steps: Option<Arc<Vec<Step>>>,
     fork_at_step: Option<u32>,
+    client: reqwest::Client,
 }
 
 impl ProxyServer {
-    pub fn new(store: Store, session_name: &str, upstream_base: &str, instant_replay: bool) -> Result<Self> {
+    pub fn new(store: Store, session_name: &str, upstream_base: &str, instant_replay: bool, insecure: bool) -> Result<Self> {
         let session = Session::new(session_name);
         let timeline = Timeline::new_root(&session.id);
 
@@ -63,6 +66,7 @@ impl ProxyServer {
             instant_replay,
             replay_steps: None,
             fork_at_step: None,
+            insecure,
         })
     }
 
@@ -93,6 +97,7 @@ impl ProxyServer {
             instant_replay: false,
             replay_steps: Some(replay_steps),
             fork_at_step: Some(fork_at_step),
+            insecure: false,
         })
     }
 
@@ -117,6 +122,7 @@ impl ProxyServer {
             instant_replay: self.instant_replay,
             replay_steps: self.replay_steps.map(Arc::new),
             fork_at_step: self.fork_at_step,
+            client: make_client(self.insecure),
         };
 
         loop {
@@ -142,11 +148,14 @@ impl ProxyServer {
     }
 }
 
-fn make_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+fn make_client(insecure: bool) -> reqwest::Client {
+    let mut builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .connect_timeout(std::time::Duration::from_secs(30));
+    if insecure {
+        builder = builder.danger_accept_invalid_certs(true);
+    }
+    builder.build().unwrap_or_else(|_| reqwest::Client::new())
 }
 
 fn is_stream_request(body: &[u8]) -> bool {
@@ -282,8 +291,7 @@ async fn handle_request(
         }
 
     let upstream_url = format!("{}{}", state.upstream_base, path);
-    let client = make_client();
-    let mut upstream_req = client.request(
+    let mut upstream_req = state.client.request(
         reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap(),
         &upstream_url,
     );
