@@ -29,12 +29,17 @@ export function StepDetailPanel({ stepId }: { stepId: string }) {
         <div className="flex items-center gap-3">
           <span className="text-sm font-mono text-neutral-500">Step #{step.step_number}</span>
           <span className="text-sm font-medium text-neutral-200">{step.step_type}</span>
+          {step.tool_name && (
+            <span className="text-xs bg-violet-950/50 text-violet-300 px-1.5 py-0.5 rounded border border-violet-800/50 font-mono">{step.tool_name}</span>
+          )}
           {step.model && <span className="text-xs bg-neutral-800 text-neutral-400 px-1.5 py-0.5 rounded font-mono">{step.model}</span>}
           <StatusPill status={step.status} />
         </div>
         <div className="flex items-center gap-4 text-xs text-neutral-500">
           <span>{formatDuration(step.duration_ms)}</span>
-          <span>{formatTokens(step.tokens_in)} in / {formatTokens(step.tokens_out)} out</span>
+          {(step.tokens_in > 0 || step.tokens_out > 0) && (
+            <span>{formatTokens(step.tokens_in)} in / {formatTokens(step.tokens_out)} out</span>
+          )}
         </div>
         {step.error && (
           <div className="flex items-center gap-1.5 text-xs text-red-400 bg-red-950/30 px-2.5 py-1.5 rounded border border-red-900/50">

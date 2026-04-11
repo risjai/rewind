@@ -193,6 +193,12 @@ enum Commands {
         #[arg(long)]
         tables: bool,
     },
+
+    /// Manage Claude Code hooks integration
+    Hooks {
+        #[command(subcommand)]
+        action: HooksAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -421,6 +427,26 @@ enum EvaluatorAction {
     },
 }
 
+#[derive(Subcommand)]
+enum HooksAction {
+    /// Install Rewind hooks into Claude Code settings
+    Install {
+        /// Rewind server port
+        #[arg(short, long, default_value = "4800")]
+        port: u16,
+    },
+
+    /// Uninstall Rewind hooks from Claude Code settings
+    Uninstall,
+
+    /// Show status of Rewind hooks and server
+    Status {
+        /// Rewind server port to check
+        #[arg(short, long, default_value = "4800")]
+        port: u16,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -476,6 +502,11 @@ async fn main() -> Result<()> {
         },
         Commands::Web { port } => cmd_web(port).await,
         Commands::Query { sql, tables } => cmd_query(sql, tables),
+        Commands::Hooks { action } => match action {
+            HooksAction::Install { port } => cmd_hooks_install(port).await,
+            HooksAction::Uninstall => cmd_hooks_uninstall(),
+            HooksAction::Status { port } => cmd_hooks_status(port).await,
+        },
     }
 }
 
@@ -2108,6 +2139,336 @@ fn format_score(score: f64) -> colored::ColoredString {
     }
 }
 
+// ── Hooks commands ──────────────────────────────────────────
+
+const HOOK_SCRIPT: &str = include_str!("../../../assets/claude-code-hook.sh");
+
+const HOOK_EVENT_TYPES: &[&str] = &[
+    "PreToolUse",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "SessionStart",
+    "SessionEnd",
+    "SubagentStart",
+    "SubagentStop",
+    "UserPromptSubmit",
+    "Stop",
+];
+
+/// Event types that should match all tools (matcher = "*")
+const TOOL_EVENT_TYPES: &[&str] = &["PreToolUse", "PostToolUse", "PostToolUseFailure"];
+
+fn get_home_dir() -> Result<std::path::PathBuf> {
+    std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .context("HOME environment variable not set")
+}
+
+fn hook_script_path() -> Result<std::path::PathBuf> {
+    Ok(get_home_dir()?.join(".rewind/hooks/claude-code-hook.sh"))
+}
+
+fn claude_settings_path() -> Result<std::path::PathBuf> {
+    Ok(get_home_dir()?.join(".claude/settings.json"))
+}
+
+fn read_claude_settings() -> Result<serde_json::Value> {
+    let path = claude_settings_path()?;
+    if path.exists() {
+        let content = std::fs::read_to_string(&path)
+            .context("Failed to read ~/.claude/settings.json")?;
+        serde_json::from_str(&content)
+            .context("Failed to parse ~/.claude/settings.json")
+    } else {
+        Ok(serde_json::json!({}))
+    }
+}
+
+fn write_claude_settings(settings: &serde_json::Value) -> Result<()> {
+    let path = claude_settings_path()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let content = serde_json::to_string_pretty(settings)?;
+    std::fs::write(&path, content)
+        .context("Failed to write ~/.claude/settings.json")
+}
+
+fn make_hook_entry(matcher: &str) -> serde_json::Value {
+    serde_json::json!({
+        "matcher": matcher,
+        "hooks": [
+            {
+                "type": "command",
+                "command": "bash ~/.rewind/hooks/claude-code-hook.sh"
+            }
+        ]
+    })
+}
+
+fn is_rewind_hook(entry: &serde_json::Value) -> bool {
+    if let Some(hooks) = entry.get("hooks").and_then(|h| h.as_array()) {
+        hooks.iter().any(|h| {
+            h.get("command")
+                .and_then(|c| c.as_str())
+                .map(|c| c.contains("claude-code-hook.sh"))
+                .unwrap_or(false)
+        })
+    } else {
+        false
+    }
+}
+
+async fn cmd_hooks_install(port: u16) -> Result<()> {
+    println!("{}", "⏪ Rewind — Installing Claude Code Hooks".cyan().bold());
+    println!();
+
+    // 1. Write hook script
+    let script_path = hook_script_path()?;
+    if let Some(parent) = script_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    // Write script with REWIND_PORT baked in if non-default
+    let script_content = if port != 4800 {
+        HOOK_SCRIPT.replace(
+            "REWIND_PORT=\"${REWIND_PORT:-4800}\"",
+            &format!("REWIND_PORT=\"${{REWIND_PORT:-{}}}\"", port),
+        )
+    } else {
+        HOOK_SCRIPT.to_string()
+    };
+
+    std::fs::write(&script_path, script_content)?;
+
+    // chmod +x
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))?;
+    }
+
+    println!("  {} Hook script written to {}", "✓".green(), script_path.display().to_string().dimmed());
+
+    // 2. Read Claude settings
+    let mut settings = read_claude_settings()?;
+
+    // Ensure "hooks" object exists
+    if settings.get("hooks").is_none() {
+        settings["hooks"] = serde_json::json!({});
+    }
+
+    let hooks_obj = settings["hooks"].as_object_mut()
+        .context("hooks field in settings.json is not an object")?;
+
+    // 3. For each event type, add our hook entry (alongside existing ones)
+    for event_type in HOOK_EVENT_TYPES {
+        let matcher = if TOOL_EVENT_TYPES.contains(event_type) { "*" } else { "" };
+        let new_entry = make_hook_entry(matcher);
+
+        if let Some(existing) = hooks_obj.get_mut(*event_type) {
+            if let Some(arr) = existing.as_array_mut() {
+                // Remove any existing Rewind hooks first (idempotent re-install)
+                arr.retain(|entry| !is_rewind_hook(entry));
+                // Append our new hook
+                arr.push(new_entry);
+            } else {
+                // Not an array — wrap existing + add ours
+                let old = existing.clone();
+                *existing = serde_json::json!([old, new_entry]);
+            }
+        } else {
+            // No existing hooks for this event type
+            hooks_obj.insert(event_type.to_string(), serde_json::json!([new_entry]));
+        }
+    }
+
+    // 4. Write back
+    write_claude_settings(&settings)?;
+
+    println!("  {} Claude Code settings updated at {}", "✓".green(), claude_settings_path()?.display().to_string().dimmed());
+    println!("  {} {} hook event types configured", "✓".green(), HOOK_EVENT_TYPES.len().to_string().yellow());
+    println!();
+    println!(
+        "  {} Start the server with {} to begin observing Claude Code sessions.",
+        "→".cyan(),
+        "rewind web".green().bold(),
+    );
+    println!();
+
+    Ok(())
+}
+
+fn cmd_hooks_uninstall() -> Result<()> {
+    println!("{}", "⏪ Rewind — Uninstalling Claude Code Hooks".cyan().bold());
+    println!();
+
+    // 1. Read Claude settings
+    let mut settings = read_claude_settings()?;
+
+    if let Some(hooks_obj) = settings.get_mut("hooks").and_then(|h| h.as_object_mut()) {
+        let mut removed_count = 0u32;
+
+        for event_type in HOOK_EVENT_TYPES {
+            if let Some(existing) = hooks_obj.get_mut(*event_type) {
+                if let Some(arr) = existing.as_array_mut() {
+                    let before = arr.len();
+                    arr.retain(|entry| !is_rewind_hook(entry));
+                    removed_count += (before - arr.len()) as u32;
+                }
+            }
+        }
+
+        // Clean up empty arrays
+        let empty_keys: Vec<String> = hooks_obj
+            .iter()
+            .filter(|(_, v)| v.as_array().map(|a| a.is_empty()).unwrap_or(false))
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in empty_keys {
+            hooks_obj.remove(&key);
+        }
+
+        // Write back
+        write_claude_settings(&settings)?;
+
+        if removed_count > 0 {
+            println!("  {} Removed {} Rewind hook entries from Claude Code settings.", "✓".green(), removed_count.to_string().yellow());
+        } else {
+            println!("  {} No Rewind hooks found in Claude Code settings.", "○".dimmed());
+        }
+    } else {
+        println!("  {} No hooks section found in Claude Code settings.", "○".dimmed());
+    }
+
+    // 2. Remove hook script if it exists
+    let script_path = hook_script_path()?;
+    if script_path.exists() {
+        std::fs::remove_file(&script_path)?;
+        println!("  {} Removed hook script at {}", "✓".green(), script_path.display().to_string().dimmed());
+    }
+
+    println!();
+    Ok(())
+}
+
+async fn cmd_hooks_status(port: u16) -> Result<()> {
+    println!("{}", "⏪ Rewind — Hooks Status".cyan().bold());
+    println!();
+
+    // 1. Check if hooks are installed in settings.json
+    let settings = read_claude_settings()?;
+    let hooks_installed = if let Some(hooks_obj) = settings.get("hooks").and_then(|h| h.as_object()) {
+        let mut installed_events = Vec::new();
+        for event_type in HOOK_EVENT_TYPES {
+            if let Some(arr) = hooks_obj.get(*event_type).and_then(|v| v.as_array()) {
+                if arr.iter().any(|entry| is_rewind_hook(entry)) {
+                    installed_events.push(*event_type);
+                }
+            }
+        }
+        if installed_events.is_empty() {
+            println!("  {} {}", "Hooks:".dimmed(), "not installed".red());
+            false
+        } else {
+            println!(
+                "  {} {} ({}/{} event types)",
+                "Hooks:".dimmed(),
+                "installed".green().bold(),
+                installed_events.len().to_string().yellow(),
+                HOOK_EVENT_TYPES.len().to_string().yellow(),
+            );
+            true
+        }
+    } else {
+        println!("  {} {}", "Hooks:".dimmed(), "not installed".red());
+        false
+    };
+
+    // 2. Check hook script
+    let script_path = hook_script_path()?;
+    if script_path.exists() {
+        println!("  {} {}", "Script:".dimmed(), script_path.display().to_string().green());
+    } else {
+        println!("  {} {}", "Script:".dimmed(), "not found".red());
+    }
+
+    // 3. Check if Rewind server is reachable
+    let server_url = format!("http://127.0.0.1:{}/api/health", port);
+    let server_running = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+    {
+        Ok(client) => {
+            match client.get(&server_url).send().await {
+                Ok(resp) if resp.status().is_success() => true,
+                _ => false,
+            }
+        }
+        Err(_) => false,
+    };
+
+    if server_running {
+        println!(
+            "  {} {} (port {})",
+            "Server:".dimmed(),
+            "running".green().bold(),
+            port.to_string().yellow(),
+        );
+    } else {
+        println!(
+            "  {} {} (port {})",
+            "Server:".dimmed(),
+            "not running".red(),
+            port.to_string().yellow(),
+        );
+    }
+
+    // 4. Check for buffered events
+    let buffer_path = get_home_dir()?.join(".rewind/hooks/buffer.jsonl");
+    if buffer_path.exists() {
+        let content = std::fs::read_to_string(&buffer_path).unwrap_or_default();
+        let line_count = content.lines().filter(|l| !l.trim().is_empty()).count();
+        if line_count > 0 {
+            println!(
+                "  {} {} buffered events in {}",
+                "Buffer:".dimmed(),
+                line_count.to_string().yellow().bold(),
+                buffer_path.display().to_string().dimmed(),
+            );
+        } else {
+            println!("  {} {}", "Buffer:".dimmed(), "empty".dimmed());
+        }
+    } else {
+        println!("  {} {}", "Buffer:".dimmed(), "no buffered events".dimmed());
+    }
+
+    // 5. Warnings
+    println!();
+    if hooks_installed && !server_running {
+        println!(
+            "  {} Hooks are installed but the server is not running.",
+            "WARNING:".yellow().bold(),
+        );
+        println!(
+            "  Events will be buffered locally until the server starts.",
+        );
+        println!(
+            "  Start it with: {}",
+            format!("rewind web --port {}", port).green(),
+        );
+        println!();
+    } else if !hooks_installed {
+        println!(
+            "  Install hooks with: {}",
+            "rewind hooks install".green(),
+        );
+        println!();
+    }
+
+    Ok(())
+}
+
 // ── Demo data seeding ─────────────────────────────────────────
 
 fn seed_demo_data(store: &Store) -> Result<()> {
@@ -2345,6 +2706,7 @@ fn create_step_with_blobs(
         response_blob: resp_hash,
         error: error.map(String::from),
         span_id: None,
+        tool_name: None,
     };
 
     store.create_step(&step)?;

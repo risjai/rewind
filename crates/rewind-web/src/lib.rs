@@ -1,7 +1,9 @@
 pub mod api;
 pub mod eval_api;
+pub mod hooks;
 mod polling;
 mod spa;
+pub mod transcript;
 mod ws;
 
 use anyhow::Result;
@@ -12,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
 pub use api::routes as api_routes;
+pub use hooks::HookIngestionState;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type")]
@@ -32,6 +35,7 @@ pub enum StoreEvent {
 pub struct AppState {
     pub store: Arc<Mutex<Store>>,
     pub event_tx: broadcast::Sender<StoreEvent>,
+    pub hooks: Arc<HookIngestionState>,
 }
 
 pub struct WebServer {
@@ -42,7 +46,11 @@ pub struct WebServer {
 impl WebServer {
     pub fn new(store: Arc<Mutex<Store>>, event_tx: broadcast::Sender<StoreEvent>) -> Self {
         WebServer {
-            state: AppState { store, event_tx },
+            state: AppState {
+                store,
+                event_tx,
+                hooks: Arc::new(HookIngestionState::new()),
+            },
             dev_mode: false,
         }
     }
@@ -53,6 +61,7 @@ impl WebServer {
             state: AppState {
                 store: Arc::new(Mutex::new(store)),
                 event_tx,
+                hooks: Arc::new(HookIngestionState::new()),
             },
             dev_mode: false,
         }
@@ -70,12 +79,28 @@ impl WebServer {
     pub async fn run(self, addr: SocketAddr) -> Result<()> {
         let poll_store = self.state.store.clone();
         let poll_tx = self.state.event_tx.clone();
+
+        // Rehydrate hook session state from database (prevents duplicate sessions after restart)
+        {
+            let store = self.state.store.lock().map_err(|e| anyhow::anyhow!("Lock: {e}"))?;
+            self.state.hooks.rehydrate_from_store(&store);
+        }
+
+        // Drain buffered hook events before building router (self is consumed by build_router)
+        let drain_state = self.state.clone();
+        let drain_count = Self::drain_hook_buffer(&drain_state).await;
+
         let app = self.build_router();
 
         tracing::info!("Rewind Web UI listening on http://{}", addr);
         println!();
         println!("  \x1b[36;1m⏪ Rewind Web UI\x1b[0m");
         println!("  \x1b[2mDashboard:\x1b[0m \x1b[33mhttp://{}\x1b[0m", addr);
+
+        if drain_count > 0 {
+            println!("  \x1b[2mDrained:\x1b[0m  \x1b[32m{} buffered hook events\x1b[0m", drain_count);
+        }
+
         println!();
 
         // Start background SQLite polling for live updates
@@ -85,19 +110,67 @@ impl WebServer {
             std::time::Duration::from_millis(300),
         ));
 
+        // Start background transcript token sync for hook sessions
+        let transcript_state = drain_state;
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                if let Err(e) = transcript::sync_transcript_tokens(&transcript_state) {
+                    tracing::error!("Transcript sync error: {e}");
+                }
+            }
+        });
+
         let listener = tokio::net::TcpListener::bind(addr).await?;
         axum::serve(listener, app).await?;
         Ok(())
     }
 
+    /// Drain buffered hook events from ~/.rewind/hooks/buffer.jsonl
+    /// These accumulate when the hook script fires but the server isn't running.
+    async fn drain_hook_buffer(state: &AppState) -> usize {
+        let buffer_path = std::env::var("HOME")
+            .map(|h| std::path::PathBuf::from(h).join(".rewind/hooks/buffer.jsonl"))
+            .unwrap_or_default();
+
+        if !buffer_path.exists() {
+            return 0;
+        }
+
+        let content = match std::fs::read_to_string(&buffer_path) {
+            Ok(c) => c,
+            Err(_) => return 0,
+        };
+
+        let mut count = 0;
+        for line in content.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Ok(envelope) = serde_json::from_str::<hooks::HookEventEnvelope>(line) {
+                hooks::process_hook_event(state, envelope).await;
+                count += 1;
+            }
+        }
+
+        // Clear the buffer file after successful drain
+        if count > 0 {
+            let _ = std::fs::write(&buffer_path, "");
+        }
+
+        count
+    }
+
     fn build_router(self) -> Router {
         let api_routes = api::routes(self.state.clone());
         let eval_routes = eval_api::routes(self.state.clone());
+        let hook_routes = hooks::routes(self.state.clone());
         let ws_route = ws::routes(self.state.clone());
 
         let app = Router::new()
             .nest("/api", api_routes)
             .nest("/api/eval", eval_routes)
+            .nest("/api/hooks", hook_routes)
             .merge(ws_route);
 
         if self.dev_mode {

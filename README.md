@@ -193,6 +193,7 @@ See the [Getting Started guide](docs/getting-started.md) for more options.
 | **Web Dashboard** | Browser-based session explorer with step timeline, context window viewer, timeline diff, and live recording via WebSocket. Everything embedded in the single binary. | [web-ui.md](docs/web-ui.md) | — |
 | **Multi-Agent Tracing** | Hierarchical span tree for multi-agent workflows. Auto-captures agent boundaries, tool calls, and handoffs from OpenAI Agents SDK. Manual `@span()` decorator for custom grouping. Thread view for multi-turn conversations. | [multi-agent-tracing.md](docs/multi-agent-tracing.md) | — |
 | **Framework Integrations** | Native support for OpenAI Agents SDK, Pydantic AI, LangGraph, and CrewAI. Auto-detected on `init()` — zero config for most frameworks. | [framework-integrations.md](docs/framework-integrations.md) | [09_pydantic_ai.py](examples/09_pydantic_ai.py), [10_openai_agents_sdk.py](examples/10_openai_agents_sdk.py) |
+| **Claude Code Observation** | Observe Claude Code sessions in real-time via hooks. See every tool call (Read, Edit, Bash, Grep, Agent), user prompts, and session lifecycle. Token usage extracted from transcripts. One-command setup: `rewind hooks install`. | [RFC](docs/RFC-claude-code-hooks-integration.md) | — |
 | **MCP Server** | 25 tools for AI assistants (Claude Code, Cursor, Windsurf) to query recordings, view span trees, browse threads, diff timelines, create baselines, run evals — all from your IDE. | [mcp-server.md](docs/mcp-server.md) | — |
 | **SQL Query Explorer** | Run ad-hoc SQL against the Rewind database. Token usage by model, average step duration, sessions with errors, cost estimation — read-only, safe to explore. | [sql-queries.md](docs/sql-queries.md) | — |
 | **CLI Reference** | Full command reference for all 28 CLI commands. | [cli-reference.md](docs/cli-reference.md) | — |
@@ -217,7 +218,8 @@ Works with any agent framework: **[OpenAI Agents SDK](https://github.com/openai/
 | **v0.3** | Web UI (flight recorder + live dashboard) | ✅ Shipped |
 | **v0.4** | Evaluation system — datasets, evaluators, experiments, comparison, CI | ✅ Shipped |
 | **v0.5** | Multi-agent tracing (spans, threads, span tree UI) | ✅ Shipped |
-| **v0.6** | OTel export, LLM-as-judge evaluators | Planned |
+| **v0.6** | Claude Code hooks integration, transcript token parsing, session observation | ✅ Shipped |
+| **v0.7** | OTel export, LLM-as-judge evaluators | Planned |
 | **v1.0** | Rewind Cloud, shared sessions, team dashboards, live breakpoints, semantic diff | Planned |
 
 ## Why "Rewind"?

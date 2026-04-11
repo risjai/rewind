@@ -7,6 +7,7 @@ export interface Session {
   total_steps: number
   total_tokens: number
   metadata: Record<string, unknown>
+  source?: string
 }
 
 export interface Timeline {
@@ -39,6 +40,7 @@ export interface StepResponse {
   model: string
   error: string | null
   response_preview: string
+  tool_name?: string
 }
 
 export interface StepDetail {
@@ -57,6 +59,7 @@ export interface StepDetail {
   request_body: unknown | null
   response_body: unknown | null
   messages: MessageView[] | null
+  tool_name?: string
 }
 
 export interface MessageView {

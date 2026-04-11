@@ -4,7 +4,7 @@ import { useStore } from '@/hooks/use-store'
 import { cn, timeAgo, formatTokens } from '@/lib/utils'
 import {
   PanelLeftClose, PanelLeftOpen, Activity,
-  Shield, ChevronRight, Sun, Moon, FlaskConical, MessageSquare,
+  Shield, ChevronRight, Sun, Moon, FlaskConical, MessageSquare, Plug,
 } from 'lucide-react'
 import { useTheme } from '@/hooks/use-theme'
 import type { Session } from '@/types/api'
@@ -82,6 +82,7 @@ export function Sidebar() {
 
 function SessionItem({ session, selected, onClick }: { session: Session; selected: boolean; onClick: () => void }) {
   const isLive = session.status === 'Recording'
+  const isHook = session.source === 'hooks'
 
   return (
     <button
@@ -96,10 +97,19 @@ function SessionItem({ session, selected, onClick }: { session: Session; selecte
         <div className="flex items-center gap-1.5">
           <span className="text-sm font-medium truncate">{session.name}</span>
           {isLive && <span className="text-[10px] font-semibold text-cyan-400 uppercase tracking-wide">live</span>}
+          {isHook && (
+            <span className="flex items-center gap-0.5 text-[10px] font-semibold text-violet-400 uppercase tracking-wide">
+              <Plug size={10} />
+              hooks
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2 text-xs text-neutral-500 mt-0.5">
           <span>{session.total_steps} steps</span>
-          <span>{formatTokens(session.total_tokens)} tokens</span>
+          {session.total_tokens > 0 && <span>{formatTokens(session.total_tokens)} tokens</span>}
+          {(session.metadata?.cache_tokens as number) > 0 && (
+            <span className="text-neutral-600">{formatTokens(session.metadata.cache_tokens as number)} cached</span>
+          )}
           <span>{timeAgo(session.created_at)}</span>
         </div>
       </div>

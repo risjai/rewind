@@ -5,7 +5,7 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use rewind_store::*;
-use rewind_web::{AppState, StoreEvent};
+use rewind_web::{AppState, HookIngestionState, StoreEvent};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
@@ -19,6 +19,7 @@ fn setup() -> (Router, Arc<Mutex<Store>>, TempDir) {
     let state = AppState {
         store: store.clone(),
         event_tx,
+        hooks: Arc::new(HookIngestionState::new()),
     };
     let app = Router::new().nest("/api", rewind_web::api_routes(state));
     (app, store, tmp)
