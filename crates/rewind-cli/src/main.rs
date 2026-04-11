@@ -659,6 +659,7 @@ fn cmd_sessions() -> Result<()> {
 
     println!();
     println!("  Run {} to inspect a session.", "rewind inspect <session-id>".green());
+    println!("  Web: {}", "\x1b]8;;http://127.0.0.1:4800\x1b\\http://127.0.0.1:4800\x1b]8;;\x1b\\".cyan());
     Ok(())
 }
 
@@ -739,6 +740,8 @@ fn cmd_show(session_ref: String, flat: bool) -> Result<()> {
 
     println!();
     println!("  Run {} to explore interactively.", format!("rewind inspect {}", &session.id[..8]).green());
+    let web_url = format!("http://127.0.0.1:4800/#/session/{}", session.id);
+    println!("  Web: {}", format!("\x1b]8;;{}\x1b\\{}\x1b]8;;\x1b\\", web_url, web_url).cyan());
     Ok(())
 }
 
@@ -1024,6 +1027,7 @@ fn cmd_demo() -> Result<()> {
     println!("    {} — list all sessions", "rewind sessions".green());
     println!("    {} — see the trace", "rewind show latest".green());
     println!("    {} — interactive TUI", "rewind inspect latest".green());
+    println!("    {} — web dashboard", "rewind web".green());
     println!("    {} — check for regressions", "rewind assert check latest --against demo-baseline".green());
     println!();
     Ok(())
