@@ -178,6 +178,20 @@ rewind show latest           # trace view
 rewind inspect latest        # interactive TUI
 ```
 
+**Claude Code** — observe sessions via plugin:
+
+```bash
+# Install the plugin (one-time)
+claude marketplace add agentoptics --source github --repo agentoptics/rewind-plugin
+claude plugin install agentoptics/rewind
+
+# Start the dashboard
+rewind web --port 4800
+# Open http://127.0.0.1:4800 — sessions appear automatically
+```
+
+Or manually with the CLI: `rewind hooks install`
+
 See the [Getting Started guide](docs/getting-started.md) for more options.
 
 ## Feature Guides
