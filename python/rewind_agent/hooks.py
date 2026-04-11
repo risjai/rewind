@@ -8,6 +8,7 @@ node names, agent state, step descriptions.
 Works with LangGraph, CrewAI, OpenAI Agents SDK, or plain functions.
 """
 
+import contextvars
 import functools
 import json
 import logging
@@ -141,8 +142,6 @@ def trace(name: str, metadata: dict | None = None):
 
 
 # ── Manual Span Creation ──────────────────────────────────────
-
-import contextvars
 
 _current_span_id: contextvars.ContextVar[str | None] = contextvars.ContextVar("_current_span_id", default=None)
 
