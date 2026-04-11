@@ -234,3 +234,35 @@ export interface ExperimentComparisonView {
     direction: 'regression' | 'improvement' | 'unchanged'
   }[]
 }
+
+// --- Multi-agent tracing types ---
+
+export interface SpanResponse {
+  id: string
+  session_id: string
+  timeline_id: string
+  parent_span_id: string | null
+  span_type: string
+  span_type_icon: string
+  name: string
+  status: string
+  started_at: string
+  ended_at: string | null
+  duration_ms: number
+  metadata: Record<string, unknown>
+  error: string | null
+  child_spans: SpanResponse[]
+  steps: StepResponse[]
+}
+
+export interface ThreadSummary {
+  thread_id: string
+  session_count: number
+  total_steps: number
+  total_tokens: number
+}
+
+export interface ThreadDetail {
+  thread_id: string
+  sessions: Session[]
+}

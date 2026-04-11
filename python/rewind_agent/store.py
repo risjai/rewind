@@ -252,6 +252,25 @@ CREATE INDEX IF NOT EXISTS idx_experiment_scores_result
     ON experiment_scores(result_id);
 CREATE INDEX IF NOT EXISTS idx_experiment_scores_evaluator
     ON experiment_scores(evaluator_id);
+
+CREATE TABLE IF NOT EXISTS spans (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    timeline_id TEXT NOT NULL REFERENCES timelines(id),
+    parent_span_id TEXT REFERENCES spans(id),
+    span_type TEXT NOT NULL,
+    name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'running',
+    started_at TEXT NOT NULL,
+    ended_at TEXT,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_spans_session ON spans(session_id);
+CREATE INDEX IF NOT EXISTS idx_spans_timeline ON spans(timeline_id);
+CREATE INDEX IF NOT EXISTS idx_spans_parent ON spans(parent_span_id);
 """
 
 
@@ -280,6 +299,24 @@ class Store:
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.executescript(_SCHEMA)
+
+        # v0.5 migrations: multi-agent tracing columns
+        try:
+            self._conn.execute("ALTER TABLE steps ADD COLUMN span_id TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        try:
+            self._conn.execute("ALTER TABLE sessions ADD COLUMN thread_id TEXT")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            self._conn.execute("ALTER TABLE sessions ADD COLUMN thread_ordinal INTEGER")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_thread ON sessions(thread_id, thread_ordinal)")
+        except sqlite3.OperationalError:
+            pass
 
         self.blobs = BlobStore(os.path.join(root, "objects"))
         self._lock = threading.Lock()
@@ -322,19 +359,19 @@ class Store:
         request_blob: str,
         response_blob: str,
         error: str = None,
+        span_id: str = None,
     ) -> str:
         """Insert a step record. Returns the step ID."""
         step_id = _new_id()
         now = _now_rfc3339()
 
-        # Lock is expected to be held by the caller (Recorder._record_call)
         self._conn.execute(
             "INSERT INTO steps (id, timeline_id, session_id, step_number, step_type, status, "
-            "created_at, duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "created_at, duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error, span_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (step_id, timeline_id, session_id, step_number, step_type, status,
              now, duration_ms, tokens_in, tokens_out, model,
-             request_blob, response_blob, error),
+             request_blob, response_blob, error, span_id),
         )
         self._conn.commit()
         return step_id
@@ -409,7 +446,7 @@ class Store:
         """Return all steps for a timeline, ordered by step_number."""
         rows = self._conn.execute(
             "SELECT id, timeline_id, session_id, step_number, step_type, status, "
-            "duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error "
+            "duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error, span_id "
             "FROM steps WHERE timeline_id = ? ORDER BY step_number", (timeline_id,)
         ).fetchall()
         return [
@@ -417,7 +454,7 @@ class Store:
              "step_number": r[3], "step_type": r[4], "status": r[5],
              "duration_ms": r[6], "tokens_in": r[7], "tokens_out": r[8],
              "model": r[9], "request_blob": r[10], "response_blob": r[11],
-             "error": r[12]}
+             "error": r[12], "span_id": r[13]}
             for r in rows
         ]
 
@@ -685,6 +722,157 @@ class Store:
             }
             for r in rows
         ]
+
+    # ── Spans ─────────────────────────────────────────────────
+
+    def create_span(
+        self,
+        session_id: str,
+        timeline_id: str,
+        span_type: str,
+        name: str,
+        parent_span_id: str = None,
+        metadata: str = "{}",
+    ) -> str:
+        """Create a span record. Returns the span ID."""
+        span_id = _new_id()
+        now = _now_rfc3339()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO spans (id, session_id, timeline_id, parent_span_id, span_type, "
+                "name, status, started_at, ended_at, duration_ms, metadata, error) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'running', ?, NULL, 0, ?, NULL)",
+                (span_id, session_id, timeline_id, parent_span_id, span_type,
+                 name, now, metadata),
+            )
+            self._conn.commit()
+        return span_id
+
+    def update_span_status(
+        self,
+        span_id: str,
+        status: str,
+        duration_ms: int = 0,
+        error: str = None,
+    ):
+        """Update span status, duration, and optional error."""
+        now = _now_rfc3339()
+        ended_at = now if status in ("completed", "error") else None
+        with self._lock:
+            self._conn.execute(
+                "UPDATE spans SET status = ?, ended_at = ?, duration_ms = ?, error = ? WHERE id = ?",
+                (status, ended_at, duration_ms, error, span_id),
+            )
+            self._conn.commit()
+
+    def get_span(self, span_id: str) -> dict | None:
+        """Return a span by ID, or None."""
+        row = self._conn.execute(
+            "SELECT id, session_id, timeline_id, parent_span_id, span_type, name, "
+            "status, started_at, ended_at, duration_ms, metadata, error "
+            "FROM spans WHERE id = ?",
+            (span_id,),
+        ).fetchone()
+        if not row:
+            return None
+        return self._row_to_span(row)
+
+    def get_spans_by_session(self, session_id: str) -> list[dict]:
+        """Return all spans for a session, ordered by start time."""
+        rows = self._conn.execute(
+            "SELECT id, session_id, timeline_id, parent_span_id, span_type, name, "
+            "status, started_at, ended_at, duration_ms, metadata, error "
+            "FROM spans WHERE session_id = ? ORDER BY started_at",
+            (session_id,),
+        ).fetchall()
+        return [self._row_to_span(r) for r in rows]
+
+    def get_spans_by_timeline(self, timeline_id: str) -> list[dict]:
+        """Return all spans for a timeline, ordered by start time."""
+        rows = self._conn.execute(
+            "SELECT id, session_id, timeline_id, parent_span_id, span_type, name, "
+            "status, started_at, ended_at, duration_ms, metadata, error "
+            "FROM spans WHERE timeline_id = ? ORDER BY started_at",
+            (timeline_id,),
+        ).fetchall()
+        return [self._row_to_span(r) for r in rows]
+
+    def get_child_spans(self, parent_span_id: str) -> list[dict]:
+        """Return child spans of a given span."""
+        rows = self._conn.execute(
+            "SELECT id, session_id, timeline_id, parent_span_id, span_type, name, "
+            "status, started_at, ended_at, duration_ms, metadata, error "
+            "FROM spans WHERE parent_span_id = ? ORDER BY started_at",
+            (parent_span_id,),
+        ).fetchall()
+        return [self._row_to_span(r) for r in rows]
+
+    def get_steps_by_span(self, span_id: str) -> list[dict]:
+        """Return all steps linked to a specific span."""
+        rows = self._conn.execute(
+            "SELECT id, timeline_id, session_id, step_number, step_type, status, "
+            "duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error, span_id "
+            "FROM steps WHERE span_id = ? ORDER BY step_number",
+            (span_id,),
+        ).fetchall()
+        return [
+            {"id": r[0], "timeline_id": r[1], "session_id": r[2],
+             "step_number": r[3], "step_type": r[4], "status": r[5],
+             "duration_ms": r[6], "tokens_in": r[7], "tokens_out": r[8],
+             "model": r[9], "request_blob": r[10], "response_blob": r[11],
+             "error": r[12], "span_id": r[13]}
+            for r in rows
+        ]
+
+    def update_step_span_id(self, step_id: str, span_id: str):
+        """Link a step to a span."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE steps SET span_id = ? WHERE id = ?",
+                (span_id, step_id),
+            )
+            self._conn.commit()
+
+    # ── Threads (via session columns) ─────────────────────────
+
+    def get_sessions_by_thread(self, thread_id: str) -> list[dict]:
+        """Return all sessions in a thread, ordered by ordinal."""
+        rows = self._conn.execute(
+            "SELECT id, name, status, total_steps, total_tokens, thread_id, thread_ordinal "
+            "FROM sessions WHERE thread_id = ? ORDER BY thread_ordinal, created_at",
+            (thread_id,),
+        ).fetchall()
+        return [
+            {"id": r[0], "name": r[1], "status": r[2],
+             "total_steps": r[3], "total_tokens": r[4],
+             "thread_id": r[5], "thread_ordinal": r[6]}
+            for r in rows
+        ]
+
+    def list_thread_ids(self) -> list[str]:
+        """Return all distinct thread IDs."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT thread_id FROM sessions WHERE thread_id IS NOT NULL ORDER BY thread_id"
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    def set_session_thread(self, session_id: str, thread_id: str, ordinal: int):
+        """Set the thread_id and thread_ordinal for a session."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE sessions SET thread_id = ?, thread_ordinal = ? WHERE id = ?",
+                (thread_id, ordinal, session_id),
+            )
+            self._conn.commit()
+
+    def _row_to_span(self, r) -> dict:
+        """Convert a span row tuple to a dict."""
+        return {
+            "id": r[0], "session_id": r[1], "timeline_id": r[2],
+            "parent_span_id": r[3], "span_type": r[4], "name": r[5],
+            "status": r[6], "started_at": r[7], "ended_at": r[8],
+            "duration_ms": r[9], "metadata": r[10], "error": r[11],
+        }
 
     def close(self):
         """Close the database connection."""

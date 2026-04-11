@@ -17,12 +17,13 @@ Usage:
     crew = rewind_agent.wrap_crew(crew)
 """
 
-from .patch import init, uninit, session, replay
+from .patch import init, uninit, session, replay, thread
 from .hooks import (
     step,
     node,
     tool,
     trace,
+    span,
     annotate,
     get_annotations,
     wrap_langgraph,
@@ -52,10 +53,12 @@ __all__ = [
     "uninit",
     "session",
     "replay",
+    "thread",
     "step",
     "node",
     "tool",
     "trace",
+    "span",
     "annotate",
     "get_annotations",
     "wrap_langgraph",

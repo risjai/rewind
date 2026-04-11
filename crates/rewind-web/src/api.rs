@@ -23,6 +23,9 @@ pub fn routes(state: AppState) -> Router {
         .route("/baselines/{name}", get(get_baseline))
         .route("/cache/stats", get(cache_stats))
         .route("/snapshots", get(list_snapshots))
+        .route("/sessions/{id}/spans", get(get_session_spans))
+        .route("/threads", get(list_threads))
+        .route("/threads/{id}", get(get_thread))
         .with_state(state)
 }
 
@@ -152,6 +155,25 @@ struct StepResponse {
     model: String,
     error: Option<String>,
     response_preview: String,
+}
+
+#[derive(Serialize)]
+struct SpanResponse {
+    id: String,
+    session_id: String,
+    timeline_id: String,
+    parent_span_id: Option<String>,
+    span_type: String,
+    span_type_icon: String,
+    name: String,
+    status: String,
+    started_at: String,
+    ended_at: Option<String>,
+    duration_ms: u64,
+    metadata: serde_json::Value,
+    error: Option<String>,
+    child_spans: Vec<SpanResponse>,
+    steps: Vec<StepResponse>,
 }
 
 async fn get_step_detail(
@@ -352,6 +374,160 @@ async fn list_snapshots(
         (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
     })?;
     Ok(Json(snapshots))
+}
+
+async fn get_session_spans(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<StepsQuery>,
+) -> Result<Json<Vec<SpanResponse>>, (StatusCode, String)> {
+    let store = state.store.lock().map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Lock error: {e}"))
+    })?;
+
+    let session = resolve_session(&store, &id)
+        .map_err(|e| (StatusCode::NOT_FOUND, format!("{e}")))?;
+
+    let engine = ReplayEngine::new(&store);
+    let timelines = store.get_timelines(&session.id).map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
+    })?;
+
+    let timeline_id = if let Some(ref tref) = query.timeline {
+        resolve_timeline_ref(&timelines, tref)
+            .map_err(|e| (StatusCode::NOT_FOUND, format!("{e}")))?
+    } else {
+        timelines.iter()
+            .find(|t| t.parent_timeline_id.is_none())
+            .map(|t| t.id.clone())
+            .ok_or_else(|| (StatusCode::NOT_FOUND, "No root timeline".to_string()))?
+    };
+
+    let spans = engine.get_full_timeline_spans(&timeline_id, &session.id).map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
+    })?;
+
+    let steps = engine.get_full_timeline_steps(&timeline_id, &session.id).map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
+    })?;
+
+    let tree = build_span_tree(&spans, &steps, &store);
+    Ok(Json(tree))
+}
+
+fn build_span_tree(spans: &[rewind_store::Span], steps: &[rewind_store::Step], store: &rewind_store::Store) -> Vec<SpanResponse> {
+    let root_spans: Vec<&rewind_store::Span> = spans.iter()
+        .filter(|s| s.parent_span_id.is_none())
+        .collect();
+
+    root_spans.iter().map(|s| build_span_response(s, spans, steps, store)).collect()
+}
+
+fn build_span_response(span: &rewind_store::Span, all_spans: &[rewind_store::Span], all_steps: &[rewind_store::Step], store: &rewind_store::Store) -> SpanResponse {
+    let child_spans: Vec<SpanResponse> = all_spans.iter()
+        .filter(|s| s.parent_span_id.as_deref() == Some(&span.id))
+        .map(|s| build_span_response(s, all_spans, all_steps, store))
+        .collect();
+
+    let span_steps: Vec<StepResponse> = all_steps.iter()
+        .filter(|s| s.span_id.as_deref() == Some(&span.id))
+        .map(|s| {
+            let response_preview = extract_preview(store, &s.response_blob);
+            StepResponse {
+                id: s.id.clone(),
+                timeline_id: s.timeline_id.clone(),
+                session_id: s.session_id.clone(),
+                step_number: s.step_number,
+                step_type: s.step_type.as_str().to_string(),
+                step_type_label: s.step_type.label().to_string(),
+                step_type_icon: s.step_type.icon().to_string(),
+                status: s.status.as_str().to_string(),
+                created_at: s.created_at.to_rfc3339(),
+                duration_ms: s.duration_ms,
+                tokens_in: s.tokens_in,
+                tokens_out: s.tokens_out,
+                model: s.model.clone(),
+                error: s.error.clone(),
+                response_preview,
+            }
+        }).collect();
+
+    SpanResponse {
+        id: span.id.clone(),
+        session_id: span.session_id.clone(),
+        timeline_id: span.timeline_id.clone(),
+        parent_span_id: span.parent_span_id.clone(),
+        span_type: span.span_type.as_str().to_string(),
+        span_type_icon: span.span_type.icon().to_string(),
+        name: span.name.clone(),
+        status: span.status.clone(),
+        started_at: span.started_at.to_rfc3339(),
+        ended_at: span.ended_at.map(|dt| dt.to_rfc3339()),
+        duration_ms: span.duration_ms,
+        metadata: span.metadata.clone(),
+        error: span.error.clone(),
+        child_spans,
+        steps: span_steps,
+    }
+}
+
+#[derive(Serialize)]
+struct ThreadSummary {
+    thread_id: String,
+    session_count: usize,
+    total_steps: u32,
+    total_tokens: u64,
+}
+
+async fn list_threads(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<ThreadSummary>>, (StatusCode, String)> {
+    let store = state.store.lock().map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Lock error: {e}"))
+    })?;
+
+    let thread_ids = store.list_thread_ids().map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
+    })?;
+
+    let mut threads = Vec::new();
+    for tid in &thread_ids {
+        let sessions = store.get_sessions_by_thread(tid).map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
+        })?;
+        threads.push(ThreadSummary {
+            thread_id: tid.clone(),
+            session_count: sessions.len(),
+            total_steps: sessions.iter().map(|s| s.total_steps).sum(),
+            total_tokens: sessions.iter().map(|s| s.total_tokens).sum(),
+        });
+    }
+
+    Ok(Json(threads))
+}
+
+#[derive(Serialize)]
+struct ThreadDetailResponse {
+    thread_id: String,
+    sessions: Vec<rewind_store::Session>,
+}
+
+async fn get_thread(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ThreadDetailResponse>, (StatusCode, String)> {
+    let store = state.store.lock().map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Lock error: {e}"))
+    })?;
+
+    let sessions = store.get_sessions_by_thread(&id).map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
+    })?;
+
+    Ok(Json(ThreadDetailResponse {
+        thread_id: id,
+        sessions,
+    }))
 }
 
 fn resolve_session(store: &rewind_store::Store, session_ref: &str) -> anyhow::Result<rewind_store::Session> {

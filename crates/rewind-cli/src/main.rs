@@ -66,6 +66,19 @@ enum Commands {
         /// Session ID or "latest"
         #[arg(default_value = "latest")]
         session: String,
+
+        /// Show flat step list instead of span tree
+        #[arg(long)]
+        flat: bool,
+    },
+
+    /// List conversation threads (multi-session groupings)
+    Threads,
+
+    /// Show a specific conversation thread
+    Thread {
+        /// Thread ID
+        thread_id: String,
     },
 
     /// Replay a session from a fork point — cached steps served instantly, live from fork point onward
@@ -419,7 +432,9 @@ async fn main() -> Result<()> {
         Commands::Record { name, port, upstream, replay, web, web_port } => cmd_record(name, port, upstream, replay, web, web_port).await,
         Commands::Sessions => cmd_sessions(),
         Commands::Inspect { session } => cmd_inspect(session),
-        Commands::Show { session } => cmd_show(session),
+        Commands::Show { session, flat } => cmd_show(session, flat),
+        Commands::Threads => cmd_threads(),
+        Commands::Thread { thread_id } => cmd_thread(thread_id),
         Commands::Replay { session, from, upstream, port, label } => cmd_replay(session, from, upstream, port, label).await,
         Commands::Fork { session, at, label } => cmd_fork(session, at, label),
         Commands::Diff { session, left, right } => cmd_diff(session, left, right),
@@ -619,7 +634,7 @@ fn cmd_inspect(session_ref: String) -> Result<()> {
     app.run()
 }
 
-fn cmd_show(session_ref: String) -> Result<()> {
+fn cmd_show(session_ref: String, flat: bool) -> Result<()> {
     let store = Store::open_default()?;
     let session = resolve_session(&store, &session_ref)?;
     let timeline = store.get_root_timeline(&session.id)?
@@ -627,6 +642,7 @@ fn cmd_show(session_ref: String) -> Result<()> {
 
     let engine = ReplayEngine::new(&store);
     let steps = engine.get_full_timeline_steps(&timeline.id, &session.id)?;
+    let spans = engine.get_full_timeline_spans(&timeline.id, &session.id)?;
 
     println!("{}", "⏪ Rewind — Session Trace".cyan().bold());
     println!();
@@ -634,46 +650,229 @@ fn cmd_show(session_ref: String) -> Result<()> {
     println!("  {} {}", "ID:".dimmed(), session.id.dimmed());
     println!("  {} {}", "Steps:".dimmed(), steps.len().to_string().yellow());
     println!("  {} {}", "Tokens:".dimmed(), session.total_tokens.to_string().blue());
-    println!();
 
-    for step in &steps {
-        let status_icon = match step.status {
-            rewind_store::StepStatus::Success => "✓".green(),
-            rewind_store::StepStatus::Error => "✗".red(),
-            rewind_store::StepStatus::Pending => "…".yellow(),
-        };
-
-        let connector = if step.step_number == 1 { "┌" } else if step.step_number == steps.len() as u32 { "└" } else { "├" };
-
-        println!(
-            "  {} {} {} {:>8} {:>8} {:>10} {}",
-            connector.dimmed(),
-            status_icon,
-            step.step_type.icon(),
-            format!("Step {}", step.step_number).white().bold(),
-            step.model.magenta(),
-            format!("{}ms", step.duration_ms).yellow(),
-            format!("{}↓ {}↑", step.tokens_in, step.tokens_out).blue(),
-        );
-
-        if let Some(ref err) = step.error {
-            println!("  │   {} {}", "ERROR:".red().bold(), err.red());
+    if !spans.is_empty() && !flat {
+        let agent_names: Vec<&str> = spans.iter()
+            .filter(|s| s.span_type == rewind_store::SpanType::Agent)
+            .map(|s| s.name.as_str())
+            .collect();
+        if !agent_names.is_empty() {
+            println!("  {} {}", "Agents:".dimmed(), agent_names.join(", ").cyan());
         }
+        println!();
+        render_span_tree(&spans, &steps, &store, 1);
+    } else {
+        println!();
+        for step in &steps {
+            let status_icon = match step.status {
+                rewind_store::StepStatus::Success => "✓".green(),
+                rewind_store::StepStatus::Error => "✗".red(),
+                rewind_store::StepStatus::Pending => "…".yellow(),
+            };
 
-        // Show response preview
-        if let Ok(data) = store.blobs.get(&step.response_blob)
-            && let Ok(json_str) = String::from_utf8(data)
-                && let Ok(val) = serde_json::from_str::<serde_json::Value>(&json_str) {
-                    let preview = extract_response_preview(&val);
-                    if !preview.is_empty() {
-                        let truncated: String = preview.chars().take(100).collect();
-                        println!("  │   {} {}", "→".dimmed(), truncated.dimmed());
+            let connector = if step.step_number == 1 { "┌" } else if step.step_number == steps.len() as u32 { "└" } else { "├" };
+
+            println!(
+                "  {} {} {} {:>8} {:>8} {:>10} {}",
+                connector.dimmed(),
+                status_icon,
+                step.step_type.icon(),
+                format!("Step {}", step.step_number).white().bold(),
+                step.model.magenta(),
+                format!("{}ms", step.duration_ms).yellow(),
+                format!("{}↓ {}↑", step.tokens_in, step.tokens_out).blue(),
+            );
+
+            if let Some(ref err) = step.error {
+                println!("  │   {} {}", "ERROR:".red().bold(), err.red());
+            }
+
+            if let Ok(data) = store.blobs.get(&step.response_blob)
+                && let Ok(json_str) = String::from_utf8(data)
+                    && let Ok(val) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                        let preview = extract_response_preview(&val);
+                        if !preview.is_empty() {
+                            let truncated: String = preview.chars().take(100).collect();
+                            println!("  │   {} {}", "→".dimmed(), truncated.dimmed());
+                        }
                     }
-                }
+        }
     }
 
     println!();
     println!("  Run {} to explore interactively.", format!("rewind inspect {}", &session.id[..8]).green());
+    Ok(())
+}
+
+fn render_span_tree(spans: &[rewind_store::Span], steps: &[rewind_store::Step], store: &Store, indent: usize) {
+    let root_spans: Vec<&rewind_store::Span> = spans.iter()
+        .filter(|s| s.parent_span_id.is_none())
+        .collect();
+
+    if root_spans.is_empty() {
+        for step in steps {
+            render_step_in_tree(step, store, indent, false);
+        }
+        return;
+    }
+
+    for span in &root_spans {
+        render_span_node(span, spans, steps, store, indent);
+    }
+}
+
+fn render_span_node(span: &rewind_store::Span, all_spans: &[rewind_store::Span], all_steps: &[rewind_store::Step], store: &Store, indent: usize) {
+    let prefix = "  ".repeat(indent);
+    let duration = if span.duration_ms > 0 {
+        format!("{}ms", span.duration_ms)
+    } else {
+        "…".to_string()
+    };
+
+    let status_icon = match span.status.as_str() {
+        "completed" => "✓".green(),
+        "error" => "✗".red(),
+        _ => "…".yellow(),
+    };
+
+    println!(
+        "{}▼ {} {} {} ({})  {}  {}",
+        prefix,
+        status_icon,
+        span.span_type.icon(),
+        span.name.white().bold(),
+        span.span_type.as_str().dimmed(),
+        duration.yellow(),
+        if let Some(ref err) = span.error { err.red().to_string() } else { String::new() },
+    );
+
+    let child_spans: Vec<&rewind_store::Span> = all_spans.iter()
+        .filter(|s| s.parent_span_id.as_deref() == Some(&span.id))
+        .collect();
+
+    let span_steps: Vec<&rewind_store::Step> = all_steps.iter()
+        .filter(|s| s.span_id.as_deref() == Some(&span.id))
+        .collect();
+
+    let mut child_idx = 0;
+    let mut step_idx = 0;
+
+    while child_idx < child_spans.len() || step_idx < span_steps.len() {
+        let show_step = if child_idx >= child_spans.len() {
+            true
+        } else if step_idx >= span_steps.len() {
+            false
+        } else {
+            span_steps[step_idx].created_at <= child_spans[child_idx].started_at
+        };
+
+        if show_step {
+            let is_last = step_idx == span_steps.len() - 1 && child_idx >= child_spans.len();
+            render_step_in_tree(span_steps[step_idx], store, indent + 1, is_last);
+            step_idx += 1;
+        } else {
+            render_span_node(child_spans[child_idx], all_spans, all_steps, store, indent + 1);
+            child_idx += 1;
+        }
+    }
+}
+
+fn render_step_in_tree(step: &rewind_store::Step, _store: &Store, indent: usize, is_last: bool) {
+    let prefix = "  ".repeat(indent);
+    let connector = if is_last { "└" } else { "├" };
+
+    let status_icon = match step.status {
+        rewind_store::StepStatus::Success => "✓".green(),
+        rewind_store::StepStatus::Error => "✗".red(),
+        rewind_store::StepStatus::Pending => "…".yellow(),
+    };
+
+    let token_info = if step.tokens_in > 0 || step.tokens_out > 0 {
+        format!("  {}↓ {}↑", step.tokens_in, step.tokens_out).blue().to_string()
+    } else {
+        String::new()
+    };
+
+    println!(
+        "{}{} {} {}  {}  {}{}",
+        prefix,
+        connector.dimmed(),
+        status_icon,
+        step.step_type.icon(),
+        step.model.magenta(),
+        format!("{}ms", step.duration_ms).yellow(),
+        token_info,
+    );
+
+    if let Some(ref err) = step.error {
+        println!("{}│   {} {}", prefix, "ERROR:".red().bold(), err.red());
+    }
+}
+
+fn cmd_threads() -> Result<()> {
+    let store = Store::open_default()?;
+    let thread_ids = store.list_thread_ids()?;
+
+    if thread_ids.is_empty() {
+        println!("{}", "No conversation threads found.".dimmed());
+        return Ok(());
+    }
+
+    println!("{}", "⏪ Rewind — Conversation Threads".cyan().bold());
+    println!();
+
+    for tid in &thread_ids {
+        let sessions = store.get_sessions_by_thread(tid)?;
+        let total_steps: u32 = sessions.iter().map(|s| s.total_steps).sum();
+        let total_tokens: u64 = sessions.iter().map(|s| s.total_tokens).sum();
+
+        println!(
+            "  {} {} ({} sessions, {} steps, {} tokens)",
+            "🧵".dimmed(),
+            tid.white().bold(),
+            sessions.len().to_string().yellow(),
+            total_steps.to_string().yellow(),
+            total_tokens.to_string().blue(),
+        );
+    }
+    println!();
+    Ok(())
+}
+
+fn cmd_thread(thread_id: String) -> Result<()> {
+    let store = Store::open_default()?;
+    let sessions = store.get_sessions_by_thread(&thread_id)?;
+
+    if sessions.is_empty() {
+        println!("Thread not found: {}", thread_id);
+        return Ok(());
+    }
+
+    println!("{}", "⏪ Rewind — Thread Detail".cyan().bold());
+    println!();
+    println!("  {} {}", "Thread:".dimmed(), thread_id.white().bold());
+    println!("  {} {}", "Sessions:".dimmed(), sessions.len().to_string().yellow());
+    println!();
+
+    for (i, session) in sessions.iter().enumerate() {
+        let status_icon = match session.status {
+            rewind_store::SessionStatus::Recording => "●".yellow(),
+            rewind_store::SessionStatus::Completed => "✓".green(),
+            rewind_store::SessionStatus::Failed => "✗".red(),
+            rewind_store::SessionStatus::Forked => "⑂".cyan(),
+        };
+
+        println!(
+            "  {} Turn {} — {} {} ({} steps, {} tokens)",
+            status_icon,
+            i + 1,
+            session.name.white().bold(),
+            format!("[{}]", &session.id[..8]).dimmed(),
+            session.total_steps.to_string().yellow(),
+            session.total_tokens.to_string().blue(),
+        );
+    }
+    println!();
     Ok(())
 }
 
@@ -2069,6 +2268,7 @@ fn create_step_with_blobs(
         request_blob: req_hash,
         response_blob: resp_hash,
         error: error.map(String::from),
+        span_id: None,
     };
 
     store.create_step(&step)?;

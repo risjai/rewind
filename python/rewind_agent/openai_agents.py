@@ -57,21 +57,7 @@ def _safe_json(obj, max_len=2000) -> str:
 class RewindTracingProcessor(_TracingProcessorBase):
     """
     Subclasses the OpenAI Agents SDK TracingProcessor to capture all
-    agent spans and record them as Rewind steps.
-
-    Receives span lifecycle events (start/end) and maps them to the
-    Rewind store:
-    - LLM calls (GenerationSpanData) → llm_call steps with model, tokens, prompt, completion
-    - Tool executions (FunctionSpanData) → tool_call steps with name, input, output
-    - Agent spans (AgentSpanData) → metadata on surrounding steps
-    - Handoffs (HandoffSpanData) → handoff steps with from/to agent names
-
-    Usage:
-        from rewind_agent.openai_agents import RewindTracingProcessor
-        from agents.tracing import add_trace_processor
-
-        processor = RewindTracingProcessor(store, session_id, timeline_id)
-        add_trace_processor(processor)
+    agent spans and record them as a Rewind span tree with linked steps.
     """
 
     def __init__(self, store, session_id, timeline_id, recorder=None):
@@ -81,24 +67,91 @@ class RewindTracingProcessor(_TracingProcessorBase):
         self._recorder = recorder
         self._step_counter = 0
         self._lock = threading.Lock()
-        # Track pending spans for duration calculation
         self._span_starts = {}
+        # Map SDK span_id → Rewind span_id
+        self._span_id_map = {}
+        # Map SDK span_id → SDK parent_id (for resolving parent chains)
+        self._sdk_parent_map = {}
 
     def on_trace_start(self, trace) -> None:
-        """Called when a new trace begins (one Runner.run call)."""
+        """Called when a new trace begins. Use group_id for thread linking."""
         logger.debug("Rewind: agents trace started — %s", getattr(trace, "name", ""))
+        group_id = getattr(trace, "group_id", None)
+        if group_id:
+            try:
+                existing = self._store.get_sessions_by_thread(group_id)
+                ordinal = len(existing)
+                self._store.set_session_thread(self._session_id, group_id, ordinal)
+            except Exception:
+                logger.debug("Rewind: failed to set thread from trace group_id", exc_info=True)
 
     def on_trace_end(self, trace) -> None:
         """Called when a trace completes."""
         logger.debug("Rewind: agents trace ended — %s", getattr(trace, "name", ""))
 
     def on_span_start(self, span) -> None:
-        """Called when a span begins. Record start time for duration."""
-        span_id = getattr(span, "span_id", id(span))
-        self._span_starts[span_id] = time.perf_counter()
+        """Called when a span begins. Create Rewind span for agent/tool/handoff types."""
+        sdk_span_id = getattr(span, "span_id", id(span))
+        sdk_parent_id = getattr(span, "parent_id", None)
+        self._span_starts[sdk_span_id] = time.perf_counter()
+        self._sdk_parent_map[sdk_span_id] = sdk_parent_id
+
+        span_data = getattr(span, "span_data", None)
+        if span_data is None:
+            return
+
+        span_type_name = type(span_data).__name__
+
+        parent_rewind_span_id = None
+        if sdk_parent_id and sdk_parent_id in self._span_id_map:
+            parent_rewind_span_id = self._span_id_map[sdk_parent_id]
+
+        try:
+            if span_type_name == "AgentSpanData":
+                agent_name = getattr(span_data, "name", "unknown") or "unknown"
+                rewind_span_id = self._store.create_span(
+                    session_id=self._session_id,
+                    timeline_id=self._timeline_id,
+                    span_type="agent",
+                    name=agent_name,
+                    parent_span_id=parent_rewind_span_id,
+                    metadata=json.dumps({
+                        "handoffs": getattr(span_data, "handoffs", []),
+                        "tools": getattr(span_data, "tools", []),
+                        "output_type": getattr(span_data, "output_type", None),
+                    }),
+                )
+                self._span_id_map[sdk_span_id] = rewind_span_id
+
+            elif span_type_name == "HandoffSpanData":
+                from_agent = getattr(span_data, "from_agent", "unknown") or "unknown"
+                to_agent = getattr(span_data, "to_agent", "unknown") or "unknown"
+                rewind_span_id = self._store.create_span(
+                    session_id=self._session_id,
+                    timeline_id=self._timeline_id,
+                    span_type="handoff",
+                    name=f"{from_agent}\u2192{to_agent}",
+                    parent_span_id=parent_rewind_span_id,
+                    metadata=json.dumps({"from_agent": from_agent, "to_agent": to_agent}),
+                )
+                self._span_id_map[sdk_span_id] = rewind_span_id
+
+            elif span_type_name == "FunctionSpanData":
+                tool_name = getattr(span_data, "name", "unknown_tool") or "unknown_tool"
+                rewind_span_id = self._store.create_span(
+                    session_id=self._session_id,
+                    timeline_id=self._timeline_id,
+                    span_type="tool",
+                    name=tool_name,
+                    parent_span_id=parent_rewind_span_id,
+                )
+                self._span_id_map[sdk_span_id] = rewind_span_id
+
+        except Exception:
+            logger.warning("Rewind: failed to create span on span_start", exc_info=True)
 
     def on_span_end(self, span) -> None:
-        """Called when a span ends. Map to a Rewind step based on span type."""
+        """Called when a span ends. Close Rewind spans and record steps."""
         try:
             self._handle_span_end(span)
         except Exception:
@@ -115,46 +168,44 @@ class RewindTracingProcessor(_TracingProcessorBase):
         if span_data is None:
             return
 
-        span_id = getattr(span, "span_id", id(span))
-        start_time = self._span_starts.pop(span_id, None)
+        sdk_span_id = getattr(span, "span_id", id(span))
+        sdk_parent_id = self._sdk_parent_map.get(sdk_span_id)
+        start_time = self._span_starts.pop(sdk_span_id, None)
         duration_ms = int((time.perf_counter() - start_time) * 1000) if start_time else 0
 
-        span_type = type(span_data).__name__
+        span_type_name = type(span_data).__name__
         error_obj = getattr(span, "error", None)
         error_msg = None
         if error_obj is not None:
             error_msg = getattr(error_obj, "message", str(error_obj))
 
-        # ── GenerationSpanData → llm_call step ──
-        if span_type == "GenerationSpanData":
-            self._record_generation(span_data, duration_ms, error_msg)
+        parent_rewind_span_id = None
+        if sdk_parent_id and sdk_parent_id in self._span_id_map:
+            parent_rewind_span_id = self._span_id_map[sdk_parent_id]
 
-        # ── FunctionSpanData → tool_call step ──
-        elif span_type == "FunctionSpanData":
-            self._record_function(span_data, duration_ms, error_msg)
+        rewind_span_id = self._span_id_map.get(sdk_span_id)
+        if rewind_span_id:
+            status = "error" if error_msg else "completed"
+            self._store.update_span_status(rewind_span_id, status, duration_ms, error_msg)
 
-        # ── HandoffSpanData → annotate handoff ──
-        elif span_type == "HandoffSpanData":
-            self._record_handoff(span_data, duration_ms, error_msg)
+        if span_type_name == "GenerationSpanData":
+            self._record_generation(span_data, duration_ms, error_msg, parent_rewind_span_id)
+        elif span_type_name == "FunctionSpanData":
+            self._record_function(span_data, duration_ms, error_msg, rewind_span_id)
+        elif span_type_name == "HandoffSpanData":
+            self._record_handoff(span_data, duration_ms, error_msg, rewind_span_id)
 
-        # AgentSpanData, GuardrailSpanData, etc. — skip (they wrap other spans)
-
-    def _record_generation(self, span_data, duration_ms, error):
-        """Record an LLM generation as a Rewind step."""
+    def _record_generation(self, span_data, duration_ms, error, span_id):
+        """Record an LLM generation as a Rewind step linked to its parent span."""
         model = getattr(span_data, "model", "unknown") or "unknown"
-
-        # Usage is a dict with input_tokens/output_tokens
         usage = getattr(span_data, "usage", None) or {}
         input_tokens = usage.get("input_tokens", 0) or 0
         output_tokens = usage.get("output_tokens", 0) or 0
 
-        # Build request/response dicts from span data
         model_config = getattr(span_data, "model_config", None)
-        request_data = {
-            "model": model,
-            "model_config": _safe_json(model_config) if model_config else None,
-        }
-        # The input field contains the prompt/messages
+        request_data = {"model": model}
+        if model_config:
+            request_data["model_config"] = _safe_json(model_config)
         input_data = getattr(span_data, "input", None)
         if input_data is not None:
             request_data["input"] = _safe_json(input_data)
@@ -163,50 +214,33 @@ class RewindTracingProcessor(_TracingProcessorBase):
         output_data = getattr(span_data, "output", None)
         if output_data is not None:
             response_data["output"] = _safe_json(output_data)
-        response_data["usage"] = {
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-        }
+        response_data["usage"] = {"input_tokens": input_tokens, "output_tokens": output_tokens}
 
         self._write_step(
-            step_type="llm_call",
-            model=model,
-            duration_ms=duration_ms,
-            tokens_in=input_tokens,
-            tokens_out=output_tokens,
-            request_data=request_data,
-            response_data=response_data,
-            error=error,
+            step_type="llm_call", model=model, duration_ms=duration_ms,
+            tokens_in=input_tokens, tokens_out=output_tokens,
+            request_data=request_data, response_data=response_data,
+            error=error, span_id=span_id,
         )
 
-    def _record_function(self, span_data, duration_ms, error):
-        """Record a tool/function call as a Rewind step."""
+    def _record_function(self, span_data, duration_ms, error, span_id):
+        """Record a tool/function call as a Rewind step linked to its span."""
         tool_name = getattr(span_data, "name", None) or "unknown_tool"
         input_val = getattr(span_data, "input", None)
         output_val = getattr(span_data, "output", None)
 
-        request_data = {
-            "tool": tool_name,
-            "input": _safe_json(input_val) if input_val else None,
-        }
-        response_data = {
-            "tool": tool_name,
-            "output": _safe_json(output_val) if output_val else None,
-        }
+        request_data = {"tool": tool_name, "input": _safe_json(input_val) if input_val else None}
+        response_data = {"tool": tool_name, "output": _safe_json(output_val) if output_val else None}
 
         self._write_step(
-            step_type="tool_call",
-            model=f"tool:{tool_name}",
-            duration_ms=duration_ms,
-            tokens_in=0,
-            tokens_out=0,
-            request_data=request_data,
-            response_data=response_data,
-            error=error,
+            step_type="tool_call", model=f"tool:{tool_name}", duration_ms=duration_ms,
+            tokens_in=0, tokens_out=0,
+            request_data=request_data, response_data=response_data,
+            error=error, span_id=span_id,
         )
 
-    def _record_handoff(self, span_data, duration_ms, error):
-        """Record an agent handoff as a Rewind step."""
+    def _record_handoff(self, span_data, duration_ms, error, span_id):
+        """Record an agent handoff as a Rewind step linked to its span."""
         from_agent = getattr(span_data, "from_agent", None) or "unknown"
         to_agent = getattr(span_data, "to_agent", None) or "unknown"
 
@@ -214,21 +248,16 @@ class RewindTracingProcessor(_TracingProcessorBase):
         response_data = {"handoff": {"from": from_agent, "to": to_agent, "status": "completed"}}
 
         self._write_step(
-            step_type="tool_call",
-            model=f"handoff:{from_agent}->{to_agent}",
-            duration_ms=duration_ms,
-            tokens_in=0,
-            tokens_out=0,
-            request_data=request_data,
-            response_data=response_data,
-            error=error,
+            step_type="tool_call", model=f"handoff:{from_agent}->{to_agent}",
+            duration_ms=duration_ms, tokens_in=0, tokens_out=0,
+            request_data=request_data, response_data=response_data,
+            error=error, span_id=span_id,
         )
 
     def _write_step(self, step_type, model, duration_ms, tokens_in, tokens_out,
-                     request_data, response_data, error):
-        """Write a step to the Rewind store."""
+                     request_data, response_data, error, span_id=None):
+        """Write a step to the Rewind store, optionally linked to a span."""
         status = "error" if error else "success"
-
         req_hash = self._store.blobs.put_json(request_data)
         resp_hash = self._store.blobs.put_json(response_data if not error else {"error": error})
 
@@ -249,6 +278,7 @@ class RewindTracingProcessor(_TracingProcessorBase):
                 request_blob=req_hash,
                 response_blob=resp_hash,
                 error=error,
+                span_id=span_id,
             )
             self._store.update_session_stats(
                 self._session_id, step_number, tokens_in + tokens_out,

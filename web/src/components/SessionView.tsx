@@ -5,8 +5,9 @@ import { useWebSocket } from '@/hooks/use-websocket'
 import { StepTimeline } from './StepTimeline'
 import { StepDetailPanel } from './StepDetailPanel'
 import { TimelineSelector } from './TimelineSelector'
+import { SpanTree } from './SpanTree'
 import { formatTokens, formatDuration, cn } from '@/lib/utils'
-import { Radio, Clock, Layers, Zap, GitBranch } from 'lucide-react'
+import { Radio, Clock, Layers, Zap, GitBranch, Bot } from 'lucide-react'
 import { useCallback, useState } from 'react'
 import type { StepResponse } from '@/types/api'
 
@@ -24,6 +25,12 @@ export function SessionView({ sessionId }: { sessionId: string }) {
   const { data: steps = [], isLoading: stepsLoading } = useQuery({
     queryKey: ['steps', sessionId, timelineId],
     queryFn: () => api.sessionSteps(sessionId, timelineId),
+    enabled: !!timelineId,
+  })
+
+  const { data: spans = [] } = useQuery({
+    queryKey: ['spans', sessionId, timelineId],
+    queryFn: () => api.sessionSpans(sessionId, timelineId),
     enabled: !!timelineId,
   })
 
@@ -80,6 +87,14 @@ export function SessionView({ sessionId }: { sessionId: string }) {
             <span className="flex items-center gap-1"><Layers size={12} /> {session.total_steps} steps</span>
             <span className="flex items-center gap-1"><Zap size={12} /> {formatTokens(session.total_tokens)} tokens</span>
             <span className="flex items-center gap-1"><Clock size={12} /> {formatDuration(totalDuration)}</span>
+            {spans.length > 0 && (() => {
+              const agentNames = spans.filter(s => s.span_type === 'agent').map(s => s.name);
+              return agentNames.length > 0 ? (
+                <span className="flex items-center gap-1 text-cyan-400">
+                  <Bot size={12} /> {agentNames.join(', ')}
+                </span>
+              ) : null;
+            })()}
             {hasForked && (
               <button
                 onClick={() => setView('diff')}
@@ -100,6 +115,12 @@ export function SessionView({ sessionId }: { sessionId: string }) {
         <div className="w-[420px] border-r border-neutral-800 overflow-hidden flex flex-col">
           {stepsLoading ? (
             <div className="flex-1 flex items-center justify-center text-neutral-500 text-sm">Loading steps...</div>
+          ) : spans.length > 0 ? (
+            <SpanTree
+              spans={spans}
+              selectedStepId={selectedStepId}
+              onSelectStep={selectStep}
+            />
           ) : (
             <StepTimeline
               steps={steps}

@@ -238,8 +238,36 @@ impl Store {
                 ON experiment_scores(result_id);
             CREATE INDEX IF NOT EXISTS idx_experiment_scores_evaluator
                 ON experiment_scores(evaluator_id);
+
+            -- Multi-agent tracing: span tree
+            CREATE TABLE IF NOT EXISTS spans (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                timeline_id TEXT NOT NULL REFERENCES timelines(id),
+                parent_span_id TEXT REFERENCES spans(id),
+                span_type TEXT NOT NULL,
+                name TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'running',
+                started_at TEXT NOT NULL,
+                ended_at TEXT,
+                duration_ms INTEGER NOT NULL DEFAULT 0,
+                metadata TEXT NOT NULL DEFAULT '{}',
+                error TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_spans_session ON spans(session_id);
+            CREATE INDEX IF NOT EXISTS idx_spans_timeline ON spans(timeline_id);
+            CREATE INDEX IF NOT EXISTS idx_spans_parent ON spans(parent_span_id);
             ",
         )?;
+
+        // v0.5 migrations: add columns for multi-agent tracing
+        // These are idempotent — silently ignored if columns already exist
+        let _ = self.conn.execute("ALTER TABLE steps ADD COLUMN span_id TEXT", []);
+        let _ = self.conn.execute("ALTER TABLE sessions ADD COLUMN thread_id TEXT", []);
+        let _ = self.conn.execute("ALTER TABLE sessions ADD COLUMN thread_ordinal INTEGER", []);
+        let _ = self.conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_sessions_thread ON sessions(thread_id, thread_ordinal)");
+
         Ok(())
     }
 
@@ -247,8 +275,8 @@ impl Store {
 
     pub fn create_session(&self, session: &Session) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO sessions (id, name, created_at, updated_at, status, total_steps, total_tokens, metadata)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO sessions (id, name, created_at, updated_at, status, total_steps, total_tokens, metadata, thread_id, thread_ordinal)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 session.id,
                 session.name,
@@ -258,6 +286,8 @@ impl Store {
                 session.total_steps,
                 session.total_tokens,
                 session.metadata.to_string(),
+                session.thread_id,
+                session.thread_ordinal,
             ],
         )?;
         Ok(())
@@ -281,49 +311,19 @@ impl Store {
 
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, created_at, updated_at, status, total_steps, total_tokens, metadata
+            "SELECT id, name, created_at, updated_at, status, total_steps, total_tokens, metadata, thread_id, thread_ordinal
              FROM sessions ORDER BY created_at DESC",
         )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(Session {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(2)?)
-                    .unwrap()
-                    .with_timezone(&chrono::Utc),
-                updated_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(3)?)
-                    .unwrap()
-                    .with_timezone(&chrono::Utc),
-                status: SessionStatus::parse(&row.get::<_, String>(4)?),
-                total_steps: row.get(5)?,
-                total_tokens: row.get(6)?,
-                metadata: serde_json::from_str(&row.get::<_, String>(7)?).unwrap_or_default(),
-            })
-        })?;
+        let rows = stmt.query_map([], Self::row_to_session)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     pub fn get_session(&self, session_id: &str) -> Result<Option<Session>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, created_at, updated_at, status, total_steps, total_tokens, metadata
+            "SELECT id, name, created_at, updated_at, status, total_steps, total_tokens, metadata, thread_id, thread_ordinal
              FROM sessions WHERE id = ?1",
         )?;
-        let mut rows = stmt.query_map(params![session_id], |row| {
-            Ok(Session {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(2)?)
-                    .unwrap()
-                    .with_timezone(&chrono::Utc),
-                updated_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(3)?)
-                    .unwrap()
-                    .with_timezone(&chrono::Utc),
-                status: SessionStatus::parse(&row.get::<_, String>(4)?),
-                total_steps: row.get(5)?,
-                total_tokens: row.get(6)?,
-                metadata: serde_json::from_str(&row.get::<_, String>(7)?).unwrap_or_default(),
-            })
-        })?;
+        let mut rows = stmt.query_map(params![session_id], Self::row_to_session)?;
         Ok(rows.next().transpose()?)
     }
 
@@ -379,8 +379,8 @@ impl Store {
 
     pub fn create_step(&self, step: &Step) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO steps (id, timeline_id, session_id, step_number, step_type, status, created_at, duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            "INSERT INTO steps (id, timeline_id, session_id, step_number, step_type, status, created_at, duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error, span_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 step.id,
                 step.timeline_id,
@@ -396,6 +396,7 @@ impl Store {
                 step.request_blob,
                 step.response_blob,
                 step.error,
+                step.span_id,
             ],
         )?;
         Ok(())
@@ -403,57 +404,19 @@ impl Store {
 
     pub fn get_steps(&self, timeline_id: &str) -> Result<Vec<Step>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, timeline_id, session_id, step_number, step_type, status, created_at, duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error
+            "SELECT id, timeline_id, session_id, step_number, step_type, status, created_at, duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error, span_id
              FROM steps WHERE timeline_id = ?1 ORDER BY step_number",
         )?;
-        let rows = stmt.query_map(params![timeline_id], |row| {
-            Ok(Step {
-                id: row.get(0)?,
-                timeline_id: row.get(1)?,
-                session_id: row.get(2)?,
-                step_number: row.get(3)?,
-                step_type: StepType::parse(&row.get::<_, String>(4)?),
-                status: StepStatus::parse(&row.get::<_, String>(5)?),
-                created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(6)?)
-                    .unwrap()
-                    .with_timezone(&chrono::Utc),
-                duration_ms: row.get(7)?,
-                tokens_in: row.get(8)?,
-                tokens_out: row.get(9)?,
-                model: row.get(10)?,
-                request_blob: row.get(11)?,
-                response_blob: row.get(12)?,
-                error: row.get(13)?,
-            })
-        })?;
+        let rows = stmt.query_map(params![timeline_id], Self::row_to_step)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     pub fn get_step(&self, step_id: &str) -> Result<Option<Step>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, timeline_id, session_id, step_number, step_type, status, created_at, duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error
+            "SELECT id, timeline_id, session_id, step_number, step_type, status, created_at, duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error, span_id
              FROM steps WHERE id = ?1",
         )?;
-        let mut rows = stmt.query_map(params![step_id], |row| {
-            Ok(Step {
-                id: row.get(0)?,
-                timeline_id: row.get(1)?,
-                session_id: row.get(2)?,
-                step_number: row.get(3)?,
-                step_type: StepType::parse(&row.get::<_, String>(4)?),
-                status: StepStatus::parse(&row.get::<_, String>(5)?),
-                created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(6)?)
-                    .unwrap()
-                    .with_timezone(&chrono::Utc),
-                duration_ms: row.get(7)?,
-                tokens_in: row.get(8)?,
-                tokens_out: row.get(9)?,
-                model: row.get(10)?,
-                request_blob: row.get(11)?,
-                response_blob: row.get(12)?,
-                error: row.get(13)?,
-            })
-        })?;
+        let mut rows = stmt.query_map(params![step_id], Self::row_to_step)?;
         Ok(rows.next().transpose()?)
     }
 
@@ -781,6 +744,68 @@ impl Store {
             params![count, chrono::Utc::now().to_rfc3339(), dataset_id],
         )?;
         Ok(())
+    }
+
+    fn row_to_step(row: &rusqlite::Row) -> rusqlite::Result<Step> {
+        Ok(Step {
+            id: row.get(0)?,
+            timeline_id: row.get(1)?,
+            session_id: row.get(2)?,
+            step_number: row.get(3)?,
+            step_type: StepType::parse(&row.get::<_, String>(4)?),
+            status: StepStatus::parse(&row.get::<_, String>(5)?),
+            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(6)?)
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            duration_ms: row.get(7)?,
+            tokens_in: row.get(8)?,
+            tokens_out: row.get(9)?,
+            model: row.get(10)?,
+            request_blob: row.get(11)?,
+            response_blob: row.get(12)?,
+            error: row.get(13)?,
+            span_id: row.get(14)?,
+        })
+    }
+
+    fn row_to_session(row: &rusqlite::Row) -> rusqlite::Result<Session> {
+        Ok(Session {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(2)?)
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            updated_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(3)?)
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            status: SessionStatus::parse(&row.get::<_, String>(4)?),
+            total_steps: row.get(5)?,
+            total_tokens: row.get(6)?,
+            metadata: serde_json::from_str(&row.get::<_, String>(7)?).unwrap_or_default(),
+            thread_id: row.get(8)?,
+            thread_ordinal: row.get(9)?,
+        })
+    }
+
+    fn row_to_span(row: &rusqlite::Row) -> rusqlite::Result<Span> {
+        Ok(Span {
+            id: row.get(0)?,
+            session_id: row.get(1)?,
+            timeline_id: row.get(2)?,
+            parent_span_id: row.get(3)?,
+            span_type: SpanType::parse(&row.get::<_, String>(4)?),
+            name: row.get(5)?,
+            status: row.get(6)?,
+            started_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(7)?)
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            ended_at: row.get::<_, Option<String>>(8)?
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+                .map(|dt| dt.with_timezone(&chrono::Utc)),
+            duration_ms: row.get(9)?,
+            metadata: serde_json::from_str(&row.get::<_, String>(10)?).unwrap_or_default(),
+            error: row.get(11)?,
+        })
     }
 
     fn row_to_dataset(row: &rusqlite::Row) -> rusqlite::Result<Dataset> {
@@ -1172,6 +1197,118 @@ impl Store {
                 .unwrap()
                 .with_timezone(&chrono::Utc),
         })
+    }
+
+    // ── Spans ─────────────────────────────────────────────────
+
+    pub fn create_span(&self, span: &Span) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO spans (id, session_id, timeline_id, parent_span_id, span_type, name, status, started_at, ended_at, duration_ms, metadata, error)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                span.id,
+                span.session_id,
+                span.timeline_id,
+                span.parent_span_id,
+                span.span_type.as_str(),
+                span.name,
+                span.status,
+                span.started_at.to_rfc3339(),
+                span.ended_at.map(|dt| dt.to_rfc3339()),
+                span.duration_ms,
+                span.metadata.to_string(),
+                span.error,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_span_status(&self, span_id: &str, status: &str, ended_at: Option<chrono::DateTime<chrono::Utc>>, duration_ms: u64, error: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE spans SET status = ?1, ended_at = ?2, duration_ms = ?3, error = ?4 WHERE id = ?5",
+            params![status, ended_at.map(|dt| dt.to_rfc3339()), duration_ms, error, span_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_span(&self, span_id: &str) -> Result<Option<Span>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, timeline_id, parent_span_id, span_type, name, status, started_at, ended_at, duration_ms, metadata, error
+             FROM spans WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![span_id], Self::row_to_span)?;
+        Ok(rows.next().transpose()?)
+    }
+
+    pub fn get_spans_by_session(&self, session_id: &str) -> Result<Vec<Span>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, timeline_id, parent_span_id, span_type, name, status, started_at, ended_at, duration_ms, metadata, error
+             FROM spans WHERE session_id = ?1 ORDER BY started_at",
+        )?;
+        let rows = stmt.query_map(params![session_id], Self::row_to_span)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn get_spans_by_timeline(&self, timeline_id: &str) -> Result<Vec<Span>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, timeline_id, parent_span_id, span_type, name, status, started_at, ended_at, duration_ms, metadata, error
+             FROM spans WHERE timeline_id = ?1 ORDER BY started_at",
+        )?;
+        let rows = stmt.query_map(params![timeline_id], Self::row_to_span)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn get_child_spans(&self, parent_span_id: &str) -> Result<Vec<Span>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, timeline_id, parent_span_id, span_type, name, status, started_at, ended_at, duration_ms, metadata, error
+             FROM spans WHERE parent_span_id = ?1 ORDER BY started_at",
+        )?;
+        let rows = stmt.query_map(params![parent_span_id], Self::row_to_span)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn get_steps_by_span(&self, span_id: &str) -> Result<Vec<Step>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, timeline_id, session_id, step_number, step_type, status, created_at, duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error, span_id
+             FROM steps WHERE span_id = ?1 ORDER BY step_number",
+        )?;
+        let rows = stmt.query_map(params![span_id], Self::row_to_step)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn update_step_span_id(&self, step_id: &str, span_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE steps SET span_id = ?1 WHERE id = ?2",
+            params![span_id, step_id],
+        )?;
+        Ok(())
+    }
+
+    // ── Threads (via session columns) ─────────────────────────
+
+    pub fn get_sessions_by_thread(&self, thread_id: &str) -> Result<Vec<Session>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, created_at, updated_at, status, total_steps, total_tokens, metadata, thread_id, thread_ordinal
+             FROM sessions WHERE thread_id = ?1 ORDER BY thread_ordinal, created_at",
+        )?;
+        let rows = stmt.query_map(params![thread_id], Self::row_to_session)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn list_thread_ids(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT thread_id FROM sessions WHERE thread_id IS NOT NULL ORDER BY thread_id",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn set_session_thread(&self, session_id: &str, thread_id: &str, ordinal: u32) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET thread_id = ?1, thread_ordinal = ?2 WHERE id = ?3",
+            params![thread_id, ordinal, session_id],
+        )?;
+        Ok(())
     }
 
     // ── Raw SQL Query (read-only) ─────────────────────────────

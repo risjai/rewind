@@ -18,6 +18,8 @@ _mode = None
 _recorder = None
 _store = None
 _session_id = None
+_thread_id = None
+_thread_ordinal = 0
 
 REWIND_PROXY_URL = "http://127.0.0.1:8443"
 
@@ -169,6 +171,28 @@ def replay(session_ref: str = "latest", from_step: int = None):
         store.close()
 
 
+@contextlib.contextmanager
+def thread(thread_id: str):
+    """
+    Context manager for grouping sessions into a conversation thread.
+
+    Usage:
+        with rewind_agent.thread("conversation-123"):
+            with rewind_agent.session("turn-1"):
+                agent.run("Hello")
+            with rewind_agent.session("turn-2"):
+                agent.run("Follow up")
+    """
+    global _thread_id, _thread_ordinal
+    _thread_id = thread_id
+    _thread_ordinal = 0
+    try:
+        yield
+    finally:
+        _thread_id = None
+        _thread_ordinal = 0
+
+
 def _print_replay_banner(session_name: str, from_step: int, total_steps: int):
     _print_logo()
     print("  \033[36m\033[1mFork & Execute Replay\033[0m")
@@ -181,7 +205,7 @@ def _print_replay_banner(session_name: str, from_step: int, total_steps: int):
 
 def _init_direct(session_name: str, auto_patch: bool):
     """Initialize direct recording mode."""
-    global _recorder, _store, _session_id
+    global _recorder, _store, _session_id, _thread_ordinal
 
     from .store import Store
     from .recorder import Recorder
@@ -189,6 +213,10 @@ def _init_direct(session_name: str, auto_patch: bool):
     _store = Store()
     sid, tid = _store.create_session(session_name)
     _session_id = sid
+
+    if _thread_id:
+        _store.set_session_thread(sid, _thread_id, _thread_ordinal)
+        _thread_ordinal += 1
 
     _recorder = Recorder(_store, sid, tid)
     if auto_patch:

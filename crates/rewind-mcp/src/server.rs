@@ -178,6 +178,21 @@ pub struct DatasetFromSessionParams {
     pub expected_step: Option<u32>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SpanTreeParams {
+    /// Session ID, prefix, or "latest"
+    pub session: String,
+    /// Timeline ID, prefix, or label (optional, defaults to root)
+    #[serde(default)]
+    pub timeline: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ThreadIdParam {
+    /// Thread ID
+    pub thread_id: String,
+}
+
 // ── Response types ───────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -1089,6 +1104,181 @@ impl RewindMcp {
         });
         ok_json(&json)
     }
+
+    // ── Multi-agent tracing tools ──────────────────────────
+
+    #[tool(
+        name = "get_span_tree",
+        description = "Get the full span tree for a session — agents, tools, handoffs with nested steps. \
+            Shows the hierarchical execution structure of multi-agent workflows."
+    )]
+    async fn get_span_tree(
+        &self,
+        params: Parameters<SpanTreeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let params = &params.0;
+        let store = self.lock_store()?;
+        let sess = resolve_session(&store, &params.session)?;
+        let timelines = store.get_timelines(&sess.id).map_err(|e| mcp_err(&e))?;
+
+        let timeline_id = if let Some(ref tref) = params.timeline {
+            resolve_timeline_ref(&timelines, tref)?
+        } else {
+            timelines.iter()
+                .find(|t| t.parent_timeline_id.is_none())
+                .map(|t| t.id.clone())
+                .ok_or_else(|| mcp_err_str("No root timeline found"))?
+        };
+
+        let engine = ReplayEngine::new(&store);
+        let spans = engine.get_full_timeline_spans(&timeline_id, &sess.id)
+            .map_err(|e| mcp_err(&e))?;
+        let steps = engine.get_full_timeline_steps(&timeline_id, &sess.id)
+            .map_err(|e| mcp_err(&e))?;
+
+        let tree = build_mcp_span_tree(&spans, &steps, &store);
+
+        let json = serde_json::json!({
+            "session": {
+                "id": sess.id,
+                "name": sess.name,
+                "status": sess.status.as_str(),
+                "total_steps": sess.total_steps,
+                "total_tokens": sess.total_tokens,
+            },
+            "spans": tree,
+            "span_count": spans.len(),
+            "has_spans": !spans.is_empty(),
+        });
+        ok_json(&json)
+    }
+
+    #[tool(
+        name = "list_threads",
+        description = "List conversation threads — multi-session groupings that track multi-turn conversations."
+    )]
+    async fn list_threads(&self) -> Result<CallToolResult, McpError> {
+        let store = self.lock_store()?;
+        let thread_ids = store.list_thread_ids().map_err(|e| mcp_err(&e))?;
+
+        let mut threads = Vec::new();
+        for tid in &thread_ids {
+            let sessions = store.get_sessions_by_thread(tid).map_err(|e| mcp_err(&e))?;
+            threads.push(serde_json::json!({
+                "thread_id": tid,
+                "session_count": sessions.len(),
+                "total_steps": sessions.iter().map(|s| s.total_steps).sum::<u32>(),
+                "total_tokens": sessions.iter().map(|s| s.total_tokens).sum::<u64>(),
+                "sessions": sessions.iter().map(|s| serde_json::json!({
+                    "id": s.id,
+                    "name": s.name,
+                    "status": s.status.as_str(),
+                    "ordinal": s.thread_ordinal,
+                })).collect::<Vec<_>>(),
+            }));
+        }
+
+        let json = serde_json::json!({
+            "threads": threads,
+            "count": threads.len(),
+        });
+        ok_json(&json)
+    }
+
+    #[tool(
+        name = "show_thread",
+        description = "Show thread detail with all sessions and their span summaries"
+    )]
+    async fn show_thread(
+        &self,
+        params: Parameters<ThreadIdParam>,
+    ) -> Result<CallToolResult, McpError> {
+        let store = self.lock_store()?;
+        let sessions = store.get_sessions_by_thread(&params.0.thread_id)
+            .map_err(|e| mcp_err(&e))?;
+
+        if sessions.is_empty() {
+            return Err(mcp_err_str(&format!("Thread not found: {}", params.0.thread_id)));
+        }
+
+        let session_details: Vec<serde_json::Value> = sessions.iter().map(|s| {
+            let span_count = store.get_spans_by_session(&s.id)
+                .map(|spans| spans.len()).unwrap_or(0);
+            let agent_names: Vec<String> = store.get_spans_by_session(&s.id)
+                .unwrap_or_default()
+                .iter()
+                .filter(|sp| sp.span_type == rewind_store::SpanType::Agent)
+                .map(|sp| sp.name.clone())
+                .collect();
+
+            serde_json::json!({
+                "id": s.id,
+                "name": s.name,
+                "status": s.status.as_str(),
+                "ordinal": s.thread_ordinal,
+                "total_steps": s.total_steps,
+                "total_tokens": s.total_tokens,
+                "span_count": span_count,
+                "agents": agent_names,
+                "created_at": s.created_at.to_rfc3339(),
+            })
+        }).collect();
+
+        let json = serde_json::json!({
+            "thread_id": params.0.thread_id,
+            "sessions": session_details,
+            "session_count": sessions.len(),
+        });
+        ok_json(&json)
+    }
+
+    #[tool(
+        name = "get_thread_summary",
+        description = "Condensed thread view for AI assistants — turns, agents involved, and outcomes."
+    )]
+    async fn get_thread_summary(
+        &self,
+        params: Parameters<ThreadIdParam>,
+    ) -> Result<CallToolResult, McpError> {
+        let store = self.lock_store()?;
+        let sessions = store.get_sessions_by_thread(&params.0.thread_id)
+            .map_err(|e| mcp_err(&e))?;
+
+        if sessions.is_empty() {
+            return Err(mcp_err_str(&format!("Thread not found: {}", params.0.thread_id)));
+        }
+
+        let total_steps: u32 = sessions.iter().map(|s| s.total_steps).sum();
+        let total_tokens: u64 = sessions.iter().map(|s| s.total_tokens).sum();
+        let all_agents: std::collections::HashSet<String> = sessions.iter()
+            .flat_map(|s| {
+                store.get_spans_by_session(&s.id).unwrap_or_default()
+                    .into_iter()
+                    .filter(|sp| sp.span_type == rewind_store::SpanType::Agent)
+                    .map(|sp| sp.name)
+            })
+            .collect();
+
+        let turns: Vec<serde_json::Value> = sessions.iter().enumerate().map(|(i, s)| {
+            serde_json::json!({
+                "turn": i + 1,
+                "name": s.name,
+                "status": s.status.as_str(),
+                "steps": s.total_steps,
+                "tokens": s.total_tokens,
+            })
+        }).collect();
+
+        let json = serde_json::json!({
+            "thread_id": params.0.thread_id,
+            "total_turns": sessions.len(),
+            "total_steps": total_steps,
+            "total_tokens": total_tokens,
+            "agents_involved": all_agents.into_iter().collect::<Vec<_>>(),
+            "turns": turns,
+        });
+        ok_json(&json)
+    }
 }
 
 // ── ServerHandler implementation ─────────────────────────────
@@ -1182,6 +1372,50 @@ fn resolve_timeline_ref(
         return Ok(t.id.clone());
     }
     Err(mcp_err_str(&format!("Timeline not found: {}", reference)))
+}
+
+fn build_mcp_span_tree(spans: &[rewind_store::Span], steps: &[rewind_store::Step], store: &Store) -> Vec<serde_json::Value> {
+    let root_spans: Vec<&rewind_store::Span> = spans.iter()
+        .filter(|s| s.parent_span_id.is_none())
+        .collect();
+
+    root_spans.iter().map(|s| build_mcp_span_node(s, spans, steps, store)).collect()
+}
+
+fn build_mcp_span_node(span: &rewind_store::Span, all_spans: &[rewind_store::Span], all_steps: &[rewind_store::Step], store: &Store) -> serde_json::Value {
+    let child_spans: Vec<serde_json::Value> = all_spans.iter()
+        .filter(|s| s.parent_span_id.as_deref() == Some(&span.id))
+        .map(|s| build_mcp_span_node(s, all_spans, all_steps, store))
+        .collect();
+
+    let span_steps: Vec<serde_json::Value> = all_steps.iter()
+        .filter(|s| s.span_id.as_deref() == Some(&span.id))
+        .map(|s| {
+            let preview = extract_response_preview(store, &s.response_blob);
+            serde_json::json!({
+                "step_number": s.step_number,
+                "step_type": s.step_type.as_str(),
+                "status": s.status.as_str(),
+                "model": s.model,
+                "duration_ms": s.duration_ms,
+                "tokens_in": s.tokens_in,
+                "tokens_out": s.tokens_out,
+                "error": s.error,
+                "response_preview": preview,
+            })
+        }).collect();
+
+    serde_json::json!({
+        "id": span.id,
+        "span_type": span.span_type.as_str(),
+        "span_type_icon": span.span_type.icon(),
+        "name": span.name,
+        "status": span.status,
+        "duration_ms": span.duration_ms,
+        "error": span.error,
+        "child_spans": child_spans,
+        "steps": span_steps,
+    })
 }
 
 fn extract_response_preview(store: &Store, response_blob: &str) -> String {

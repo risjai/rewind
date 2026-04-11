@@ -12,6 +12,8 @@ pub struct Session {
     pub total_steps: u32,
     pub total_tokens: u64,
     pub metadata: serde_json::Value,
+    pub thread_id: Option<String>,
+    pub thread_ordinal: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -69,6 +71,7 @@ pub struct Step {
     pub request_blob: String,  // SHA-256 hash -> blob store
     pub response_blob: String, // SHA-256 hash -> blob store
     pub error: Option<String>,
+    pub span_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -139,6 +142,84 @@ impl StepStatus {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Span {
+    pub id: String,
+    pub session_id: String,
+    pub timeline_id: String,
+    pub parent_span_id: Option<String>,
+    pub span_type: SpanType,
+    pub name: String,
+    pub status: String,
+    pub started_at: DateTime<Utc>,
+    pub ended_at: Option<DateTime<Utc>>,
+    pub duration_ms: u64,
+    pub metadata: serde_json::Value,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum SpanType {
+    Agent,
+    Tool,
+    Handoff,
+    Custom,
+}
+
+impl SpanType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SpanType::Agent => "agent",
+            SpanType::Tool => "tool",
+            SpanType::Handoff => "handoff",
+            SpanType::Custom => "custom",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "agent" => SpanType::Agent,
+            "tool" => SpanType::Tool,
+            "handoff" => SpanType::Handoff,
+            "custom" => SpanType::Custom,
+            _ => SpanType::Custom,
+        }
+    }
+
+    pub fn icon(&self) -> &'static str {
+        match self {
+            SpanType::Agent => "🤖",
+            SpanType::Tool => "🔧",
+            SpanType::Handoff => "🔀",
+            SpanType::Custom => "📦",
+        }
+    }
+}
+
+impl Span {
+    pub fn new(session_id: &str, timeline_id: &str, span_type: SpanType, name: &str) -> Self {
+        Span {
+            id: Uuid::new_v4().to_string(),
+            session_id: session_id.to_string(),
+            timeline_id: timeline_id.to_string(),
+            parent_span_id: None,
+            span_type,
+            name: name.to_string(),
+            status: "running".to_string(),
+            started_at: Utc::now(),
+            ended_at: None,
+            duration_ms: 0,
+            metadata: serde_json::json!({}),
+            error: None,
+        }
+    }
+
+    pub fn with_parent(mut self, parent_span_id: &str) -> Self {
+        self.parent_span_id = Some(parent_span_id.to_string());
+        self
+    }
+}
+
 impl Session {
     pub fn new(name: &str) -> Self {
         let now = Utc::now();
@@ -151,6 +232,8 @@ impl Session {
             total_steps: 0,
             total_tokens: 0,
             metadata: serde_json::json!({}),
+            thread_id: None,
+            thread_ordinal: None,
         }
     }
 }
@@ -249,6 +332,7 @@ impl Step {
             request_blob: String::new(),
             response_blob: String::new(),
             error: None,
+            span_id: None,
         }
     }
 }

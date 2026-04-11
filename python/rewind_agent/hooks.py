@@ -10,6 +10,7 @@ Works with LangGraph, CrewAI, OpenAI Agents SDK, or plain functions.
 
 import functools
 import json
+import logging
 import os
 import time
 import urllib.request
@@ -137,6 +138,100 @@ def trace(name: str, metadata: dict | None = None):
             "duration_ms": round(elapsed_ms, 2),
             "error": error,
         })
+
+
+# ── Manual Span Creation ──────────────────────────────────────
+
+import contextvars
+
+_current_span_id: contextvars.ContextVar[str | None] = contextvars.ContextVar("_current_span_id", default=None)
+
+
+def span(name: str, span_type: str = "custom"):
+    """
+    Decorator and context manager for creating Rewind spans.
+    Groups all LLM calls and tool calls within this scope under a named span.
+
+    Usage as decorator:
+        @rewind_agent.span("planning-phase")
+        def plan(state):
+            ...
+
+    Usage as context manager:
+        with rewind_agent.span("retry-loop"):
+            for attempt in range(3):
+                result = agent.run(query)
+    """
+    return _SpanContext(name, span_type)
+
+
+class _SpanContext:
+    """Dual-use decorator/context manager for span creation."""
+
+    def __init__(self, name: str, span_type: str = "custom"):
+        self._name = name
+        self._span_type = span_type
+        self._span_id = None
+        self._start = None
+        self._token = None
+
+    def __call__(self, func):
+        """Use as decorator."""
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            with self:
+                return func(*args, **kwargs)
+        return wrapper
+
+    def __enter__(self):
+        from . import patch as _patch
+        self._start = time.perf_counter()
+
+        store = getattr(_patch, "_store", None)
+        session_id = getattr(_patch, "_session_id", None)
+        recorder = getattr(_patch, "_recorder", None)
+        timeline_id = recorder._timeline_id if recorder else None
+
+        if store and session_id and timeline_id:
+            parent_span_id = _current_span_id.get()
+            try:
+                self._span_id = store.create_span(
+                    session_id=session_id,
+                    timeline_id=timeline_id,
+                    span_type=self._span_type,
+                    name=self._name,
+                    parent_span_id=parent_span_id,
+                )
+                self._token = _current_span_id.set(self._span_id)
+            except Exception:
+                logging.getLogger("rewind").debug(
+                    "Rewind: failed to create manual span", exc_info=True
+                )
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        from . import patch as _patch
+
+        elapsed_ms = int((time.perf_counter() - self._start) * 1000) if self._start else 0
+        error_msg = str(exc_val) if exc_val else None
+        status = "error" if exc_val else "completed"
+
+        if self._span_id:
+            store = getattr(_patch, "_store", None)
+            if store:
+                try:
+                    store.update_span_status(self._span_id, status, elapsed_ms, error_msg)
+                except Exception:
+                    pass
+
+        if self._token is not None:
+            _current_span_id.reset(self._token)
+
+        return False
+
+    @property
+    def span_id(self):
+        return self._span_id
 
 
 def annotate(key: str, value: Any):

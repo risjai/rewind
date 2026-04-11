@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rewind_store::{Step, Store, Timeline};
+use rewind_store::{Span, Step, Store, Timeline};
 
 /// Diff result between two timelines
 #[derive(Debug, serde::Serialize)]
@@ -66,6 +66,36 @@ impl<'a> ReplayEngine<'a> {
             Ok(combined)
         } else {
             self.store.get_steps(timeline_id)
+        }
+    }
+
+    /// Get all spans for a timeline, including inherited spans from parent (for forks)
+    pub fn get_full_timeline_spans(&self, timeline_id: &str, session_id: &str) -> Result<Vec<Span>> {
+        let timelines = self.store.get_timelines(session_id)?;
+        let timeline = timelines.iter().find(|t| t.id == timeline_id)
+            .context("Timeline not found")?;
+
+        if let (Some(parent_id), Some(fork_at)) = (&timeline.parent_timeline_id, timeline.fork_at_step) {
+            let parent_spans = self.store.get_spans_by_timeline(parent_id)?;
+            let own_spans = self.store.get_spans_by_timeline(timeline_id)?;
+
+            let parent_steps = self.store.get_steps(parent_id)?;
+            let mut inherited: Vec<Span> = parent_spans.into_iter().filter(|span| {
+                let span_steps: Vec<&Step> = parent_steps.iter()
+                    .filter(|s| s.span_id.as_deref() == Some(&span.id))
+                    .collect();
+                if span_steps.is_empty() {
+                    true
+                } else {
+                    span_steps.iter().all(|s| s.step_number <= fork_at)
+                }
+            }).collect();
+
+            inherited.extend(own_spans);
+            inherited.sort_by(|a, b| a.started_at.cmp(&b.started_at));
+            Ok(inherited)
+        } else {
+            self.store.get_spans_by_timeline(timeline_id)
         }
     }
 
