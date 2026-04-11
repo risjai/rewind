@@ -8,7 +8,7 @@ use axum::{
 use chrono::Utc;
 use dashmap::DashMap;
 use rewind_store::{
-    Session, SessionSource, SessionStatus, Span, SpanType, Step, StepStatus, StepType, Timeline,
+    Session, SessionSource, SessionStatus, Step, StepStatus, StepType, Timeline,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -265,9 +265,9 @@ fn process_envelope(state: &AppState, envelope: HookEventEnvelope) -> anyhow::Re
         "pretooluse" => handle_pre_tool_use(state, &payload),
         "posttooluse" => handle_post_tool_use(state, &payload, StepStatus::Success),
         "posttoolusefailure" => handle_post_tool_use(state, &payload, StepStatus::Error),
-        "userpromptsubmit" | "beforesubmitprompt" | "beforepromptsubmit" => handle_user_prompt(state, &payload),
+        "userpromptsubmit" | "beforesubmitprompt" | "beforepromptsubmit" => handle_user_prompt(state, &payload, &envelope.payload),
         "sessionend" | "stop" => handle_session_end(state, &payload),
-        _ => handle_generic_event(state, &payload, &envelope.event_type),
+        _ => handle_generic_event(state, &payload, &envelope.event_type, &envelope.payload),
     }
 }
 
@@ -332,17 +332,17 @@ fn ensure_session(state: &AppState, claude_session_id: &str, cwd: Option<&str>, 
     session.metadata = meta;
 
     let timeline = Timeline::new_root(&session.id);
-    let span = Span::new(&session.id, &timeline.id, SpanType::Agent, &session_name);
+    // No root span — SubagentStart/Stop hooks don't fire, so the span tree
+    // adds no value and triggers a less detailed nested UI. Without spans,
+    // the flat step timeline is used, which shows tool names, tokens, and previews.
 
     let rewind_session_id = session.id.clone();
     let timeline_id = timeline.id.clone();
-    let span_id = span.id.clone();
 
     {
         let store = state.store.lock().map_err(|e| anyhow::anyhow!("Lock: {e}"))?;
         store.create_session(&session)?;
         store.create_timeline(&timeline)?;
-        store.create_span(&span)?;
     }
 
     // Insert into DashMap AFTER successful store operations
@@ -351,7 +351,7 @@ fn ensure_session(state: &AppState, claude_session_id: &str, cwd: Option<&str>, 
         HookSessionState {
             session_id: rewind_session_id,
             timeline_id,
-            root_span_id: span_id,
+            root_span_id: String::new(),
             step_counter: AtomicU32::new(0),
             pending_steps: Mutex::new(HashMap::new()),
         },
@@ -399,7 +399,9 @@ fn handle_pre_tool_use(state: &AppState, payload: &ClaudeCodeHookPayload) -> any
     step.step_type = StepType::ToolCall;
     step.status = StepStatus::Pending;
     step.tool_name = payload.tool_name.clone();
-    step.span_id = Some(sess_state.root_span_id.clone());
+    if !sess_state.root_span_id.is_empty() {
+        step.span_id = Some(sess_state.root_span_id.clone());
+    }
     step.created_at = Utc::now();
 
     // Store tool_input as request blob
@@ -495,7 +497,9 @@ fn handle_post_tool_use(
         step.step_type = StepType::ToolCall;
         step.status = status;
         step.tool_name = payload.tool_name.clone();
+        if !sess_state.root_span_id.is_empty() {
         step.span_id = Some(sess_state.root_span_id.clone());
+    }
         step.created_at = Utc::now();
 
         if let Some(ref tool_input) = payload.tool_input {
@@ -525,7 +529,7 @@ fn handle_post_tool_use(
     Ok(None)
 }
 
-fn handle_user_prompt(state: &AppState, payload: &ClaudeCodeHookPayload) -> anyhow::Result<Option<String>> {
+fn handle_user_prompt(state: &AppState, payload: &ClaudeCodeHookPayload, raw_payload: &serde_json::Value) -> anyhow::Result<Option<String>> {
     ensure_session(state, &payload.session_id, payload.cwd.as_deref(), payload.transcript_path.as_deref(), true)?;
 
     let sess_state = state.hooks.sessions.get(&payload.session_id)
@@ -537,14 +541,17 @@ fn handle_user_prompt(state: &AppState, payload: &ClaudeCodeHookPayload) -> anyh
     step.id = Uuid::new_v4().to_string();
     step.step_type = StepType::UserPrompt;
     step.status = StepStatus::Success;
-    step.span_id = Some(sess_state.root_span_id.clone());
+    if !sess_state.root_span_id.is_empty() {
+        step.span_id = Some(sess_state.root_span_id.clone());
+    }
     step.created_at = Utc::now();
 
-    // Store the full payload as request blob for user prompts
-    if let Some(ref tool_input) = payload.tool_input {
+    // Store the full raw payload — user prompts may have the text in various fields
+    // (content, prompt, message) depending on the Claude Code version/extension
+    {
         let store = state.store.lock().map_err(|e| anyhow::anyhow!("Lock: {e}"))?;
-        let input_bytes = serde_json::to_vec(tool_input)?;
-        step.request_blob = store.blobs.put(&input_bytes)?;
+        let payload_bytes = serde_json::to_vec(raw_payload)?;
+        step.request_blob = store.blobs.put(&payload_bytes)?;
     }
 
     {
@@ -575,7 +582,9 @@ fn handle_session_end(state: &AppState, payload: &ClaudeCodeHookPayload) -> anyh
     {
         let store = state.store.lock().map_err(|e| anyhow::anyhow!("Lock: {e}"))?;
         store.update_session_status(&sess_state.session_id, SessionStatus::Completed)?;
-        store.update_span_status(&sess_state.root_span_id, "completed", Some(now), 0, None)?;
+        if !sess_state.root_span_id.is_empty() {
+            store.update_span_status(&sess_state.root_span_id, "completed", Some(now), 0, None)?;
+        }
     }
 
     // Emit session update
@@ -600,6 +609,7 @@ fn handle_generic_event(
     state: &AppState,
     payload: &ClaudeCodeHookPayload,
     event_type: &str,
+    raw_payload: &serde_json::Value,
 ) -> anyhow::Result<Option<String>> {
     ensure_session(state, &payload.session_id, payload.cwd.as_deref(), payload.transcript_path.as_deref(), true)?;
 
@@ -613,13 +623,15 @@ fn handle_generic_event(
     step.step_type = StepType::HookEvent;
     step.status = StepStatus::Success;
     step.tool_name = Some(event_type.to_string());
-    step.span_id = Some(sess_state.root_span_id.clone());
+    if !sess_state.root_span_id.is_empty() {
+        step.span_id = Some(sess_state.root_span_id.clone());
+    }
     step.created_at = Utc::now();
 
-    // Store the raw payload as request blob
+    // Store the full raw payload as request blob
     {
         let store = state.store.lock().map_err(|e| anyhow::anyhow!("Lock: {e}"))?;
-        let payload_bytes = serde_json::to_vec(&payload.tool_input.as_ref().unwrap_or(&serde_json::Value::Null))?;
+        let payload_bytes = serde_json::to_vec(raw_payload)?;
         step.request_blob = store.blobs.put(&payload_bytes)?;
         store.create_step(&step)?;
         store.update_session_stats(&sess_state.session_id, step_num, 0)?;

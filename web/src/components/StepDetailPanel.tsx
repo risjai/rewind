@@ -8,7 +8,7 @@ import { JsonTree } from './JsonTree'
 type Tab = 'context' | 'request' | 'response'
 
 export function StepDetailPanel({ stepId }: { stepId: string }) {
-  const [tab, setTab] = useState<Tab>('context')
+  const [tab, setTab] = useState<Tab | null>(null)
 
   const { data: step, isLoading } = useQuery({
     queryKey: ['step-detail', stepId],
@@ -21,6 +21,10 @@ export function StepDetailPanel({ stepId }: { stepId: string }) {
   if (!step) {
     return <div className="flex items-center justify-center h-full text-neutral-500 text-sm">Step not found</div>
   }
+
+  // Default tab: 'context' for LLM calls (have messages), 'request' for hook steps
+  const isHookStep = step.step_type === 'user_prompt' || step.step_type === 'hook_event' || (!step.messages && step.request_body)
+  const activeTab = tab ?? (isHookStep ? 'request' : 'context')
 
   return (
     <div className="flex flex-col h-full">
@@ -51,16 +55,16 @@ export function StepDetailPanel({ stepId }: { stepId: string }) {
 
       {/* Tabs */}
       <div className="flex border-b border-neutral-800">
-        <TabButton icon={MessageSquare} label="Context Window" active={tab === 'context'} onClick={() => setTab('context')} />
-        <TabButton icon={FileJson} label="Request" active={tab === 'request'} onClick={() => setTab('request')} />
-        <TabButton icon={FileOutput} label="Response" active={tab === 'response'} onClick={() => setTab('response')} />
+        <TabButton icon={MessageSquare} label="Context Window" active={activeTab === 'context'} onClick={() => setTab('context')} />
+        <TabButton icon={FileJson} label="Request" active={activeTab === 'request'} onClick={() => setTab('request')} />
+        <TabButton icon={FileOutput} label="Response" active={activeTab === 'response'} onClick={() => setTab('response')} />
       </div>
 
       {/* Tab content */}
       <div className="flex-1 overflow-auto scrollbar-thin">
-        {tab === 'context' && <ContextWindowView messages={step.messages} />}
-        {tab === 'request' && <JsonView data={step.request_body} label="Request" />}
-        {tab === 'response' && <JsonView data={step.response_body} label="Response" />}
+        {activeTab === 'context' && <ContextWindowView messages={step.messages} />}
+        {activeTab === 'request' && <JsonView data={step.request_body} label="Request" />}
+        {activeTab === 'response' && <JsonView data={step.response_body} label="Response" />}
       </div>
     </div>
   )
