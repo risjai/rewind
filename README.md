@@ -9,7 +9,7 @@
   <br/>
   <strong>The time-travel debugger for AI agents</strong>
   <br/>
-  <em>Record. Inspect. Fork. Replay from failure. Diff. Evaluate.</em>
+  <em>Built-in tracing, evals, and CI regression testing — no LangSmith required.</em>
   <br/>
   <br/>
   <a href="#the-problem">Why</a> &nbsp;&bull;&nbsp;
@@ -31,6 +31,8 @@
 </p>
 
 ---
+
+> **If your agent runs 10+ steps, you need a debugger, not `print()`.** Below 10 steps, re-running is fine — $0.10 and 10 seconds. Above 20, each debugging cycle costs $2-5 and 2-5 minutes, repeated 5-15x per bug. That's $50 and 30 minutes to fix one failure. Rewind cuts that to 90 seconds and the cost of a single re-run.
 
 ## The Problem
 
@@ -58,6 +60,8 @@ Every existing observability tool shows you **what happened**. None of them let 
 | **Evaluation** | Create datasets of test cases, run your agent against them, score with built-in evaluators (exact match, contains, regex, JSON schema, tool use), compare experiments side-by-side. CI-ready with `--fail-below` thresholds. |
 | **Multi-Agent Tracing** | See which agent made which decision. Span tree visualization groups LLM calls, tool invocations, and handoffs under their parent agent. Thread view tracks multi-turn conversations across sessions. |
 | **Snapshots** | Capture your entire workspace at any point. Restore in one command if your agent breaks something. No git dependency. |
+
+**The only tool where debugging, tracing, and evals share the same data model.** Fork a session, replay it, diff it, score it — all on the same timeline. No second tool needed.
 
 ## See It in Action
 
@@ -99,7 +103,7 @@ The writer agent hallucinated at step 8 because the researcher used stale data. 
 rewind replay latest --from 4          # fix your code, then:
 # Steps 1-3: cached instantly (0ms, 0 tokens)
 # Steps 4-5: re-run live with corrected context
-rewind diff latest                     # see exactly what diverged
+rewind diff latest main fixed           # see exactly what diverged
 ```
 
 ```
@@ -212,8 +216,9 @@ Works with any agent framework: **[OpenAI Agents SDK](https://github.com/openai/
 | **v0.2** | Direct recording, fork-and-execute replay, regression testing, MCP server | ✅ Shipped |
 | **v0.3** | Web UI (flight recorder + live dashboard) | ✅ Shipped |
 | **v0.4** | Evaluation system — datasets, evaluators, experiments, comparison, CI | ✅ Shipped |
-| **v0.5** | Multi-agent tracing (spans, threads, span tree UI), OTel export | Building |
-| **v1.0** | LLM-as-judge, live breakpoints, Rewind Cloud, semantic diff | Planned |
+| **v0.5** | Multi-agent tracing (spans, threads, span tree UI) | ✅ Shipped |
+| **v0.6** | OTel export, LLM-as-judge evaluators | Planned |
+| **v1.0** | Rewind Cloud, shared sessions, team dashboards, live breakpoints, semantic diff | Planned |
 
 ## Why "Rewind"?
 

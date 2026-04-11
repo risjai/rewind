@@ -45,3 +45,6 @@ dist/
 
 # Internal product summary (not public)
 /docs/PRODUCT-SUMMARY.md
+
+# Asset build tooling (cast files, recording scripts, generators)
+/assets/dev/
