@@ -9,11 +9,39 @@ pub struct Session {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub status: SessionStatus,
+    pub source: SessionSource,
     pub total_steps: u32,
     pub total_tokens: u64,
     pub metadata: serde_json::Value,
     pub thread_id: Option<String>,
     pub thread_ordinal: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionSource {
+    Proxy,
+    Direct,
+    Hooks,
+}
+
+impl SessionSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SessionSource::Proxy => "proxy",
+            SessionSource::Direct => "direct",
+            SessionSource::Hooks => "hooks",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "proxy" => SessionSource::Proxy,
+            "direct" => SessionSource::Direct,
+            "hooks" => SessionSource::Hooks,
+            _ => SessionSource::Proxy,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -72,6 +100,7 @@ pub struct Step {
     pub response_blob: String, // SHA-256 hash -> blob store
     pub error: Option<String>,
     pub span_id: Option<String>,
+    pub tool_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -79,6 +108,8 @@ pub enum StepType {
     LlmCall,
     ToolCall,
     ToolResult,
+    UserPrompt,
+    HookEvent,
 }
 
 impl StepType {
@@ -87,6 +118,8 @@ impl StepType {
             StepType::LlmCall => "llm_call",
             StepType::ToolCall => "tool_call",
             StepType::ToolResult => "tool_result",
+            StepType::UserPrompt => "user_prompt",
+            StepType::HookEvent => "hook_event",
         }
     }
 
@@ -95,6 +128,8 @@ impl StepType {
             "llm_call" => StepType::LlmCall,
             "tool_call" => StepType::ToolCall,
             "tool_result" => StepType::ToolResult,
+            "user_prompt" => StepType::UserPrompt,
+            "hook_event" => StepType::HookEvent,
             _ => StepType::LlmCall,
         }
     }
@@ -104,6 +139,8 @@ impl StepType {
             StepType::LlmCall => "🧠",
             StepType::ToolCall => "🔧",
             StepType::ToolResult => "📋",
+            StepType::UserPrompt => "💬",
+            StepType::HookEvent => "🪝",
         }
     }
 
@@ -112,6 +149,8 @@ impl StepType {
             StepType::LlmCall => "LLM Call",
             StepType::ToolCall => "Tool Call",
             StepType::ToolResult => "Tool Result",
+            StepType::UserPrompt => "User Prompt",
+            StepType::HookEvent => "Hook Event",
         }
     }
 }
@@ -229,6 +268,7 @@ impl Session {
             created_at: now,
             updated_at: now,
             status: SessionStatus::Recording,
+            source: SessionSource::Proxy,
             total_steps: 0,
             total_tokens: 0,
             metadata: serde_json::json!({}),
@@ -333,6 +373,7 @@ impl Step {
             response_blob: String::new(),
             error: None,
             span_id: None,
+            tool_name: None,
         }
     }
 }

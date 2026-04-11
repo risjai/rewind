@@ -1,0 +1,12 @@
+{
+  "name": "rewind",
+  "description": "Time-travel debugger for AI agents. Observe Claude Code sessions in real-time, inspect tool call traces, diff timelines, fork-and-replay from any point, and run regression tests. Use when debugging agent behavior, comparing runs, or building eval baselines.",
+  "version": "0.6.0",
+  "author": {
+    "name": "AgentOptics",
+    "email": "hello@agentoptics.dev"
+  },
+  "repository": "https://github.com/agentoptics/rewind",
+  "license": "MIT",
+  "keywords": ["debugging", "agents", "observability", "time-travel", "traces", "evals"]
+}

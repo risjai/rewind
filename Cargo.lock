@@ -366,6 +366,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "crossbeam-utils"
+version = "0.8.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
+
+[[package]]
 name = "crossterm"
 version = "0.28.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -432,6 +438,20 @@ dependencies = [
  "darling_core",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "dashmap"
+version = "6.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5041cc499144891f3790297212f32a74fb938e5136a14943f338ef9e0ae276cf"
+dependencies = [
+ "cfg-if",
+ "crossbeam-utils",
+ "hashbrown 0.14.5",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core",
 ]
 
 [[package]]
@@ -1601,7 +1621,7 @@ dependencies = [
 
 [[package]]
 name = "rewind-assert"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1616,13 +1636,14 @@ dependencies = [
 
 [[package]]
 name = "rewind-cli"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "chrono",
  "clap",
  "colored",
  "flate2",
+ "reqwest",
  "rewind-assert",
  "rewind-eval",
  "rewind-proxy",
@@ -1641,7 +1662,7 @@ dependencies = [
 
 [[package]]
 name = "rewind-eval"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1655,7 +1676,7 @@ dependencies = [
 
 [[package]]
 name = "rewind-mcp"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "rewind-assert",
@@ -1673,7 +1694,7 @@ dependencies = [
 
 [[package]]
 name = "rewind-proxy"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1695,7 +1716,7 @@ dependencies = [
 
 [[package]]
 name = "rewind-replay"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1711,7 +1732,7 @@ dependencies = [
 
 [[package]]
 name = "rewind-store"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1726,7 +1747,7 @@ dependencies = [
 
 [[package]]
 name = "rewind-tui"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1744,11 +1765,12 @@ dependencies = [
 
 [[package]]
 name = "rewind-web"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "axum",
  "chrono",
+ "dashmap",
  "futures-util",
  "http-body-util",
  "hyper",
@@ -1760,11 +1782,13 @@ dependencies = [
  "rust-embed",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "tower",
  "tower-http",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

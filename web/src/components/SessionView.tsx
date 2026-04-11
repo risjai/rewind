@@ -7,7 +7,7 @@ import { StepDetailPanel } from './StepDetailPanel'
 import { TimelineSelector } from './TimelineSelector'
 import { SpanTree } from './SpanTree'
 import { formatTokens, formatDuration, cn } from '@/lib/utils'
-import { Radio, Clock, Layers, Zap, GitBranch, Bot } from 'lucide-react'
+import { Radio, Clock, Layers, Zap, GitBranch, Bot, Plug } from 'lucide-react'
 import { useCallback, useState } from 'react'
 import type { StepResponse } from '@/types/api'
 
@@ -63,6 +63,7 @@ export function SessionView({ sessionId }: { sessionId: string }) {
 
   const totalDuration = steps.reduce((sum, s) => sum + s.duration_ms, 0)
   const hasForked = (detail?.timelines.length ?? 0) > 1
+  const isHook = session.source === 'hooks'
 
   return (
     <div className="flex flex-col h-full">
@@ -76,6 +77,14 @@ export function SessionView({ sessionId }: { sessionId: string }) {
         </div>
       )}
 
+      {/* Hooks session banner */}
+      {isHook && !isLive && (
+        <div className="bg-violet-950/30 border-b border-violet-900/50 px-4 py-2 flex items-center gap-2">
+          <Plug size={14} className="text-violet-400" />
+          <span className="text-xs font-medium text-violet-300">Claude Code Session — observed via hooks</span>
+        </div>
+      )}
+
       {/* Stats bar */}
       <div className="border-b border-neutral-800 px-4 py-3">
         <div className="flex items-center justify-between">
@@ -85,7 +94,10 @@ export function SessionView({ sessionId }: { sessionId: string }) {
           </div>
           <div className="flex items-center gap-4 text-xs text-neutral-400">
             <span className="flex items-center gap-1"><Layers size={12} /> {session.total_steps} steps</span>
-            <span className="flex items-center gap-1"><Zap size={12} /> {formatTokens(session.total_tokens)} tokens</span>
+            {session.total_tokens > 0 && <span className="flex items-center gap-1"><Zap size={12} /> {formatTokens(session.total_tokens)} tokens</span>}
+            {(session.metadata?.cache_tokens as number) > 0 && (
+              <span className="flex items-center gap-1 text-neutral-500"><Zap size={12} /> {formatTokens(session.metadata.cache_tokens as number)} cached</span>
+            )}
             <span className="flex items-center gap-1"><Clock size={12} /> {formatDuration(totalDuration)}</span>
             {spans.length > 0 && (() => {
               const agentNames = spans.filter(s => s.span_type === 'agent').map(s => s.name);

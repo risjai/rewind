@@ -1,7 +1,10 @@
 import { useRef, useEffect } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { cn, formatDuration, formatTokens } from '@/lib/utils'
-import { CheckCircle2, XCircle, Loader2, Brain, Wrench, ClipboardList } from 'lucide-react'
+import {
+  CheckCircle2, XCircle, Loader2, Brain, Wrench, ClipboardList,
+  Eye, Pencil, FileText, Terminal, Search, Bot, Globe, ListTodo, Plug, MessageSquare, Zap,
+} from 'lucide-react'
 import type { StepResponse } from '@/types/api'
 
 interface StepTimelineProps {
@@ -55,13 +58,13 @@ export function StepTimeline({ steps, selectedStepId, onSelectStep, autoFollow }
                 )}
               >
                 <div className="flex flex-col items-center gap-1 pt-0.5">
-                  <StepTypeIcon type={step.step_type} />
+                  {step.tool_name ? <ToolNameIcon toolName={step.tool_name} /> : <StepTypeIcon type={step.step_type} />}
                   <StatusIcon status={step.status} />
                 </div>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
                     <span className="text-[11px] font-mono text-neutral-500">#{step.step_number}</span>
-                    <span className="text-xs font-medium text-neutral-200">{step.step_type_label}</span>
+                    <span className="text-xs font-medium text-neutral-200">{toolNameLabel(step)}</span>
                     {step.model && (
                       <span className="text-[10px] bg-neutral-800 text-neutral-400 px-1.5 py-0.5 rounded font-mono">{step.model}</span>
                     )}
@@ -101,4 +104,32 @@ function StatusIcon({ status }: { status: string }) {
     case 'error': return <XCircle size={12} className="text-red-500" />
     default: return <Loader2 size={12} className="text-amber-400 animate-spin" />
   }
+}
+
+function ToolNameIcon({ toolName }: { toolName: string }) {
+  if (toolName.startsWith('mcp__')) return <Plug size={14} className="text-violet-400" />
+  switch (toolName) {
+    case 'Read': return <Eye size={14} className="text-blue-400" />
+    case 'Edit': return <Pencil size={14} className="text-amber-400" />
+    case 'Write': return <FileText size={14} className="text-green-400" />
+    case 'Bash': return <Terminal size={14} className="text-emerald-400" />
+    case 'Grep':
+    case 'Glob': return <Search size={14} className="text-cyan-400" />
+    case 'Agent': return <Bot size={14} className="text-cyan-400" />
+    case 'WebFetch': return <Globe size={14} className="text-blue-400" />
+    case 'TodoWrite': return <ListTodo size={14} className="text-orange-400" />
+    case 'user_prompt': return <MessageSquare size={14} className="text-cyan-400" />
+    case 'hook_event': return <Zap size={14} className="text-yellow-400" />
+    default: return <Wrench size={14} className="text-amber-400" />
+  }
+}
+
+function toolNameLabel(step: StepResponse): string {
+  if (step.tool_name) {
+    if (step.tool_name === 'user_prompt') return 'User Prompt'
+    if (step.tool_name === 'hook_event') return 'Hook Event'
+    if (step.tool_name.startsWith('mcp__')) return step.tool_name
+    return step.tool_name
+  }
+  return step.step_type_label
 }

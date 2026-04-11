@@ -43,6 +43,9 @@ dist/
 # To-do / internal notes
 /to-do/
 
+# Private docs (RFCs, reviews, research)
+/my-docs/
+
 # Internal product summary (not public)
 /docs/PRODUCT-SUMMARY.md
 

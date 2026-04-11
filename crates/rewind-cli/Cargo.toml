@@ -24,6 +24,7 @@ colored = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+reqwest = { workspace = true }
 flate2 = "1"
 tar = "0.4"
 walkdir = "2"
