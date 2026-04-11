@@ -63,12 +63,18 @@ pub struct HookIngestionState {
     dedup_cache: Mutex<HashMap<u64, Instant>>,
 }
 
-impl HookIngestionState {
-    pub fn new() -> Self {
-        HookIngestionState {
+impl Default for HookIngestionState {
+    fn default() -> Self {
+        Self {
             sessions: DashMap::new(),
             dedup_cache: Mutex::new(HashMap::new()),
         }
+    }
+}
+
+impl HookIngestionState {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Rehydrate in-memory state from the database on server startup.
@@ -152,10 +158,10 @@ impl HookIngestionState {
             cache.retain(|_, ts| now.duration_since(*ts).as_secs() < 60);
         }
 
-        if let Some(ts) = cache.get(&hash_key) {
-            if now.duration_since(*ts).as_secs() < 60 {
-                return true;
-            }
+        if let Some(ts) = cache.get(&hash_key)
+            && now.duration_since(*ts).as_secs() < 60
+        {
+            return true;
         }
         cache.insert(hash_key, now);
         false
@@ -272,19 +278,16 @@ fn ensure_session(state: &AppState, claude_session_id: &str, cwd: Option<&str>, 
     // Fast path: session already exists in memory
     if state.hooks.sessions.contains_key(claude_session_id) {
         // Backfill transcript_path if missing (sessions created before this feature)
-        if let Some(tp) = transcript_path {
-            if let Some(sess_state) = state.hooks.sessions.get(claude_session_id) {
-                if let Ok(store) = state.store.lock() {
-                    if let Ok(Some(session)) = store.get_session(&sess_state.session_id) {
-                        if session.metadata.get("transcript_path").is_none() {
-                            let mut meta = session.metadata.clone();
-                            meta["transcript_path"] = serde_json::json!(tp);
-                            let _ = store.update_session_metadata(&sess_state.session_id, &meta);
-                            tracing::info!("Backfilled transcript_path for session {}", &claude_session_id[..8.min(claude_session_id.len())]);
-                        }
-                    }
-                }
-            }
+        if let Some(tp) = transcript_path
+            && let Some(sess_state) = state.hooks.sessions.get(claude_session_id)
+            && let Ok(store) = state.store.lock()
+            && let Ok(Some(session)) = store.get_session(&sess_state.session_id)
+            && session.metadata.get("transcript_path").is_none()
+        {
+            let mut meta = session.metadata.clone();
+            meta["transcript_path"] = serde_json::json!(tp);
+            let _ = store.update_session_metadata(&sess_state.session_id, &meta);
+            tracing::info!("Backfilled transcript_path for session {}", &claude_session_id[..8.min(claude_session_id.len())]);
         }
         return Ok(());
     }

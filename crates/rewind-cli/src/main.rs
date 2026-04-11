@@ -2310,12 +2310,11 @@ fn cmd_hooks_uninstall() -> Result<()> {
         let mut removed_count = 0u32;
 
         for event_type in HOOK_EVENT_TYPES {
-            if let Some(existing) = hooks_obj.get_mut(*event_type) {
-                if let Some(arr) = existing.as_array_mut() {
-                    let before = arr.len();
-                    arr.retain(|entry| !is_rewind_hook(entry));
-                    removed_count += (before - arr.len()) as u32;
-                }
+            if let Some(existing) = hooks_obj.get_mut(*event_type)
+                && let Some(arr) = existing.as_array_mut() {
+                let before = arr.len();
+                arr.retain(|entry| !is_rewind_hook(entry));
+                removed_count += (before - arr.len()) as u32;
             }
         }
 
@@ -2361,10 +2360,9 @@ async fn cmd_hooks_status(port: u16) -> Result<()> {
     let hooks_installed = if let Some(hooks_obj) = settings.get("hooks").and_then(|h| h.as_object()) {
         let mut installed_events = Vec::new();
         for event_type in HOOK_EVENT_TYPES {
-            if let Some(arr) = hooks_obj.get(*event_type).and_then(|v| v.as_array()) {
-                if arr.iter().any(|entry| is_rewind_hook(entry)) {
-                    installed_events.push(*event_type);
-                }
+            if let Some(arr) = hooks_obj.get(*event_type).and_then(|v| v.as_array())
+                && arr.iter().any(is_rewind_hook) {
+                installed_events.push(*event_type);
             }
         }
         if installed_events.is_empty() {
@@ -2400,10 +2398,7 @@ async fn cmd_hooks_status(port: u16) -> Result<()> {
         .build()
     {
         Ok(client) => {
-            match client.get(&server_url).send().await {
-                Ok(resp) if resp.status().is_success() => true,
-                _ => false,
-            }
+            matches!(client.get(&server_url).send().await, Ok(resp) if resp.status().is_success())
         }
         Err(_) => false,
     };
