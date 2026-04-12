@@ -47,7 +47,9 @@ def init(mode: str = "direct", proxy_url: str = None, session_name: str = "defau
     if mode == "direct":
         _init_direct(session_name, auto_patch)
     else:
-        _init_proxy(proxy_url, auto_patch)
+        fell_through = _init_proxy(proxy_url, auto_patch, session_name)
+        if fell_through:
+            _mode = "direct"
 
     _initialized = True
     atexit.register(_atexit_cleanup)
@@ -285,28 +287,32 @@ def _proxy_is_healthy(url: str, timeout: float = 0.5) -> bool:
     latency when the proxy is up. When genuinely down, blocks for up to 0.5s
     at init time — acceptable tradeoff for preventing broken LLM calls.
     """
+    import json
     import urllib.request
-    import urllib.error
     try:
         req = urllib.request.Request(f"{url}/_rewind/health", method="GET")
         resp = urllib.request.urlopen(req, timeout=timeout)
-        return resp.status == 200
+        if resp.status != 200:
+            return False
+        body = json.loads(resp.read())
+        return body.get("status") == "ok"
     except Exception:
         return False
 
 
-def _init_proxy(proxy_url: str, auto_patch: bool):
+def _init_proxy(proxy_url: str, auto_patch: bool, session_name: str = "default") -> bool:
     """Initialize proxy recording mode with health-check fallthrough.
 
     If the proxy is unreachable, falls back to direct mode with a warning
     instead of silently breaking all LLM calls.
+
+    Returns True if fell through to direct mode, False if proxy mode succeeded.
     """
     global _original_base_url, _original_anthropic_base_url
 
     url = proxy_url or REWIND_PROXY_URL
 
     if not _proxy_is_healthy(url):
-        global _mode
         import logging
         logging.getLogger("rewind").warning(
             "Rewind proxy not reachable at %s. "
@@ -314,9 +320,8 @@ def _init_proxy(proxy_url: str, auto_patch: bool):
             "Start the proxy with: rewind record",
             url,
         )
-        _mode = "direct"
-        _init_direct("default", auto_patch)
-        return
+        _init_direct(session_name, auto_patch)
+        return True
 
     # Store originals for both providers so uninit() can restore them
     _original_base_url = os.environ.get("OPENAI_BASE_URL")
@@ -329,6 +334,7 @@ def _init_proxy(proxy_url: str, auto_patch: bool):
         _patch_existing_clients(url)
 
     _print_proxy_banner(url)
+    return False
 
 
 def _atexit_cleanup():

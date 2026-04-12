@@ -184,10 +184,11 @@ async fn handle_request(
     let path = req.uri().path().to_string();
 
     // ── Health check endpoint — no DB access, <1ms ──
-    if path == "/_rewind/health" {
+    if path == "/_rewind/health" && method == hyper::Method::GET {
         let step_count = *state.step_counter.lock().unwrap();
         let body = serde_json::json!({
             "status": "ok",
+            "version": env!("CARGO_PKG_VERSION"),
             "session": state.session_id,
             "steps": step_count,
         });

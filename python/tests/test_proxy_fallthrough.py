@@ -4,15 +4,15 @@ import json
 import os
 import tempfile
 import threading
+import time
 import unittest
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from unittest.mock import patch
 
 from rewind_agent.patch import (
     _proxy_is_healthy,
     _init_proxy,
+    init,
     uninit,
-    _mode,
 )
 import rewind_agent.patch as patch_module
 
@@ -44,6 +44,37 @@ class MockHealthHandler(BaseHTTPRequestHandler):
         pass  # suppress logs in test output
 
 
+class SlowHealthHandler(BaseHTTPRequestHandler):
+    """Responds to /_rewind/health after a 2-second delay (exceeds timeout)."""
+
+    def do_GET(self):
+        time.sleep(2)
+        body = json.dumps({"status": "ok"}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        pass
+
+
+class NonRewindHandler(BaseHTTPRequestHandler):
+    """Returns 200 but with a non-Rewind JSON body (missing "status": "ok")."""
+
+    def do_GET(self):
+        body = json.dumps({"service": "something-else"}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        pass
+
+
 class TestProxyIsHealthy(unittest.TestCase):
     """Test the _proxy_is_healthy() health check function."""
 
@@ -62,6 +93,32 @@ class TestProxyIsHealthy(unittest.TestCase):
         try:
             result = _proxy_is_healthy(f"http://127.0.0.1:{port}", timeout=1.0)
             self.assertTrue(result)
+        finally:
+            server.server_close()
+            t.join(timeout=2)
+
+    def test_slow_server_returns_false(self):
+        """When proxy responds slower than timeout, health check returns False."""
+        port = _find_free_port()
+        server = HTTPServer(("127.0.0.1", port), SlowHealthHandler)
+        t = threading.Thread(target=server.handle_request, daemon=True)
+        t.start()
+        try:
+            result = _proxy_is_healthy(f"http://127.0.0.1:{port}", timeout=0.3)
+            self.assertFalse(result)
+        finally:
+            server.server_close()
+            t.join(timeout=3)
+
+    def test_non_rewind_server_returns_false(self):
+        """When a non-Rewind service returns 200 but wrong body, returns False."""
+        port = _find_free_port()
+        server = HTTPServer(("127.0.0.1", port), NonRewindHandler)
+        t = threading.Thread(target=server.handle_request, daemon=True)
+        t.start()
+        try:
+            result = _proxy_is_healthy(f"http://127.0.0.1:{port}", timeout=1.0)
+            self.assertFalse(result)
         finally:
             server.server_close()
             t.join(timeout=2)
@@ -109,10 +166,9 @@ class TestInitProxyFallthrough(unittest.TestCase):
     def test_fallthrough_to_direct_when_proxy_down(self):
         """When proxy is unreachable, _init_proxy falls back to direct mode."""
         port = _find_free_port()
-        _init_proxy(f"http://127.0.0.1:{port}", auto_patch=True)
+        fell_through = _init_proxy(f"http://127.0.0.1:{port}", auto_patch=True)
 
-        # Mode should be switched to direct
-        self.assertEqual(patch_module._mode, "direct")
+        self.assertTrue(fell_through)
         # Recorder should be created (direct mode creates one)
         self.assertIsNotNone(patch_module._recorder)
         # Store should be created
@@ -120,9 +176,27 @@ class TestInitProxyFallthrough(unittest.TestCase):
         # OPENAI_BASE_URL should NOT point to the dead proxy
         openai_url = os.environ.get("OPENAI_BASE_URL")
         self.assertTrue(
-            openai_url is None or "127.0.0.1" not in openai_url or str(port) not in openai_url,
+            openai_url is None or str(port) not in openai_url,
             f"OPENAI_BASE_URL should not point to dead proxy, got: {openai_url}"
         )
+
+    def test_fallthrough_preserves_session_name(self):
+        """When falling through, the session is created with the caller's name, not 'default'."""
+        port = _find_free_port()
+        _init_proxy(f"http://127.0.0.1:{port}", auto_patch=True, session_name="my-agent")
+
+        # The session should be named "my-agent", not "default"
+        store = patch_module._store
+        session = store.get_session(patch_module._session_id)
+        self.assertEqual(session["name"], "my-agent")
+
+    def test_init_fallthrough_sets_mode_to_direct(self):
+        """init(mode='proxy') with no proxy switches _mode to 'direct'."""
+        port = _find_free_port()
+        init(mode="proxy", proxy_url=f"http://127.0.0.1:{port}", session_name="test")
+
+        self.assertEqual(patch_module._mode, "direct")
+        self.assertTrue(patch_module._initialized)
 
     def test_proxy_mode_when_proxy_up(self):
         """When proxy is healthy, _init_proxy sets up proxy mode normally."""
@@ -131,9 +205,9 @@ class TestInitProxyFallthrough(unittest.TestCase):
         t = threading.Thread(target=server.handle_request, daemon=True)
         t.start()
         try:
-            _init_proxy(f"http://127.0.0.1:{port}", auto_patch=False)
+            fell_through = _init_proxy(f"http://127.0.0.1:{port}", auto_patch=False)
 
-            # Mode should still be proxy (set by caller, not changed by _init_proxy)
+            self.assertFalse(fell_through)
             # ENV should point to proxy
             self.assertEqual(
                 os.environ.get("OPENAI_BASE_URL"),
@@ -149,7 +223,6 @@ class TestInitProxyFallthrough(unittest.TestCase):
 
     def test_env_vars_not_corrupted_on_fallthrough(self):
         """Both OPENAI_BASE_URL and ANTHROPIC_BASE_URL are clean after fallthrough."""
-        # Set original values
         os.environ["OPENAI_BASE_URL"] = "https://api.openai.com/v1"
         os.environ["ANTHROPIC_BASE_URL"] = "https://api.anthropic.com"
 
@@ -159,6 +232,28 @@ class TestInitProxyFallthrough(unittest.TestCase):
         # Original values should be preserved (not overwritten by proxy)
         self.assertEqual(os.environ.get("OPENAI_BASE_URL"), "https://api.openai.com/v1")
         self.assertEqual(os.environ.get("ANTHROPIC_BASE_URL"), "https://api.anthropic.com")
+
+    def test_uninit_after_fallthrough_cleans_up(self):
+        """uninit() correctly tears down direct mode after a proxy fallthrough."""
+        port = _find_free_port()
+        # Simulate init(mode="proxy") with dead proxy
+        patch_module._mode = "proxy"
+        fell_through = _init_proxy(f"http://127.0.0.1:{port}", auto_patch=True)
+        if fell_through:
+            patch_module._mode = "direct"
+        patch_module._initialized = True
+
+        # Verify we're in direct mode with a recorder
+        self.assertIsNotNone(patch_module._recorder)
+        self.assertIsNotNone(patch_module._store)
+
+        # uninit should clean up direct mode state
+        uninit()
+
+        self.assertFalse(patch_module._initialized)
+        self.assertIsNone(patch_module._mode)
+        self.assertIsNone(patch_module._recorder)
+        self.assertIsNone(patch_module._store)
 
 
 if __name__ == "__main__":
