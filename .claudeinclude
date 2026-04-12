@@ -1,0 +1,4 @@
+# Include gitignored paths for Claude Code search tools
+research/
+my-docs/
+tests/

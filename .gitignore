@@ -43,11 +43,17 @@ dist/
 # To-do / internal notes
 /to-do/
 
+# Bug tracker (local, not public)
+/bugs/
+
 # Private docs (RFCs, reviews, research)
 /my-docs/
 
 # Internal product summary (not public)
 /docs/PRODUCT-SUMMARY.md
+
+# E2E tests (local, requires API keys)
+/tests/
 
 # Asset build tooling (cast files, recording scripts, generators)
 /assets/dev/
