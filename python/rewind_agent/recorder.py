@@ -331,6 +331,90 @@ class _AsyncAnthropicStreamWrapper:
         _AnthropicStreamWrapper._finalize(self)
 
 
+class _AnthropicStreamManagerWrapper:
+    """Wraps a MessageStreamManager returned by client.messages.stream().
+    Records the LLM call when the context manager exits."""
+
+    def __init__(self, manager, recorder, model, request_data, start_time):
+        self._manager = manager
+        self._recorder = recorder
+        self._model = model
+        self._request_data = request_data
+        self._start_time = start_time
+        self._stream = None
+
+    def __enter__(self):
+        self._stream = self._manager.__enter__()
+        return self._stream
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        result = self._manager.__exit__(exc_type, exc_val, exc_tb)
+        duration_ms = int((time.perf_counter() - self._start_time) * 1000)
+
+        if exc_val:
+            self._recorder._record_call(
+                self._model, self._request_data, None,
+                duration_ms, error=str(exc_val), provider="anthropic",
+            )
+        elif self._stream:
+            try:
+                final = getattr(self._stream, "get_final_message", None)
+                if final:
+                    msg = final()
+                    resp_dict = msg.model_dump() if hasattr(msg, "model_dump") else {}
+                else:
+                    resp_dict = {}
+            except Exception:
+                resp_dict = {}
+            self._recorder._record_call(
+                self._model, self._request_data, resp_dict,
+                duration_ms, provider="anthropic",
+            )
+        return result
+
+
+class _AsyncAnthropicStreamManagerWrapper:
+    """Wraps an AsyncMessageStreamManager returned by client.messages.stream().
+    Records the LLM call when the async context manager exits."""
+
+    def __init__(self, manager, recorder, model, request_data, start_time):
+        self._manager = manager
+        self._recorder = recorder
+        self._model = model
+        self._request_data = request_data
+        self._start_time = start_time
+        self._stream = None
+
+    async def __aenter__(self):
+        self._stream = await self._manager.__aenter__()
+        return self._stream
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        result = await self._manager.__aexit__(exc_type, exc_val, exc_tb)
+        duration_ms = int((time.perf_counter() - self._start_time) * 1000)
+
+        if exc_val:
+            self._recorder._record_call(
+                self._model, self._request_data, None,
+                duration_ms, error=str(exc_val), provider="anthropic",
+            )
+        elif self._stream:
+            try:
+                final = getattr(self._stream, "get_final_message", None)
+                if final:
+                    msg = final()
+                    resp_dict = msg.model_dump() if hasattr(msg, "model_dump") else {}
+                else:
+                    resp_dict = {}
+            except Exception:
+                resp_dict = {}
+            self._recorder._record_call(
+                self._model, self._request_data, resp_dict,
+                duration_ms, provider="anthropic",
+            )
+        return result
+
+
 # ── Recorder ──────────────────────────────────────────────────
 
 class Recorder:
@@ -359,6 +443,8 @@ class Recorder:
         self._patch_openai_async()
         self._patch_anthropic_sync()
         self._patch_anthropic_async()
+        self._patch_anthropic_stream_sync()
+        self._patch_anthropic_stream_async()
 
     def next_step_number(self) -> int:
         """Atomically increment and return the next step number."""
@@ -581,6 +667,70 @@ class Recorder:
 
         AsyncMessages.create = patched
         self._originals["anthropic_async"] = (AsyncMessages, "create", original)
+
+    # ── Anthropic .stream() — separate from .create(stream=True) ──
+
+    def _patch_anthropic_stream_sync(self):
+        try:
+            from anthropic.resources.messages import Messages
+        except ImportError:
+            return
+
+        if not hasattr(Messages, "stream"):
+            return
+
+        original = Messages.stream
+        recorder = self
+
+        @functools.wraps(original)
+        def patched(messages_self, *args, **kwargs):
+            request_data = _serialize_request(kwargs)
+            model = kwargs.get("model", "unknown")
+            start = time.perf_counter()
+
+            try:
+                manager = original(messages_self, *args, **kwargs)
+                return _AnthropicStreamManagerWrapper(
+                    manager, recorder, model, request_data, start,
+                )
+            except Exception as e:
+                duration_ms = int((time.perf_counter() - start) * 1000)
+                recorder._record_call(model, request_data, None, duration_ms, error=str(e), provider="anthropic")
+                raise
+
+        Messages.stream = patched
+        self._originals["anthropic_stream_sync"] = (Messages, "stream", original)
+
+    def _patch_anthropic_stream_async(self):
+        try:
+            from anthropic.resources.messages import AsyncMessages
+        except ImportError:
+            return
+
+        if not hasattr(AsyncMessages, "stream"):
+            return
+
+        original = AsyncMessages.stream
+        recorder = self
+
+        @functools.wraps(original)
+        def patched(messages_self, *args, **kwargs):
+            request_data = _serialize_request(kwargs)
+            model = kwargs.get("model", "unknown")
+            start = time.perf_counter()
+
+            try:
+                manager = original(messages_self, *args, **kwargs)
+                return _AsyncAnthropicStreamManagerWrapper(
+                    manager, recorder, model, request_data, start,
+                )
+            except Exception as e:
+                duration_ms = int((time.perf_counter() - start) * 1000)
+                recorder._record_call(model, request_data, None, duration_ms, error=str(e), provider="anthropic")
+                raise
+
+        AsyncMessages.stream = patched
+        self._originals["anthropic_stream_async"] = (AsyncMessages, "stream", original)
 
     # ── Core recording ────────────────────────────────────────
 

@@ -421,6 +421,23 @@ class TestMonkeyPatching(unittest.TestCase):
         except ImportError:
             self.skipTest("openai not installed")
 
+    def test_anthropic_stream_patched(self):
+        """Bug 4 fix: Messages.stream should be patched alongside Messages.create."""
+        try:
+            from anthropic.resources.messages import Messages
+        except ImportError:
+            self.skipTest("anthropic not installed")
+
+        if not hasattr(Messages, "stream"):
+            self.skipTest("Messages.stream not available")
+
+        original = Messages.stream
+        self.recorder.patch_all()
+        self.assertIn("anthropic_stream_sync", self.recorder._originals)
+        self.assertNotEqual(Messages.stream, original, "stream() should be patched")
+        self.recorder.unpatch_all()
+        self.assertEqual(Messages.stream, original, "stream() should be unpatched")
+
     def test_openai_patches_preserved_with_agents_sdk(self):
         """Bug 1 fix: OpenAI patches should NOT be removed when Agents SDK is installed."""
         try:
