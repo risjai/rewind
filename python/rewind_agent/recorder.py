@@ -79,6 +79,20 @@ def _has_tool_calls_anthropic(response_dict: dict) -> bool:
     return any(block.get("type") == "tool_use" for block in content if isinstance(block, dict))
 
 
+# ── Span context bridge ──────────────────────────────────────
+
+_current_span_id_ref = None
+
+
+def _get_current_span_id():
+    """Resolve the enclosing span_id from hooks.py ContextVar (cached import)."""
+    global _current_span_id_ref
+    if _current_span_id_ref is None:
+        from .hooks import _current_span_id
+        _current_span_id_ref = _current_span_id
+    return _current_span_id_ref.get()
+
+
 # ── Streaming wrappers ────────────────────────────────────────
 
 class _OpenAIStreamWrapper:
@@ -346,6 +360,12 @@ class Recorder:
         self._patch_anthropic_sync()
         self._patch_anthropic_async()
 
+    def next_step_number(self) -> int:
+        """Atomically increment and return the next step number."""
+        with self._lock:
+            self._step_counter += 1
+            return self._step_counter
+
     def unpatch_all(self):
         """Restore all original methods."""
         for key, (cls, method_name, original) in self._originals.items():
@@ -357,7 +377,11 @@ class Recorder:
     def _try_replay_cached(self, provider: str):
         """
         Check if the next step should be served from cache (fork-and-execute mode).
-        Returns a fake SDK response object if cached, or None if live call needed.
+        Returns the cached response dict if within replay range, or None for live calls.
+
+        Does NOT create step records — the forked timeline inherits parent steps
+        via get_full_timeline_steps(). Only the step counter is advanced so that
+        live calls after the fork point get correct step numbers.
         """
         if self._replay_steps is None or self._fork_at_step is None:
             return None
@@ -367,7 +391,6 @@ class Recorder:
             if next_step > self._fork_at_step:
                 return None
 
-            # Find parent step
             parent = None
             for s in self._replay_steps:
                 if s["step_number"] == next_step:
@@ -376,34 +399,14 @@ class Recorder:
             if parent is None:
                 return None
 
-            # Load cached response from blob store
             resp_bytes = self._store.blobs.get(parent["response_blob"])
             resp_data = json.loads(resp_bytes)
 
-            # Record the replayed step
             self._step_counter += 1
-            step_number = self._step_counter
-
-            req_hash = self._store.blobs.put_json({"_replay": True, "step": step_number})
-            self._store.create_step(
-                session_id=self._session_id,
-                timeline_id=self._timeline_id,
-                step_number=step_number,
-                step_type=parent.get("step_type", "llm_call"),
-                status=parent.get("status", "success"),
-                model=parent.get("model", "unknown"),
-                duration_ms=0,
-                tokens_in=parent.get("tokens_in", 0),
-                tokens_out=parent.get("tokens_out", 0),
-                request_blob=req_hash,
-                response_blob=parent["response_blob"],
-                error=None,
-            )
-            self._store.update_session_stats(self._session_id, step_number, 0)
 
             logger.info(
                 "Rewind: fork replay — served cached step %d/%d (0ms, 0 tokens)",
-                step_number, self._fork_at_step,
+                self._step_counter, self._fork_at_step,
             )
 
             return resp_data
@@ -592,11 +595,9 @@ class Recorder:
     ):
         """Record an LLM call as a step. Thread-safe. Never raises."""
         try:
-            # Determine status and step type
             status = "error" if error else "success"
             step_type = "llm_call"
 
-            # Extract tokens
             tokens_in, tokens_out = 0, 0
             if response_data:
                 if provider == "anthropic":
@@ -604,11 +605,15 @@ class Recorder:
                 else:
                     tokens_in, tokens_out = _extract_openai_usage(response_data)
 
-            # Store blobs
             req_hash = self._store.blobs.put_json(request_data)
             resp_hash = self._store.blobs.put_json(response_data or {"error": error or "unknown"})
 
-            # Atomic: increment counter + write step + update stats
+            span_id = None
+            try:
+                span_id = _get_current_span_id()
+            except Exception:
+                logger.debug("Rewind: could not resolve span_id", exc_info=True)
+
             with self._lock:
                 self._step_counter += 1
                 step_number = self._step_counter
@@ -626,6 +631,7 @@ class Recorder:
                     request_blob=req_hash,
                     response_blob=resp_hash,
                     error=error,
+                    span_id=span_id,
                 )
                 self._store.update_session_stats(
                     self._session_id, step_number, tokens_in + tokens_out,

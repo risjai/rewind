@@ -196,32 +196,11 @@ class RewindTracingProcessor(_TracingProcessorBase):
             self._record_handoff(span_data, duration_ms, error_msg, rewind_span_id)
 
     def _record_generation(self, span_data, duration_ms, error, span_id):
-        """Record an LLM generation as a Rewind step linked to its parent span."""
-        model = getattr(span_data, "model", "unknown") or "unknown"
-        usage = getattr(span_data, "usage", None) or {}
-        input_tokens = usage.get("input_tokens", 0) or 0
-        output_tokens = usage.get("output_tokens", 0) or 0
-
-        model_config = getattr(span_data, "model_config", None)
-        request_data = {"model": model}
-        if model_config:
-            request_data["model_config"] = _safe_json(model_config)
-        input_data = getattr(span_data, "input", None)
-        if input_data is not None:
-            request_data["input"] = _safe_json(input_data)
-
-        response_data = {}
-        output_data = getattr(span_data, "output", None)
-        if output_data is not None:
-            response_data["output"] = _safe_json(output_data)
-        response_data["usage"] = {"input_tokens": input_tokens, "output_tokens": output_tokens}
-
-        self._write_step(
-            step_type="llm_call", model=model, duration_ms=duration_ms,
-            tokens_in=input_tokens, tokens_out=output_tokens,
-            request_data=request_data, response_data=response_data,
-            error=error, span_id=span_id,
-        )
+        """LLM calls are recorded by the OpenAI SDK monkey-patches; the
+        TracingProcessor only handles span creation (on_span_start/end).
+        Skipping step creation here avoids duplicate recordings when both
+        the Agents SDK Runner and raw openai.OpenAI() calls are used."""
+        pass
 
     def _record_function(self, span_data, duration_ms, error, span_id):
         """Record a tool/function call as a Rewind step linked to its span."""
@@ -256,15 +235,20 @@ class RewindTracingProcessor(_TracingProcessorBase):
 
     def _write_step(self, step_type, model, duration_ms, tokens_in, tokens_out,
                      request_data, response_data, error, span_id=None):
-        """Write a step to the Rewind store, optionally linked to a span."""
+        """Write a step to the Rewind store, optionally linked to a span.
+        Uses the Recorder's step counter when available to avoid conflicts."""
         status = "error" if error else "success"
         req_hash = self._store.blobs.put_json(request_data)
         resp_hash = self._store.blobs.put_json(response_data if not error else {"error": error})
 
-        with self._lock:
-            self._step_counter += 1
-            step_number = self._step_counter
+        if self._recorder:
+            step_number = self._recorder.next_step_number()
+        else:
+            with self._lock:
+                self._step_counter += 1
+                step_number = self._step_counter
 
+        with self._lock:
             self._store.create_step(
                 session_id=self._session_id,
                 timeline_id=self._timeline_id,

@@ -254,6 +254,150 @@ class TestStreamWrapper(unittest.TestCase):
         conn.close()
 
 
+class TestReplayCached(unittest.TestCase):
+    """Bug 2 fix: _try_replay_cached should NOT create step records."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.store = Store(root=self.tmpdir)
+        sid, tid = self.store.create_session("replay-test")
+        self.session_id = sid
+        self.timeline_id = tid
+
+        # Record 3 steps on the main timeline
+        for i in range(1, 4):
+            req = self.store.blobs.put_json({"call": i})
+            resp = self.store.blobs.put_json({"result": f"response-{i}"})
+            self.store.create_step(
+                session_id=sid, timeline_id=tid, step_number=i,
+                step_type="llm_call", status="success", model="gpt-4o",
+                duration_ms=100, tokens_in=10, tokens_out=5,
+                request_blob=req, response_blob=resp, error=None,
+            )
+
+        parent_steps = self.store.get_steps(tid)
+        # Create fork timeline
+        fork_tid = self.store.create_fork_timeline(sid, tid, 2, "replayed")
+        self.fork_tid = fork_tid
+
+        self.recorder = Recorder(
+            self.store, sid, fork_tid,
+            replay_steps=parent_steps, fork_at_step=2,
+        )
+
+    def tearDown(self):
+        self.store.close()
+
+    def test_cached_replay_does_not_create_steps(self):
+        """Cached replay should return data but not create step records."""
+        result = self.recorder._try_replay_cached("openai")
+        self.assertIsNotNone(result, "Should return cached response")
+        self.assertEqual(result["result"], "response-1")
+
+        conn = sqlite3.connect(os.path.join(self.tmpdir, "rewind.db"))
+        fork_steps = conn.execute(
+            "SELECT count(*) FROM steps WHERE timeline_id = ?",
+            (self.fork_tid,),
+        ).fetchone()[0]
+        self.assertEqual(fork_steps, 0, "No steps should be created on the fork timeline for cached replays")
+        conn.close()
+
+    def test_cached_replay_advances_counter(self):
+        """Step counter should advance even without creating records."""
+        self.assertEqual(self.recorder._step_counter, 0)
+        self.recorder._try_replay_cached("openai")
+        self.assertEqual(self.recorder._step_counter, 1)
+        self.recorder._try_replay_cached("openai")
+        self.assertEqual(self.recorder._step_counter, 2)
+
+    def test_live_step_after_cache_gets_correct_number(self):
+        """After 2 cached replays, the next live step should be step 3."""
+        self.recorder._try_replay_cached("openai")
+        self.recorder._try_replay_cached("openai")
+
+        # Beyond fork point — returns None
+        self.assertIsNone(self.recorder._try_replay_cached("openai"))
+
+        # Record a live step
+        self.recorder._record_call(
+            model="gpt-4o", request_data={"live": True},
+            response_data={"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 3}},
+            duration_ms=50, provider="openai",
+        )
+
+        conn = sqlite3.connect(os.path.join(self.tmpdir, "rewind.db"))
+        row = conn.execute(
+            "SELECT step_number FROM steps WHERE timeline_id = ?",
+            (self.fork_tid,),
+        ).fetchone()
+        self.assertEqual(row[0], 3, "Live step after 2 cached should be step 3")
+        conn.close()
+
+
+class TestSpanIdAssignment(unittest.TestCase):
+    """Bug 3 fix: _record_call should assign span_id from the ContextVar."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.store = Store(root=self.tmpdir)
+        sid, tid = self.store.create_session("span-test")
+        self.session_id = sid
+        self.timeline_id = tid
+        self.recorder = Recorder(self.store, sid, tid)
+
+    def tearDown(self):
+        self.store.close()
+
+    def test_record_call_picks_up_span_id(self):
+        """When _current_span_id is set, _record_call should use it."""
+        from rewind_agent.hooks import _current_span_id
+
+        span_id = self.store.create_span(
+            session_id=self.session_id,
+            timeline_id=self.timeline_id,
+            span_type="agent",
+            name="test-agent",
+        )
+
+        token = _current_span_id.set(span_id)
+        try:
+            self.recorder._record_call(
+                model="gpt-4o",
+                request_data={"model": "gpt-4o"},
+                response_data={"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 3}},
+                duration_ms=100,
+                provider="openai",
+            )
+        finally:
+            _current_span_id.reset(token)
+
+        conn = sqlite3.connect(os.path.join(self.tmpdir, "rewind.db"))
+        row = conn.execute(
+            "SELECT span_id FROM steps WHERE session_id = ?",
+            (self.session_id,),
+        ).fetchone()
+        self.assertEqual(row[0], span_id, "Step should have the span_id from ContextVar")
+        conn.close()
+
+    def test_record_call_without_span_has_null(self):
+        """When no span is active, span_id should be NULL."""
+        self.recorder._record_call(
+            model="gpt-4o",
+            request_data={"model": "gpt-4o"},
+            response_data={"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 3}},
+            duration_ms=100,
+            provider="openai",
+        )
+
+        conn = sqlite3.connect(os.path.join(self.tmpdir, "rewind.db"))
+        row = conn.execute(
+            "SELECT span_id FROM steps WHERE session_id = ?",
+            (self.session_id,),
+        ).fetchone()
+        self.assertIsNone(row[0], "Step without active span should have NULL span_id")
+        conn.close()
+
+
 class TestMonkeyPatching(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
@@ -276,6 +420,19 @@ class TestMonkeyPatching(unittest.TestCase):
             self.assertEqual(Completions.create, original)
         except ImportError:
             self.skipTest("openai not installed")
+
+    def test_openai_patches_preserved_with_agents_sdk(self):
+        """Bug 1 fix: OpenAI patches should NOT be removed when Agents SDK is installed."""
+        try:
+            from openai.resources.chat.completions import Completions
+        except ImportError:
+            self.skipTest("openai not installed")
+
+        original = Completions.create
+        self.recorder.patch_all()
+        self.assertIn("openai_sync", self.recorder._originals)
+        self.assertIn("openai_async", self.recorder._originals)
+        self.assertNotEqual(Completions.create, original, "Patches should be active on the class")
 
 
 if __name__ == "__main__":
