@@ -209,6 +209,7 @@ See the [Getting Started guide](docs/getting-started.md) for more options.
 | **Framework Integrations** | Native support for OpenAI Agents SDK, Pydantic AI, LangGraph, and CrewAI. Auto-detected on `init()` — zero config for most frameworks. | [framework-integrations.md](docs/framework-integrations.md) | [09_pydantic_ai.py](examples/09_pydantic_ai.py), [10_openai_agents_sdk.py](examples/10_openai_agents_sdk.py) |
 | **Claude Code Observation** | Observe Claude Code sessions in real-time via hooks. See every tool call (Read, Edit, Bash, Grep, Agent), user prompts, and session lifecycle. Token usage extracted from transcripts. One-command setup: `rewind hooks install`. | — | — |
 | **MCP Server** | 25 tools for AI assistants (Claude Code, Cursor, Windsurf) to query recordings, view span trees, browse threads, diff timelines, create baselines, run evals — all from your IDE. | [mcp-server.md](docs/mcp-server.md) | — |
+| **OpenTelemetry Export** | Export recorded sessions as OTel traces via OTLP to Langfuse, Datadog, Grafana Tempo, Jaeger, or any OTel-compatible backend. CLI, Python SDK, and Web API. Uses `gen_ai.*` semantic conventions. Privacy-first: message content requires explicit opt-in. | [otel-export.md](docs/otel-export.md) | — |
 | **SQL Query Explorer** | Run ad-hoc SQL against the Rewind database. Token usage by model, average step duration, sessions with errors, cost estimation — read-only, safe to explore. | [sql-queries.md](docs/sql-queries.md) | — |
 | **CLI Reference** | Full command reference for all 28 CLI commands. | [cli-reference.md](docs/cli-reference.md) | — |
 
@@ -233,7 +234,8 @@ Works with any agent framework: **[OpenAI Agents SDK](https://github.com/openai/
 | **v0.4** | Evaluation system — datasets, evaluators, experiments, comparison, CI | ✅ Shipped |
 | **v0.5** | Multi-agent tracing (spans, threads, span tree UI) | ✅ Shipped |
 | **v0.6** | Claude Code hooks integration, transcript token parsing, session observation | ✅ Shipped |
-| **v0.7** | OTel export, LLM-as-judge evaluators | Planned |
+| **v0.7** | OpenTelemetry export (CLI, Python SDK, Web API, Dashboard) | ✅ Shipped |
+| **v0.8** | LLM-as-judge evaluators, custom scorer improvements | Planned |
 | **v1.0** | Rewind Cloud, shared sessions, team dashboards, live breakpoints, semantic diff | Planned |
 
 ## Why "Rewind"?
