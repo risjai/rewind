@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { X, Upload, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react'
@@ -20,6 +20,15 @@ export function ExportOtelModal({ isOpen, onClose, sessionId, timelines }: Props
   const [state, setState] = useState<ExportState>('idle')
   const [result, setResult] = useState<{ spans_exported: number; trace_id: string } | null>(null)
   const [error, setError] = useState<string>('')
+
+  // Escape key to close
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') handleClose()
+    }
+    if (isOpen) document.addEventListener('keydown', handleKey)
+    return () => document.removeEventListener('keydown', handleKey)
+  }, [isOpen])
 
   if (!isOpen) return null
 
@@ -43,7 +52,7 @@ export function ExportOtelModal({ isOpen, onClose, sessionId, timelines }: Props
       setState('success')
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Export failed'
-      if (msg.includes('501')) {
+      if (msg.startsWith('API error 501')) {
         setError('OTel export not configured. Set REWIND_OTEL_ENDPOINT on the server.')
       } else {
         setError(msg)
@@ -65,7 +74,7 @@ export function ExportOtelModal({ isOpen, onClose, sessionId, timelines }: Props
       <div className="absolute inset-0 bg-black/60" onClick={handleClose} />
 
       {/* Modal */}
-      <div className="relative bg-neutral-900 border border-neutral-700 rounded-xl shadow-2xl w-full max-w-md mx-4">
+      <div role="dialog" aria-modal="true" aria-label="Export to OpenTelemetry" className="relative bg-neutral-900 border border-neutral-700 rounded-xl shadow-2xl w-full max-w-md mx-4">
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-neutral-800">
           <div className="flex items-center gap-2">

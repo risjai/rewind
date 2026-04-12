@@ -1948,6 +1948,7 @@ dependencies = [
  "mime_guess",
  "rewind-assert",
  "rewind-eval",
+ "rewind-otel",
  "rewind-replay",
  "rewind-store",
  "rust-embed",
