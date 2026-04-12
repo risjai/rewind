@@ -64,7 +64,10 @@ export function SessionView({ sessionId }: { sessionId: string }) {
   const totalDuration = steps.reduce((sum, s) => sum + s.duration_ms, 0)
   const hasForked = (detail?.timelines.length ?? 0) > 1
   const isHook = session.source === 'hooks'
-  const isCursor = isHook && session.metadata?.hook_source === 'cursor'
+  const isCursor = isHook && (
+    session.metadata?.hook_source === 'cursor' ||
+    (typeof session.metadata?.transcript_path === 'string' && session.metadata.transcript_path.includes('/.cursor/'))
+  )
 
   return (
     <div className="flex flex-col h-full">
