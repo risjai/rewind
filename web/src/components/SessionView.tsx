@@ -7,14 +7,16 @@ import { StepDetailPanel } from './StepDetailPanel'
 import { TimelineSelector } from './TimelineSelector'
 import { SpanTree } from './SpanTree'
 import { formatTokens, formatDuration, cn } from '@/lib/utils'
-import { Radio, Clock, Layers, Zap, GitBranch, Bot, Plug } from 'lucide-react'
+import { Radio, Clock, Layers, Zap, GitBranch, Bot, Plug, Upload } from 'lucide-react'
 import { useCallback, useState } from 'react'
+import { ExportOtelModal } from './ExportOtelModal'
 import type { StepResponse } from '@/types/api'
 
 export function SessionView({ sessionId }: { sessionId: string }) {
   const { selectedStepId, selectStep, selectedTimelineId, setView } = useStore()
   const queryClient = useQueryClient()
   const [autoFollow, setAutoFollow] = useState(true)
+  const [exportOpen, setExportOpen] = useState(false)
 
   const { data: detail, isLoading: detailLoading } = useQuery({
     queryKey: ['session', sessionId],
@@ -124,6 +126,13 @@ export function SessionView({ sessionId }: { sessionId: string }) {
                 <GitBranch size={12} /> {detail!.timelines.length} timelines
               </button>
             )}
+            <button
+              onClick={() => setExportOpen(true)}
+              className="flex items-center gap-1 text-neutral-400 hover:text-cyan-300 transition-colors"
+              title="Export to OpenTelemetry"
+            >
+              <Upload size={12} /> Export
+            </button>
           </div>
         </div>
       </div>
@@ -161,6 +170,14 @@ export function SessionView({ sessionId }: { sessionId: string }) {
           )}
         </div>
       </div>
+
+      {/* OTel Export Modal */}
+      <ExportOtelModal
+        isOpen={exportOpen}
+        onClose={() => setExportOpen(false)}
+        sessionId={sessionId}
+        timelines={detail?.timelines ?? []}
+      />
     </div>
   )
 }

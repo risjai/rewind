@@ -18,6 +18,19 @@ async function get<T>(path: string): Promise<T> {
   return res.json()
 }
 
+async function post<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(`API error ${res.status}: ${text}`)
+  }
+  return res.json()
+}
+
 export const api = {
   health: () => get<{ status: string; version: string }>('/health'),
   sessions: () => get<Session[]>('/sessions'),
@@ -50,4 +63,8 @@ export const api = {
   },
   threads: () => get<ThreadSummary[]>('/threads'),
   thread: (id: string) => get<ThreadDetail>(`/threads/${id}`),
+
+  // OTel Export
+  exportOtel: (sessionId: string, opts: { include_content?: boolean; timeline_id?: string | null; all_timelines?: boolean } = {}) =>
+    post<{ spans_exported: number; trace_id: string }>(`/sessions/${sessionId}/export/otel`, opts),
 }
