@@ -110,7 +110,18 @@ impl ProxyServer {
     }
 
     pub async fn run(self, addr: SocketAddr) -> Result<()> {
-        let listener = TcpListener::bind(addr).await?;
+        let listener = TcpListener::bind(addr).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AddrInUse {
+                anyhow::anyhow!(
+                    "Port {} already in use. Another rewind instance running? \
+                     Stop it with: kill $(lsof -ti :{}) or use --port to pick a different port.",
+                    addr.port(),
+                    addr.port(),
+                )
+            } else {
+                anyhow::anyhow!("Failed to bind {}: {}", addr, e)
+            }
+        })?;
         tracing::info!("Rewind proxy listening on {}", addr);
 
         let state = ProxyState {
@@ -171,6 +182,23 @@ async fn handle_request(
 ) -> Result<Response<BoxBody>, hyper::Error> {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
+
+    // ── Health check endpoint — no DB access, <1ms ──
+    if path == "/_rewind/health" && method == hyper::Method::GET {
+        let step_count = *state.step_counter.lock().unwrap();
+        let body = serde_json::json!({
+            "status": "ok",
+            "version": env!("CARGO_PKG_VERSION"),
+            "session": state.session_id,
+            "steps": step_count,
+        });
+        let resp = Response::builder()
+            .status(200)
+            .header("content-type", "application/json")
+            .body(box_full(Bytes::from(body.to_string())))
+            .unwrap();
+        return Ok(resp);
+    }
 
     let step_number = {
         let mut counter = state.step_counter.lock().unwrap();

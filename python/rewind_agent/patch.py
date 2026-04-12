@@ -13,6 +13,7 @@ import contextlib
 import os
 
 _original_base_url = None
+_original_anthropic_base_url = None
 _initialized = False
 _mode = None
 _recorder = None
@@ -46,7 +47,9 @@ def init(mode: str = "direct", proxy_url: str = None, session_name: str = "defau
     if mode == "direct":
         _init_direct(session_name, auto_patch)
     else:
-        _init_proxy(proxy_url, auto_patch)
+        fell_through = _init_proxy(proxy_url, auto_patch, session_name)
+        if fell_through:
+            _mode = "direct"
 
     _initialized = True
     atexit.register(_atexit_cleanup)
@@ -54,7 +57,7 @@ def init(mode: str = "direct", proxy_url: str = None, session_name: str = "defau
 
 def uninit():
     """Stop recording and clean up."""
-    global _original_base_url, _initialized, _mode, _recorder, _store, _session_id
+    global _original_base_url, _original_anthropic_base_url, _initialized, _mode, _recorder, _store, _session_id
 
     if not _initialized:
         return
@@ -76,12 +79,15 @@ def uninit():
         _store = None
         _session_id = None
     else:
-        # Proxy mode cleanup
+        # Proxy mode cleanup — restore both provider base URLs
         if _original_base_url is not None:
             os.environ["OPENAI_BASE_URL"] = _original_base_url
         else:
             os.environ.pop("OPENAI_BASE_URL", None)
-        os.environ.pop("ANTHROPIC_BASE_URL", None)
+        if _original_anthropic_base_url is not None:
+            os.environ["ANTHROPIC_BASE_URL"] = _original_anthropic_base_url
+        else:
+            os.environ.pop("ANTHROPIC_BASE_URL", None)
 
     _initialized = False
     _mode = None
@@ -273,12 +279,54 @@ def _try_patch_pydantic_ai(timeline_id: str):
     PydanticAgent.__init__ = patched_init
 
 
-def _init_proxy(proxy_url: str, auto_patch: bool):
-    """Initialize proxy recording mode (existing behavior)."""
-    global _original_base_url
+def _proxy_is_healthy(url: str, timeout: float = 0.5) -> bool:
+    """
+    Quick health check — returns True if the Rewind proxy is alive.
+
+    Uses urllib.request with a 0.5s timeout. On localhost this adds negligible
+    latency when the proxy is up. When genuinely down, blocks for up to 0.5s
+    at init time — acceptable tradeoff for preventing broken LLM calls.
+    """
+    import json
+    import urllib.request
+    try:
+        req = urllib.request.Request(f"{url}/_rewind/health", method="GET")
+        resp = urllib.request.urlopen(req, timeout=timeout)
+        if resp.status != 200:
+            return False
+        body = json.loads(resp.read())
+        return body.get("status") == "ok"
+    except Exception:
+        return False
+
+
+def _init_proxy(proxy_url: str, auto_patch: bool, session_name: str = "default") -> bool:
+    """Initialize proxy recording mode with health-check fallthrough.
+
+    If the proxy is unreachable, falls back to direct mode with a warning
+    instead of silently breaking all LLM calls.
+
+    Returns True if fell through to direct mode, False if proxy mode succeeded.
+    """
+    global _original_base_url, _original_anthropic_base_url
 
     url = proxy_url or REWIND_PROXY_URL
+
+    if not _proxy_is_healthy(url):
+        import logging
+        logging.getLogger("rewind").warning(
+            "Rewind proxy not reachable at %s. "
+            "Falling back to direct recording mode. "
+            "Start the proxy with: rewind record",
+            url,
+        )
+        _init_direct(session_name, auto_patch)
+        return True
+
+    # Store originals for both providers so uninit() can restore them
     _original_base_url = os.environ.get("OPENAI_BASE_URL")
+    _original_anthropic_base_url = os.environ.get("ANTHROPIC_BASE_URL")
+
     os.environ["OPENAI_BASE_URL"] = f"{url}/v1"
     os.environ["ANTHROPIC_BASE_URL"] = f"{url}/anthropic"
 
@@ -286,6 +334,7 @@ def _init_proxy(proxy_url: str, auto_patch: bool):
         _patch_existing_clients(url)
 
     _print_proxy_banner(url)
+    return False
 
 
 def _atexit_cleanup():

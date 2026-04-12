@@ -215,6 +215,7 @@ impl WebServer {
         let ws_route = ws::routes(self.state.clone());
 
         let app = Router::new()
+            .route("/_rewind/health", axum::routing::get(rewind_health))
             .nest("/api", api_routes)
             .nest("/api/eval", eval_routes)
             .nest("/api/hooks", hook_routes)
@@ -226,4 +227,13 @@ impl WebServer {
             app.fallback(spa::static_handler)
         }
     }
+}
+
+/// Health check endpoint at `/_rewind/health` — used by the Python SDK to detect
+/// if the Rewind proxy/web server is alive before redirecting LLM traffic.
+async fn rewind_health() -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({
+        "status": "ok",
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
 }

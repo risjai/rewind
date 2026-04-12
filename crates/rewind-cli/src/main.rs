@@ -564,7 +564,13 @@ async fn cmd_record(name: String, port: u16, upstream: String, replay: bool, web
     if insecure {
         eprintln!("  {} TLS certificate verification is disabled (--insecure)", "⚠".yellow().bold());
     }
-    let store = Store::open_default()?;
+    let store = Store::open_default().map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to open Rewind store (~/.rewind/): {}. \
+             Check disk space and file permissions.",
+            e,
+        )
+    })?;
     let proxy = ProxyServer::new(store, &name, &upstream, replay, insecure)?;
 
     println!("{}", "⏪ Rewind — Recording Started".cyan().bold());
