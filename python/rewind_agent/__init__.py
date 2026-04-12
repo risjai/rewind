@@ -81,5 +81,15 @@ __all__ = [
     "contains_match",
     "regex_match",
     "tool_use_match",
+    # OTel export
+    "export_otel",
 ]
+
+
+def export_otel(session_id: str, **kwargs) -> int:
+    """Export a recorded session as OTel traces. Requires: pip install rewind-agent[otel]"""
+    from .otel_export import export_session
+    return export_session(session_id, **kwargs)
+
+
 __version__ = "0.9.2"
