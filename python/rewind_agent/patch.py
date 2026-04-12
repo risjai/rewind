@@ -21,6 +21,7 @@ _store = None
 _session_id = None
 _thread_id = None
 _thread_ordinal = 0
+_circuit_breaker = None
 
 REWIND_PROXY_URL = "http://127.0.0.1:8443"
 
@@ -57,7 +58,7 @@ def init(mode: str = "direct", proxy_url: str = None, session_name: str = "defau
 
 def uninit():
     """Stop recording and clean up."""
-    global _original_base_url, _original_anthropic_base_url, _initialized, _mode, _recorder, _store, _session_id
+    global _original_base_url, _original_anthropic_base_url, _initialized, _mode, _recorder, _store, _session_id, _circuit_breaker
 
     if not _initialized:
         return
@@ -79,7 +80,10 @@ def uninit():
         _store = None
         _session_id = None
     else:
-        # Proxy mode cleanup — restore both provider base URLs
+        # Proxy mode cleanup — teardown circuit breaker, restore base URLs
+        if _circuit_breaker:
+            _circuit_breaker.teardown()
+            _circuit_breaker = None
         if _original_base_url is not None:
             os.environ["OPENAI_BASE_URL"] = _original_base_url
         else:
@@ -332,6 +336,17 @@ def _init_proxy(proxy_url: str, auto_patch: bool, session_name: str = "default")
 
     if auto_patch:
         _patch_existing_clients(url)
+
+    # Install circuit breaker for mid-session proxy failure detection
+    global _circuit_breaker
+    from .circuit_breaker import ProxyCircuitBreaker
+    _circuit_breaker = ProxyCircuitBreaker(
+        proxy_url=url,
+        original_openai_url=_original_base_url,
+        original_anthropic_url=_original_anthropic_base_url,
+        session_name=session_name,
+    )
+    _circuit_breaker.install_patches()
 
     _print_proxy_banner(url)
     return False
