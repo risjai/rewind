@@ -15,6 +15,7 @@ rewind-tui = { path = "../rewind-tui" }
 rewind-assert = { path = "../rewind-assert" }
 rewind-eval = { path = "../rewind-eval" }
 rewind-web = { path = "../rewind-web" }
+rewind-otel = { path = "../rewind-otel" }
 tokio = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
