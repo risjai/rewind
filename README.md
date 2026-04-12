@@ -178,6 +178,8 @@ rewind show latest           # trace view
 rewind inspect latest        # interactive TUI
 ```
 
+> If the proxy is unreachable, the SDK automatically falls back to direct recording mode. Your agent never stops working. See [proxy-resilience.md](docs/proxy-resilience.md).
+
 **Claude Code** — observe sessions via plugin:
 
 ```bash
