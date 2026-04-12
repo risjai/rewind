@@ -116,10 +116,10 @@ pub fn llm_call_attributes(
             attrs.push(KeyValue::new("gen_ai.request.max_tokens", max_tok));
         }
         // Content (opt-in)
-        if include_content {
-            if let Some(messages) = req.get("messages") {
-                attrs.push(KeyValue::new("gen_ai.input.messages", messages.to_string()));
-            }
+        if include_content
+            && let Some(messages) = req.get("messages")
+        {
+            attrs.push(KeyValue::new("gen_ai.input.messages", messages.to_string()));
         }
     }
 
@@ -172,10 +172,10 @@ pub fn tool_call_attributes(step: &Step, request_blob: Option<&Value>) -> Vec<Ke
     }
 
     // Extract tool call ID and arguments from request blob
-    if let Some(req) = request_blob {
-        if let Some(id) = req.get("tool_call_id").and_then(|v| v.as_str()) {
-            attrs.push(KeyValue::new("gen_ai.tool.call.id", id.to_string()));
-        }
+    if let Some(req) = request_blob
+        && let Some(id) = req.get("tool_call_id").and_then(|v| v.as_str())
+    {
+        attrs.push(KeyValue::new("gen_ai.tool.call.id", id.to_string()));
     }
 
     attrs

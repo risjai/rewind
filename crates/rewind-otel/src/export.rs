@@ -266,10 +266,11 @@ fn emit_spans(
                     attributes::step_attributes(step, req_blob, resp_blob, config.include_content);
 
                 // Mark cached/replayed steps
-                if let Some(fork_at) = timeline.fork_at_step {
-                    if step.step_number <= fork_at && timeline.parent_timeline_id.is_some() {
-                        attrs.push(KeyValue::new("rewind.replay.cached", true));
-                    }
+                if let Some(fork_at) = timeline.fork_at_step
+                    && step.step_number <= fork_at
+                    && timeline.parent_timeline_id.is_some()
+                {
+                    attrs.push(KeyValue::new("rewind.replay.cached", true));
                 }
 
                 let step_start = to_system_time(&step.created_at);

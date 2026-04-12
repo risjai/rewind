@@ -16,21 +16,12 @@ pub struct SessionExportData {
 }
 
 /// Options controlling which timelines to extract.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ExtractOptions {
     /// Export a specific timeline by ID. None = main timeline.
     pub timeline_id: Option<String>,
     /// Export all timelines (overrides timeline_id).
     pub all_timelines: bool,
-}
-
-impl Default for ExtractOptions {
-    fn default() -> Self {
-        Self {
-            timeline_id: None,
-            all_timelines: false,
-        }
-    }
 }
 
 /// Extract all data needed for OTel export from the Store (synchronous).
