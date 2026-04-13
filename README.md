@@ -57,7 +57,8 @@ Every existing observability tool shows you **what happened**. None of them let 
 | **Replay from Failure** | Agent fails at step 5? Fix your code, run `rewind replay --from 4`. Steps 1-4 served instantly from cache (0 tokens, 0ms). Only step 5 re-runs live. Diff the result. |
 | **Instant Replay** | Identical requests are served from cache at **0 tokens, 0ms latency**. Run the same agent 10 times — only the first run hits the LLM. |
 | **Regression Testing** | Turn any session into a baseline. After code changes, check the new behavior: step types, models, tool calls, token counts. Run in CI. |
-| **Evaluation** | Create datasets of test cases, run your agent against them, score with built-in evaluators (exact match, contains, regex, JSON schema, tool use), compare experiments side-by-side. CI-ready with `--fail-below` thresholds. |
+| **Evaluation** | Create datasets of test cases, run your agent against them, score with built-in evaluators (exact match, contains, regex, JSON schema, tool use, **LLM-as-judge**), compare experiments side-by-side. CI-ready with `--fail-below` thresholds. |
+| **LLM-as-Judge** | Score agent outputs with an LLM on criteria like correctness, coherence, safety, relevance, and task completion. Compare original vs. forked timelines: `rewind replay → rewind eval score → proof the fix works`. |
 | **Multi-Agent Tracing** | See which agent made which decision. Span tree visualization groups LLM calls, tool invocations, and handoffs under their parent agent. Thread view tracks multi-turn conversations across sessions. |
 | **Snapshots** | Capture your entire workspace at any point. Restore in one command if your agent breaks something. No git dependency. |
 
@@ -122,7 +123,10 @@ rewind diff latest main fixed           # see exactly what diverged
 result = rewind_agent.evaluate(
     dataset="booking-tests",
     target_fn=my_agent,
-    evaluators=[exact_match, tool_use_match],
+    evaluators=[
+        exact_match,
+        rewind_agent.llm_judge_evaluator(criteria="correctness"),
+    ],
     fail_below=0.9,   # CI fails if score drops below 90%
 )
 # Score: 95.0%, Pass rate: 100% — ship it
@@ -203,17 +207,18 @@ See the [Getting Started guide](docs/getting-started.md) for more options.
 | **Recording** | One line to start (`init()`), or a transparent HTTP proxy for any language. Monkey-patches OpenAI + Anthropic SDKs in-process. Streaming pass-through with zero added latency. | [recording.md](docs/recording.md) | [05_direct_mode.py](examples/05_direct_mode.py) |
 | **Replay from Failure** | Agent fails at step 5? Fix your code, replay from step 4. Steps 1-4 served from cache (0 tokens, 0ms). Only the fixed step re-runs live. Diff the original vs replayed timeline. | [replay-and-forking.md](docs/replay-and-forking.md) | [06_replay_from_failure.py](examples/06_replay_from_failure.py) |
 | **Regression Testing** | Turn any recorded session into a baseline. After code changes, check step types, models, tool calls, token counts, and error status. 3-line GitHub Action for CI. | [regression-testing.md](docs/regression-testing.md) | [07_regression_testing.py](examples/07_regression_testing.py) |
-| **Evaluation** | Create datasets of test cases, run your agent against them, score with built-in evaluators (exact match, contains, regex, JSON schema, tool use), compare experiments side-by-side. CI-ready with `--fail-below` thresholds. | [evaluation.md](docs/evaluation.md) | [08_evaluation.py](examples/08_evaluation.py) |
+| **Evaluation** | Create datasets of test cases, run your agent against them, score with built-in evaluators (exact match, contains, regex, JSON schema, tool use, LLM-as-judge), compare experiments side-by-side. CI-ready with `--fail-below` thresholds. | [evaluation.md](docs/evaluation.md) | [08_evaluation.py](examples/08_evaluation.py) |
+| **LLM-as-Judge** | Score agent outputs with an LLM on correctness, coherence, safety, relevance, and task completion. Score timelines, compare original vs. forks, prove fixes work. | [evaluation.md](docs/evaluation.md) | [13_llm_judge.py](examples/13_llm_judge.py), [14_fork_and_score.py](examples/14_fork_and_score.py) |
 | **Custom Evaluators** | Define domain-specific scoring with `@evaluator()` — check keyword coverage, format compliance, or any custom logic. Plug into the same experiment/comparison pipeline. | [evaluation.md](docs/evaluation.md) | [12_custom_evaluator.py](examples/12_custom_evaluator.py) |
 | **Snapshots** | Checkpoint your entire workspace before an agent runs. If it breaks something, restore in one command. Compressed tar+gz in the blob store — no git required. | [snapshots.md](docs/snapshots.md) | [11_snapshots.sh](examples/11_snapshots.sh) |
 | **Web Dashboard** | Browser-based session explorer with step timeline, context window viewer, timeline diff, and live recording via WebSocket. Everything embedded in the single binary. | [web-ui.md](docs/web-ui.md) | — |
 | **Multi-Agent Tracing** | Hierarchical span tree for multi-agent workflows. Auto-captures agent boundaries, tool calls, and handoffs from OpenAI Agents SDK. Manual `@span()` decorator for custom grouping. Thread view for multi-turn conversations. | [multi-agent-tracing.md](docs/multi-agent-tracing.md) | — |
 | **Framework Integrations** | Native support for OpenAI Agents SDK, Pydantic AI, LangGraph, and CrewAI. Auto-detected on `init()` — zero config for most frameworks. | [framework-integrations.md](docs/framework-integrations.md) | [09_pydantic_ai.py](examples/09_pydantic_ai.py), [10_openai_agents_sdk.py](examples/10_openai_agents_sdk.py) |
 | **Claude Code Observation** | Observe Claude Code sessions in real-time via hooks. See every tool call (Read, Edit, Bash, Grep, Agent), user prompts, and session lifecycle. Token usage extracted from transcripts. One-command setup: `rewind hooks install`. | — | — |
-| **MCP Server** | 25 tools for AI assistants (Claude Code, Cursor, Windsurf) to query recordings, view span trees, browse threads, diff timelines, create baselines, run evals — all from your IDE. | [mcp-server.md](docs/mcp-server.md) | — |
+| **MCP Server** | 26 tools for AI assistants (Claude Code, Cursor, Windsurf) to query recordings, view span trees, browse threads, diff timelines, create baselines, run evals — all from your IDE. | [mcp-server.md](docs/mcp-server.md) | — |
 | **OpenTelemetry Export** | Export recorded sessions as OTel traces via OTLP to Langfuse, Datadog, Grafana Tempo, Jaeger, or any OTel-compatible backend. CLI, Python SDK, and Web API. Uses `gen_ai.*` semantic conventions. Privacy-first: message content requires explicit opt-in. | [otel-export.md](docs/otel-export.md) | — |
 | **SQL Query Explorer** | Run ad-hoc SQL against the Rewind database. Token usage by model, average step duration, sessions with errors, cost estimation — read-only, safe to explore. | [sql-queries.md](docs/sql-queries.md) | — |
-| **CLI Reference** | Full command reference for all 28 CLI commands. | [cli-reference.md](docs/cli-reference.md) | — |
+| **CLI Reference** | Full command reference for all 29 CLI commands. | [cli-reference.md](docs/cli-reference.md) | — |
 
 ## Compatibility
 
@@ -237,7 +242,7 @@ Works with any agent framework: **[OpenAI Agents SDK](https://github.com/openai/
 | **v0.5** | Multi-agent tracing (spans, threads, span tree UI) | ✅ Shipped |
 | **v0.6** | Claude Code hooks integration, transcript token parsing, session observation | ✅ Shipped |
 | **v0.7** | OpenTelemetry export (CLI, Python SDK, Web API, Dashboard) | ✅ Shipped |
-| **v0.8** | LLM-as-judge evaluators, custom scorer improvements | Planned |
+| **v0.8** | LLM-as-judge evaluators, timeline scoring, `rewind eval score` command | ✅ Shipped |
 | **v1.0** | Rewind Cloud, shared sessions, team dashboards, live breakpoints, semantic diff | Planned |
 
 ## Why "Rewind"?
