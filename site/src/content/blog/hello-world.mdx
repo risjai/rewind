@@ -9,7 +9,7 @@ draft: false
 
 I spent two months debugging a 40-step booking agent. Every time it failed, I'd change the prompt, re-run the whole thing, wait 3 minutes, and check the output. Different result each time because LLMs are non-deterministic. I couldn't even tell if my fix worked.
 
-That's the state of AI agent debugging in 2026. We have tracing tools that show you what happened. We have eval frameworks that score outputs. But when I need to go back to a specific failure, change one thing, and re-run only that part — the existing tools don't do that. Playgrounds let you re-run a single call. Evals score the output. Neither lets you fork a full multi-step execution at step 15 and replay from there with cached context.
+That's the state of AI agent debugging in 2026. We have tracing tools that show you what happened. We have eval frameworks that score outputs. But when I need to go back to a specific failure, change one thing, and re-run only that part? The existing tools don't do that. Playgrounds let you re-run a single call. Evals score the output. Neither lets you fork a full multi-step execution at step 15 and replay from there with cached context.
 
 So I built it.
 
@@ -29,7 +29,7 @@ rewind_agent.init()
 # every LLM call is recorded automatically
 ```
 
-That's the setup. One line. After your agent runs, you have a full recording. Everything is stored locally in a SQLite database — nothing leaves your machine unless you explicitly export or share.
+That's the setup. One line. After your agent runs, you have a full recording. Everything is stored locally in SQLite. Nothing leaves your machine unless you explicitly export or share.
 
 ## See the full execution tree
 
@@ -57,7 +57,7 @@ rewind show latest
           as current fact, ignored COVID-19 dip
 ```
 
-That's a span tree. Agent boundaries, tool calls, handoffs, token counts at each step. The writer agent hallucinated at step 5 because the researcher's second search returned stale cached data from 2019 — but the agent treated a pre-COVID projection as current fact. Without the tree, you'd see a flat list of 5 steps with no agent structure.
+That's a span tree. Agent boundaries, tool calls, handoffs, token counts at each step. The writer agent hallucinated at step 5 because the researcher's second search returned stale cached data from 2019, and the agent treated a pre-COVID projection as current fact. Without the tree, you'd see a flat list of 5 steps with no agent structure.
 
 Click into any step in the web dashboard to see the exact prompt, system message, and response the model saw:
 
@@ -166,7 +166,7 @@ Single Rust binary. No containers, no database servers, no config files. Everyth
 
 Recording works two ways:
 
-1. **Direct mode** (Python): `rewind_agent.init()` monkey-patches OpenAI and Anthropic SDKs in-process. Negligible overhead — recording happens in-process with no network hop.
+1. **Direct mode** (Python): `rewind_agent.init()` monkey-patches OpenAI and Anthropic SDKs in-process. Negligible overhead since recording happens in-process with no network hop.
 2. **Proxy mode** (any language): `rewind record --upstream https://api.openai.com`. Point your agent's base URL at the proxy. Streaming pass-through with sub-millisecond overhead.
 
 The web dashboard runs at `http://127.0.0.1:8080` with live updates via WebSocket. Sessions appear as they're recorded. (Or `rewind web --port 4800` if you prefer a custom port.)
@@ -180,7 +180,7 @@ pip install rewind-agent
 rewind demo && rewind inspect latest
 ```
 
-No API keys needed. `rewind demo` seeds a sample research agent session with a hallucination at step 5 — the agent uses stale 2019 data as current fact. Try `show`, `replay`, `diff`, `eval score`, `share` on it.
+No API keys needed. `rewind demo` seeds a sample research agent session with a hallucination at step 5 (the agent uses stale 2019 data as current fact). Try `show`, `replay`, `diff`, `eval score`, `share` on it.
 
 Or add one line to your own agent:
 
