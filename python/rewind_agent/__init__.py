@@ -100,4 +100,4 @@ def import_otel(**kwargs) -> str:
     return _import_otel(**kwargs)
 
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"
