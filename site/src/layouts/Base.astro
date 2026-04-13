@@ -8,7 +8,7 @@ interface Props {
 const {
   title,
   description = "The time-travel debugger for AI agents. Fork at any failure, replay with the fix, prove it works.",
-  ogImage = "/banner-dark.svg",
+  ogImage = "/og-image.png",
 } = Astro.props;
 
 const canonicalURL = new URL(Astro.url.pathname, Astro.site);
@@ -48,5 +48,9 @@ const canonicalURL = new URL(Astro.url.pathname, Astro.site);
   </head>
   <body class="bg-neutral-950 text-neutral-100 antialiased font-sans">
     <slot />
+    <script>
+      import { inject } from "@vercel/analytics";
+      inject();
+    </script>
   </body>
 </html>

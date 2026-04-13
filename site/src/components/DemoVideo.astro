@@ -24,13 +24,18 @@
         <span class="ml-3 text-xs text-neutral-500 font-mono">rewind</span>
       </div>
       <div class="bg-neutral-950 p-2">
-        <img
-          src="/demo.gif"
-          alt="Rewind demo showing trace inspection, timeline diff, and cached replay"
+        <video
+          autoplay
+          muted
+          loop
+          playsinline
+          preload="metadata"
           class="w-full"
-          loading="lazy"
-          decoding="async"
-        />
+          aria-label="Rewind demo showing trace inspection, timeline diff, and cached replay"
+        >
+          <source src="/demo.mp4" type="video/mp4" />
+          <img src="/demo.gif" alt="Rewind demo" class="w-full" loading="lazy" />
+        </video>
       </div>
     </div>
 
