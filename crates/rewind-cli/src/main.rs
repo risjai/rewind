@@ -402,6 +402,10 @@ enum EvalAction {
         /// Output results as JSON
         #[arg(long)]
         json: bool,
+
+        /// Force re-scoring even if cached scores exist
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -572,7 +576,7 @@ async fn main() -> Result<()> {
             EvalAction::Compare { left, right, json, force } => cmd_eval_compare(left, right, json, force),
             EvalAction::Experiments { dataset } => cmd_eval_experiments(dataset),
             EvalAction::Show { experiment } => cmd_eval_show(experiment),
-            EvalAction::Score { session, evaluator, timeline, compare_timelines, expected, json } => cmd_eval_score(session, evaluator, timeline, compare_timelines, expected, json),
+            EvalAction::Score { session, evaluator, timeline, compare_timelines, expected, json, force } => cmd_eval_score(session, evaluator, timeline, compare_timelines, expected, json, force),
         },
         Commands::Web { port } => cmd_web(port).await,
         Commands::Query { sql, tables } => cmd_query(sql, tables),
@@ -2207,6 +2211,7 @@ fn cmd_eval_score(
     compare_timelines: bool,
     expected_json: Option<String>,
     json_output: bool,
+    force: bool,
 ) -> Result<()> {
     if evaluator_names.is_empty() {
         bail!("At least one evaluator is required. Use -e <name> to specify.");
@@ -2268,7 +2273,7 @@ fn cmd_eval_score(
     let mut results: Vec<TimelineResult> = Vec::new();
 
     for tl in &timelines_to_score {
-        let (input, output) = extract_timeline_output(&store, &session.id, &tl.id)?;
+        let (input, output) = extract_timeline_output(&store, &tl.id)?;
         let mut scores_for_tl: Vec<EvalResult> = Vec::new();
 
         for eval_name in &evaluator_names {
@@ -2277,7 +2282,9 @@ fn cmd_eval_score(
                 .get_evaluator_by_name(eval_name)?
                 .ok_or_else(|| anyhow::anyhow!("Evaluator '{}' not found", eval_name))?;
 
-            if let Some(cached) = store.get_timeline_score(&tl.id, &evaluator.id)? {
+            if !force
+                && let Some(cached) = store.get_timeline_score(&tl.id, &evaluator.id)?
+            {
                 scores_for_tl.push(EvalResult {
                     name: eval_name.clone(),
                     score: cached.score,
@@ -2394,29 +2401,33 @@ fn cmd_eval_score(
         println!("  {:>6}", format_score(avg));
     }
 
-    // Delta line if comparing multiple timelines
+    // Delta lines: compare each fork against main (first timeline)
     if results.len() > 1 {
         println!();
-        let first_avg = avg_score(&results.first().unwrap().scores);
-        let last_avg = avg_score(&results.last().unwrap().scores);
-        let delta = last_avg - first_avg;
-        let delta_str = if delta >= 0.0 {
-            format!("+{:.2}", delta).green()
-        } else {
-            format!("{:.2}", delta).red()
-        };
-        println!(
-            "  Delta ({} vs {}): {} avg",
-            results.last().unwrap().label,
-            results.first().unwrap().label,
-            delta_str,
-        );
-        if delta > 0.01 {
-            println!("  {}", "Verdict: Fix improved scores ✓".green());
-        } else if delta < -0.01 {
-            println!("  {}", "Verdict: Scores regressed ✗".red());
-        } else {
-            println!("  {}", "Verdict: Scores unchanged".yellow());
+        let main_tl = results.first().unwrap();
+        let main_avg = avg_score(&main_tl.scores);
+
+        for fork_tl in results.iter().skip(1) {
+            let fork_avg = avg_score(&fork_tl.scores);
+            let delta = fork_avg - main_avg;
+            let delta_str = if delta >= 0.0 {
+                format!("+{:.2}", delta).green()
+            } else {
+                format!("{:.2}", delta).red()
+            };
+            print!(
+                "  Delta ({} vs {}): {} avg",
+                fork_tl.label,
+                main_tl.label,
+                delta_str,
+            );
+            if delta > 0.01 {
+                println!("  {}", "✓".green());
+            } else if delta < -0.01 {
+                println!("  {}", "✗".red());
+            } else {
+                println!("  {}", "─".yellow());
+            }
         }
     }
 

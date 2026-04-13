@@ -12,7 +12,6 @@ use serde_json::Value;
 /// Returns (Value::Null, Value::Null) if no LlmCall steps exist.
 pub fn extract_timeline_output(
     store: &Store,
-    _session_id: &str,
     timeline_id: &str,
 ) -> Result<(Value, Value)> {
     let steps = store.get_steps(timeline_id)?;
@@ -120,7 +119,7 @@ mod tests {
         let (store, _dir) = make_store();
         let (_, timeline_id) = seed_session_with_steps(&store);
 
-        let (input, output) = extract_timeline_output(&store, "", &timeline_id).unwrap();
+        let (input, output) = extract_timeline_output(&store, &timeline_id).unwrap();
 
         assert!(input.is_object());
         assert!(input.get("messages").is_some());
@@ -140,7 +139,7 @@ mod tests {
         let timeline_id = timeline.id.clone();
         store.create_timeline(&timeline).unwrap();
 
-        let (input, output) = extract_timeline_output(&store, &session_id, &timeline_id).unwrap();
+        let (input, output) = extract_timeline_output(&store, &timeline_id).unwrap();
         assert!(input.is_null());
         assert!(output.is_null());
     }
@@ -184,7 +183,7 @@ mod tests {
         step4.response_blob = resp2_blob;
         store.create_step(&step4).unwrap();
 
-        let (input, output) = extract_timeline_output(&store, &session_id, &timeline_id).unwrap();
+        let (input, output) = extract_timeline_output(&store, &timeline_id).unwrap();
 
         // Input = first LlmCall's request
         assert_eq!(input, serde_json::json!({"prompt": "hello"}));

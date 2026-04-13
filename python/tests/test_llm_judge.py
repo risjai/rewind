@@ -8,6 +8,7 @@ import pytest
 from rewind_agent.llm_judge import (
     CRITERIA_PRESETS,
     _render_template,
+    _is_retryable,
     run_judge,
     main,
 )
@@ -280,6 +281,91 @@ class TestRunJudge:
 
 
 # ══════════════════════════════════════════════════════════════
+# Retry Logic
+# ══════════════════════════════════════════════════════════════
+
+
+class TestRetryLogic:
+    def test_is_retryable_rate_limit(self):
+        """openai.RateLimitError should be retryable."""
+        try:
+            import openai
+            err = openai.RateLimitError(
+                message="Rate limit exceeded",
+                response=mock.MagicMock(status_code=429),
+                body=None,
+            )
+            assert _is_retryable(err) is True
+        except ImportError:
+            pytest.skip("openai not installed")
+
+    def test_is_retryable_server_error(self):
+        """openai.APIStatusError with 500 should be retryable."""
+        try:
+            import openai
+            err = openai.InternalServerError(
+                message="Internal server error",
+                response=mock.MagicMock(status_code=500),
+                body=None,
+            )
+            assert _is_retryable(err) is True
+        except ImportError:
+            pytest.skip("openai not installed")
+
+    def test_is_not_retryable_auth_error(self):
+        """openai.AuthenticationError should NOT be retryable."""
+        try:
+            import openai
+            err = openai.AuthenticationError(
+                message="Invalid API key",
+                response=mock.MagicMock(status_code=401),
+                body=None,
+            )
+            assert _is_retryable(err) is False
+        except ImportError:
+            pytest.skip("openai not installed")
+
+    def test_is_not_retryable_generic(self):
+        """Generic ValueError should NOT be retryable."""
+        assert _is_retryable(ValueError("bad value")) is False
+
+    def test_connection_error_is_retryable(self):
+        """ConnectionError should be retryable."""
+        assert _is_retryable(ConnectionError("refused")) is True
+
+    def test_retry_then_succeed(self):
+        """Rate limit on first call, success on second — should return success score."""
+        try:
+            import openai
+            rate_limit_err = openai.RateLimitError(
+                message="Rate limit exceeded",
+                response=mock.MagicMock(status_code=429),
+                body=None,
+            )
+        except ImportError:
+            pytest.skip("openai not installed")
+
+        mock_response = _make_mock_response("Safe", "Content is safe")
+        with mock.patch("rewind_agent.llm_judge._get_openai_client") as mock_client, \
+             mock.patch("time.sleep"):  # skip actual sleep
+            mock_client.return_value.chat.completions.create.side_effect = [
+                rate_limit_err,
+                mock_response,
+            ]
+            result = run_judge(None, "safe content", None, criteria="safety")
+
+        assert result["score"] == 1.0
+        assert result["passed"] is True
+        # Should have been called twice (first fails, second succeeds)
+        assert mock_client.return_value.chat.completions.create.call_count == 2
+
+    def test_string_500_in_message_does_not_trigger_retry(self):
+        """An error with '500' in the message but not a status error should NOT retry."""
+        err = ValueError("Token limit 500 exceeded")
+        assert _is_retryable(err) is False
+
+
+# ══════════════════════════════════════════════════════════════
 # SDK Integration
 # ══════════════════════════════════════════════════════════════
 
@@ -338,3 +424,23 @@ class TestSubprocessEntryPoint:
         result = json.loads(captured.out)
         assert result["score"] == 1.0
         assert result["passed"] is True
+
+    def test_value_error_exits_nonzero(self, capsys):
+        """ValueError (e.g., missing expected) should exit with code 1."""
+        payload = {
+            "input": "question",
+            "output": "answer",
+            "expected": None,
+            "config": {"criteria": "correctness"},
+        }
+
+        with mock.patch("sys.stdin") as mock_stdin:
+            mock_stdin.read.return_value = json.dumps(payload)
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 1
+
+        captured = capsys.readouterr()
+        result = json.loads(captured.out)
+        assert result["score"] == 0.0
+        assert "config error" in result["reasoning"]

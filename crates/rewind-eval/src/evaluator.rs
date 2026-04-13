@@ -66,6 +66,13 @@ impl<'a> EvaluatorRegistry<'a> {
     }
 }
 
+/// Redact API keys from error output to prevent leaking secrets into stored reasoning.
+fn sanitize_secrets(input: &str) -> String {
+    // Redact OpenAI-style keys: sk-..., sk-proj-..., etc.
+    let re = regex::Regex::new(r"sk-[a-zA-Z0-9_-]{10,}").unwrap();
+    re.replace_all(input, "sk-***REDACTED***").to_string()
+}
+
 /// Execute the built-in LLM-as-judge evaluator via a Python subprocess.
 ///
 /// Contract:
@@ -118,6 +125,7 @@ fn run_llm_judge_evaluator(
                         let _ = stderr.read_to_string(&mut stderr_str);
                     }
                     stderr_str.truncate(1000);
+                    let sanitized = sanitize_secrets(stderr_str.trim());
                     return Ok(ScoreResult {
                         score: 0.0,
                         passed: false,
@@ -125,7 +133,7 @@ fn run_llm_judge_evaluator(
                             "LLM judge exited with {} ({}ms). stderr: {}",
                             status,
                             duration.as_millis(),
-                            stderr_str.trim()
+                            sanitized
                         ),
                     });
                 }
@@ -343,5 +351,27 @@ mod tests {
     fn test_builtin_types_count() {
         // 7 types: exact_match, contains, regex, json_schema, tool_use_match, custom, llm_judge
         assert_eq!(EvaluatorRegistry::builtin_types().len(), 7);
+    }
+
+    #[test]
+    fn test_sanitize_secrets_redacts_api_key() {
+        let input = "Error: Incorrect API key provided: sk-proj-abc123def456ghi789jkl0";
+        let sanitized = sanitize_secrets(input);
+        assert!(!sanitized.contains("sk-proj-abc123def456ghi789jkl0"));
+        assert!(sanitized.contains("sk-***REDACTED***"));
+    }
+
+    #[test]
+    fn test_sanitize_secrets_preserves_clean_text() {
+        let input = "LLM judge failed: connection refused";
+        assert_eq!(sanitize_secrets(input), input);
+    }
+
+    #[test]
+    fn test_sanitize_secrets_redacts_multiple_keys() {
+        let input = "key1: sk-abcdefghijklmnop key2: sk-1234567890abcdef";
+        let sanitized = sanitize_secrets(input);
+        assert!(!sanitized.contains("sk-abcdefghijklmnop"));
+        assert!(!sanitized.contains("sk-1234567890abcdef"));
     }
 }

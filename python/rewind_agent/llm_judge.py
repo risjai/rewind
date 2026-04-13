@@ -122,6 +122,26 @@ def _get_openai_client(config: dict):
     return openai.OpenAI(api_key=api_key, base_url=base_url)
 
 
+# ── Retry Logic ──────────────────────────────────────────────────
+
+def _is_retryable(error: Exception) -> bool:
+    """Check if an error is retryable using typed OpenAI exceptions."""
+    try:
+        import openai
+        # Rate limit (429)
+        if isinstance(error, openai.RateLimitError):
+            return True
+        # Server errors (500, 502, 503)
+        if isinstance(error, openai.APIStatusError) and error.status_code in (500, 502, 503):
+            return True
+    except ImportError:
+        pass
+    # Fallback for non-OpenAI errors: connection errors are retryable
+    if isinstance(error, (ConnectionError, TimeoutError)):
+        return True
+    return False
+
+
 # ── Template Rendering ───────────────────────────────────────────
 
 def _render_template(template: str, input_val, output_val, expected_val) -> str:
@@ -249,9 +269,8 @@ def run_judge(input_val, output_val, expected_val, **kwargs) -> dict:
 
         except Exception as e:
             last_error = e
-            err_str = str(e)
-            # Retry on rate limit (429) and server errors (5xx)
-            if "429" in err_str or "500" in err_str or "502" in err_str or "503" in err_str:
+            # Retry on rate limit and server errors using typed exceptions
+            if _is_retryable(e):
                 wait = 2 ** attempt
                 time.sleep(wait)
                 continue
@@ -296,6 +315,12 @@ def main():
             api_key_env=config.get("api_key_env", "OPENAI_API_KEY"),
             api_base_env=config.get("api_base_env", "OPENAI_BASE_URL"),
         )
+    except (ValueError, RuntimeError) as e:
+        # Config errors (missing expected, missing API key, missing openai pkg)
+        # should exit non-zero so Rust surfaces them as errors, not zero scores
+        result = {"score": 0.0, "passed": False, "reasoning": f"LLM judge config error: {e}"}
+        print(json.dumps(result))
+        sys.exit(1)
     except Exception as e:
         result = {"score": 0.0, "passed": False, "reasoning": f"LLM judge error: {e}"}
 
