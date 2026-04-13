@@ -23,8 +23,8 @@ impl<'a> BaselineManager<'a> {
         description: &str,
     ) -> Result<Baseline> {
         // Validate name format
-        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.') {
-            bail!("Invalid baseline name '{}'. Use only letters, numbers, hyphens, underscores, and dots.", name);
+        if name.is_empty() || name.len() > 128 || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.') {
+            bail!("Invalid baseline name '{}'. Use only letters, numbers, hyphens, underscores, and dots (max 128 chars).", name);
         }
 
         // Check name uniqueness

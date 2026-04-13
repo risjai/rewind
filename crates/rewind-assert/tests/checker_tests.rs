@@ -526,3 +526,55 @@ fn check_new_error_detected_via_has_error_flag() {
     let error_check = result.step_results[0].checks.iter().find(|c| c.check_type == CheckType::HasError).unwrap();
     assert!(!error_check.passed);
 }
+
+// ── Baseline Name Validation ────────────────────────────────────
+
+#[test]
+fn baseline_name_rejects_spaces() {
+    let (_tmp, store) = setup();
+    let (sid, tid) = seed_session(&store);
+    let manager = rewind_assert::BaselineManager::new(&store);
+    let err = manager.create_baseline(&sid, &tid, "bad name here", "test").unwrap_err();
+    assert!(err.to_string().contains("Invalid baseline name"));
+}
+
+#[test]
+fn baseline_name_rejects_slashes() {
+    let (_tmp, store) = setup();
+    let (sid, tid) = seed_session(&store);
+    let manager = rewind_assert::BaselineManager::new(&store);
+    let err = manager.create_baseline(&sid, &tid, "path/slash", "test").unwrap_err();
+    assert!(err.to_string().contains("Invalid baseline name"));
+}
+
+#[test]
+fn baseline_name_rejects_empty() {
+    let (_tmp, store) = setup();
+    let (sid, tid) = seed_session(&store);
+    let manager = rewind_assert::BaselineManager::new(&store);
+    let err = manager.create_baseline(&sid, &tid, "", "test").unwrap_err();
+    assert!(err.to_string().contains("Invalid baseline name"));
+}
+
+#[test]
+fn baseline_name_accepts_valid_chars() {
+    let (_tmp, store) = setup();
+    let (sid, tid) = seed_session(&store);
+
+    let step = Step::new_llm_call(&tid, &sid, 1, "gpt-4o");
+    store.create_step(&step).unwrap();
+
+    let manager = rewind_assert::BaselineManager::new(&store);
+    let result = manager.create_baseline(&sid, &tid, "my-baseline_v1.0", "test");
+    assert!(result.is_ok());
+}
+
+#[test]
+fn baseline_name_rejects_too_long() {
+    let (_tmp, store) = setup();
+    let (sid, tid) = seed_session(&store);
+    let manager = rewind_assert::BaselineManager::new(&store);
+    let long_name = "a".repeat(129);
+    let err = manager.create_baseline(&sid, &tid, &long_name, "test").unwrap_err();
+    assert!(err.to_string().contains("Invalid baseline name"));
+}

@@ -102,7 +102,8 @@ impl<'a> ReplayEngine<'a> {
     /// Create a fork: new timeline branching from a specific step
     pub fn fork(&self, session_id: &str, source_timeline_id: &str, at_step: u32, label: &str) -> Result<Timeline> {
         let steps = self.store.get_steps(source_timeline_id)?;
-        if at_step == 0 || at_step > steps.len() as u32 {
+        let total = u32::try_from(steps.len()).unwrap_or(u32::MAX);
+        if at_step == 0 || at_step > total {
             bail!("Invalid fork step {}. Session has {} steps (use 1-{}).", at_step, steps.len(), steps.len());
         }
 
@@ -216,5 +217,58 @@ impl<'a> ReplayEngine<'a> {
             duration_ms: step.duration_ms,
             response_preview,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rewind_store::{Session, Step, Timeline};
+    use tempfile::TempDir;
+
+    fn setup() -> (TempDir, Store) {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        (tmp, store)
+    }
+
+    fn seed_session_with_steps(store: &Store, step_count: u32) -> (String, String) {
+        let session = Session::new("test-session");
+        let timeline = Timeline::new_root(&session.id);
+        store.create_session(&session).unwrap();
+        store.create_timeline(&timeline).unwrap();
+        for i in 1..=step_count {
+            let step = Step::new_llm_call(&timeline.id, &session.id, i, "gpt-4o");
+            store.create_step(&step).unwrap();
+        }
+        (session.id, timeline.id)
+    }
+
+    #[test]
+    fn fork_at_step_zero_is_rejected() {
+        let (_tmp, store) = setup();
+        let (sid, tid) = seed_session_with_steps(&store, 3);
+        let engine = ReplayEngine::new(&store);
+        let err = engine.fork(&sid, &tid, 0, "bad-fork").unwrap_err();
+        assert!(err.to_string().contains("Invalid fork step 0"));
+    }
+
+    #[test]
+    fn fork_beyond_total_steps_is_rejected() {
+        let (_tmp, store) = setup();
+        let (sid, tid) = seed_session_with_steps(&store, 3);
+        let engine = ReplayEngine::new(&store);
+        let err = engine.fork(&sid, &tid, 99, "bad-fork").unwrap_err();
+        assert!(err.to_string().contains("Invalid fork step 99"));
+        assert!(err.to_string().contains("3 steps"));
+    }
+
+    #[test]
+    fn fork_at_valid_step_succeeds() {
+        let (_tmp, store) = setup();
+        let (sid, tid) = seed_session_with_steps(&store, 3);
+        let engine = ReplayEngine::new(&store);
+        let fork = engine.fork(&sid, &tid, 2, "valid-fork");
+        assert!(fork.is_ok());
     }
 }

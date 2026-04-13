@@ -558,5 +558,21 @@ class TestReplaySavingsTracking(unittest.TestCase):
         self.assertEqual(recorder._cached_steps_count, 0)
 
 
+class TestWrapLanggraph(unittest.TestCase):
+    """Tests for wrap_langgraph input validation."""
+
+    def test_wrap_langgraph_none_raises_type_error(self):
+        from rewind_agent.hooks import wrap_langgraph
+        with self.assertRaises(TypeError) as ctx:
+            wrap_langgraph(None)
+        self.assertIn("got None", str(ctx.exception))
+
+    def test_wrap_langgraph_non_graph_returns_unchanged(self):
+        from rewind_agent.hooks import wrap_langgraph
+        sentinel = object()
+        result = wrap_langgraph(sentinel)
+        self.assertIs(result, sentinel)
+
+
 if __name__ == "__main__":
     unittest.main()
