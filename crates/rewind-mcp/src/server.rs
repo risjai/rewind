@@ -7,7 +7,7 @@ use rmcp::{
     tool, tool_handler, tool_router,
 };
 use rewind_assert::{AssertionEngine, BaselineManager, Tolerance};
-use rewind_eval::{compare_experiments, DatasetManager};
+use rewind_eval::{compare_experiments, extract_timeline_output, DatasetManager, EvaluatorRegistry};
 use rewind_replay::ReplayEngine;
 use rewind_store::{Experiment, Store};
 use schemars::JsonSchema;
@@ -191,6 +191,23 @@ pub struct SpanTreeParams {
 pub struct ThreadIdParam {
     /// Thread ID
     pub thread_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ScoreTimelinesParams {
+    /// Session ID, prefix, or "latest"
+    pub session: String,
+    /// Evaluator names to score with (e.g., ["correctness-judge"])
+    pub evaluators: Vec<String>,
+    /// Compare across all timelines? Default: false (scores main only)
+    #[serde(default)]
+    pub compare_timelines: bool,
+    /// Expected output JSON for reference-based criteria (e.g., correctness)
+    #[serde(default)]
+    pub expected: Option<serde_json::Value>,
+    /// Force re-scoring even if cached scores exist
+    #[serde(default)]
+    pub force: bool,
 }
 
 // ── Response types ───────────────────────────────────────────
@@ -1276,6 +1293,112 @@ impl RewindMcp {
             "total_tokens": total_tokens,
             "agents_involved": all_agents.into_iter().collect::<Vec<_>>(),
             "turns": turns,
+        });
+        ok_json(&json)
+    }
+
+    #[tool(
+        name = "score_timelines",
+        description = "Score session timelines using LLM-as-judge evaluators. Extracts input/output from timeline steps, runs each evaluator, and returns scores. Use with --compare_timelines to compare original vs. forked timelines."
+    )]
+    async fn score_timelines(
+        &self,
+        params: Parameters<ScoreTimelinesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let store = self.lock_store()?;
+        let p = &params.0;
+
+        // Resolve session
+        let session = resolve_session(&store, &p.session)?;
+        let all_timelines = store.get_timelines(&session.id).map_err(|e| mcp_err(&e))?;
+
+        if all_timelines.is_empty() {
+            return Err(mcp_err_str("Session has no timelines"));
+        }
+
+        let expected = p.expected.clone().unwrap_or(serde_json::Value::Null);
+
+        // Determine which timelines to score
+        let timelines_to_score: Vec<&rewind_store::Timeline> = if p.compare_timelines {
+            all_timelines.iter().collect()
+        } else {
+            all_timelines.iter().filter(|t| t.label == "main").take(1).collect()
+        };
+
+        let registry = EvaluatorRegistry::new(&store);
+        let mut results = Vec::new();
+
+        for tl in &timelines_to_score {
+            let (input, output) = extract_timeline_output(&store, &tl.id)
+                .map_err(|e| mcp_err(&e))?;
+
+            let mut scores = serde_json::Map::new();
+            for eval_name in &p.evaluators {
+                // Check cache unless force
+                if !p.force {
+                    let evaluator = store.get_evaluator_by_name(eval_name)
+                        .map_err(|e| mcp_err(&e))?
+                        .ok_or_else(|| mcp_err_str(&format!("Evaluator not found: {}", eval_name)))?;
+
+                    if let Ok(Some(cached)) = store.get_timeline_score(&tl.id, &evaluator.id) {
+                        scores.insert(eval_name.clone(), serde_json::json!({
+                            "score": cached.score,
+                            "passed": cached.passed,
+                            "reasoning": cached.reasoning,
+                            "cached": true,
+                        }));
+                        continue;
+                    }
+                }
+
+                match registry.score(eval_name, &input, &output, &expected) {
+                    Ok((evaluator_id, score_result)) => {
+                        // Persist
+                        let ts = rewind_store::TimelineScore::new(
+                            &session.id, &tl.id, &evaluator_id,
+                            score_result.score, score_result.passed,
+                            &score_result.reasoning, "", "",
+                        );
+                        let _ = store.create_timeline_score(&ts);
+
+                        scores.insert(eval_name.clone(), serde_json::json!({
+                            "score": score_result.score,
+                            "passed": score_result.passed,
+                            "reasoning": score_result.reasoning,
+                            "cached": false,
+                        }));
+                    }
+                    Err(e) => {
+                        scores.insert(eval_name.clone(), serde_json::json!({
+                            "score": 0.0,
+                            "passed": false,
+                            "reasoning": format!("Error: {}", e),
+                            "cached": false,
+                        }));
+                    }
+                }
+            }
+
+            let avg: f64 = if scores.is_empty() {
+                0.0
+            } else {
+                scores.values()
+                    .filter_map(|v| v.get("score").and_then(|s| s.as_f64()))
+                    .sum::<f64>() / scores.len() as f64
+            };
+
+            results.push(serde_json::json!({
+                "timeline_id": tl.id,
+                "timeline_label": tl.label,
+                "scores": scores,
+                "avg_score": avg,
+            }));
+        }
+
+        let json = serde_json::json!({
+            "session_id": session.id,
+            "session_name": session.name,
+            "timelines": results,
         });
         ok_json(&json)
     }

@@ -95,6 +95,105 @@ rewind eval run "booking-test" -c "./agent" \
 # JSON output for dashboard ingestion
 ```
 
+## LLM-as-Judge
+
+Use an LLM to score agent outputs on dimensions like correctness, coherence, and safety. This is the recommended approach for evaluating open-ended agent behavior where exact matching isn't practical.
+
+### Setup
+
+```bash
+# Create an LLM judge evaluator
+rewind eval evaluator create "quality" -t llm_judge -c correctness
+
+# Requires OpenAI SDK: pip install rewind-agent[openai]
+# Set your API key: export OPENAI_API_KEY=sk-...
+```
+
+### Score a session
+
+```bash
+# Score the main timeline
+rewind eval score latest -e quality
+
+# Score with expected output for reference
+rewind eval score latest -e quality --expected '{"answer": "Tokyo"}'
+```
+
+### Compare original vs. forked timelines
+
+```bash
+# After a replay: compare all timelines
+rewind eval score latest -e quality --compare-timelines
+```
+
+```
+⏪ Rewind — Timeline Scores
+
+  Session: research-agent
+  Evaluators: quality
+
+  Timeline       quality    avg
+  ────────────   ───────    ────
+  main           0.200      0.200
+  fixed          0.900      0.900
+
+  Delta (fixed vs main): +0.70 avg  ✓
+```
+
+### Built-in Criteria
+
+| Criteria | What It Scores | Needs `expected`? |
+|:---------|:---------------|:------------------|
+| `correctness` | Factual accuracy against a reference answer | Yes |
+| `coherence` | Logical flow and clarity | No |
+| `relevance` | Whether the response addresses the query | No |
+| `safety` | Whether content is harmful or toxic | No |
+| `task_completion` | Whether the agent accomplished the task | No |
+
+### Config options
+
+```bash
+# Full JSON config
+rewind eval evaluator create "custom-judge" -t llm_judge \
+  -c '{"criteria":"correctness","model":"gpt-4o","temperature":0}'
+
+# Use a different API endpoint (Ollama, vLLM, LiteLLM)
+rewind eval evaluator create "local-judge" -t llm_judge \
+  -c '{"criteria":"safety","api_key_env":"OLLAMA_API_KEY","api_base_env":"OLLAMA_BASE_URL"}'
+```
+
+### Python SDK
+
+```python
+import rewind_agent
+
+result = rewind_agent.evaluate(
+    dataset=ds,
+    target_fn=my_agent,
+    evaluators=["llm_judge"],  # default: correctness + gpt-4o-mini
+)
+
+# Or with custom criteria
+result = rewind_agent.evaluate(
+    dataset=ds,
+    target_fn=my_agent,
+    evaluators=[
+        rewind_agent.llm_judge_evaluator(criteria="correctness", model="gpt-4o"),
+        rewind_agent.llm_judge_evaluator(criteria="safety"),
+    ],
+)
+```
+
+### Cost awareness
+
+LLM judge calls are paid API calls. Rough estimates per dataset example:
+- `gpt-4o-mini`: ~$0.001/call
+- `gpt-4o`: ~$0.025/call
+
+Scores are cached per timeline+evaluator. Use `--force` to re-score.
+
+---
+
 ## Built-in Evaluators
 
 | Evaluator | Description |
@@ -104,6 +203,7 @@ rewind eval run "booking-test" -c "./agent" \
 | `regex` | Output must match a regular expression pattern |
 | `json_schema` | Output must validate against a JSON schema |
 | `tool_use_match` | Checks that the agent used the expected tools |
+| `llm_judge` | LLM scores output on criteria (correctness, coherence, safety, etc.) |
 
 ## Python SDK
 
@@ -137,13 +237,16 @@ print(f"Score: {result.avg_score:.2f}, Pass rate: {result.pass_rate:.0%}")
 | `rewind eval dataset create <name>` | Create a new evaluation dataset |
 | `rewind eval dataset import <name> <file.jsonl>` | Import test cases from JSONL |
 | `rewind eval dataset show <name>` | Show dataset with example previews |
-| `rewind eval evaluator create <name> -t <type>` | Create an evaluator (exact_match, contains, regex, json_schema, tool_use_match) |
+| `rewind eval evaluator create <name> -t <type>` | Create an evaluator (exact_match, contains, regex, json_schema, tool_use_match, llm_judge) |
 | `rewind eval run <dataset> -c <cmd> -e <evaluator>` | Run experiment — execute command per example, score, aggregate |
 | `rewind eval compare <left> <right>` | Compare two experiments side-by-side |
 | `rewind eval show <experiment>` | Show detailed experiment results |
 | `rewind eval experiments` | List all experiments |
+| `rewind eval score <session> -e <evaluator>` | Score a session's timeline outputs (LLM-as-judge) |
 
 ## Examples
 
 - [`examples/08_evaluation.py`](../examples/08_evaluation.py) — Basic evaluation workflow
 - [`examples/12_custom_evaluator.py`](../examples/12_custom_evaluator.py) — Custom evaluator with the Python SDK
+- [`examples/13_llm_judge.py`](../examples/13_llm_judge.py) — LLM-as-judge evaluation
+- [`examples/14_fork_and_score.py`](../examples/14_fork_and_score.py) — Fork, replay, and score timelines
