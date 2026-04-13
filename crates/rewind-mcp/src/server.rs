@@ -100,7 +100,7 @@ pub struct CheckBaselineParams {
     /// Session ID, prefix, or "latest" — the session to check
     pub session: String,
     /// Baseline name to check against
-    pub against: String,
+    pub baseline: String,
     /// Token tolerance percentage (default: 20)
     #[serde(default = "default_token_tolerance")]
     pub token_tolerance: u32,
@@ -617,7 +617,7 @@ impl RewindMcp {
                 "total_tokens": baseline.total_tokens,
             },
             "message": format!(
-                "Baseline '{}' created with {} steps. Check with: check_baseline(session, against='{}')",
+                "Baseline '{}' created with {} steps. Check with: check_baseline(session, baseline='{}')",
                 baseline.name, baseline.step_count, baseline.name
             ),
         });
@@ -644,9 +644,9 @@ impl RewindMcp {
 
         let manager = BaselineManager::new(&store);
         let baseline = manager
-            .get_baseline(&params.against)
+            .get_baseline(&params.baseline)
             .map_err(|e| mcp_err(&e))?
-            .ok_or_else(|| mcp_err_str(&format!("Baseline '{}' not found", params.against)))?;
+            .ok_or_else(|| mcp_err_str(&format!("Baseline '{}' not found", params.baseline)))?;
         let baseline_steps = manager
             .get_baseline_steps(&baseline.id)
             .map_err(|e| mcp_err(&e))?;

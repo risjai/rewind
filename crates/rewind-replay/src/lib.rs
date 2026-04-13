@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use rewind_store::{Span, Step, Store, Timeline};
 
 /// Diff result between two timelines
@@ -101,6 +101,11 @@ impl<'a> ReplayEngine<'a> {
 
     /// Create a fork: new timeline branching from a specific step
     pub fn fork(&self, session_id: &str, source_timeline_id: &str, at_step: u32, label: &str) -> Result<Timeline> {
+        let steps = self.store.get_steps(source_timeline_id)?;
+        if at_step == 0 || at_step > steps.len() as u32 {
+            bail!("Invalid fork step {}. Session has {} steps (use 1-{}).", at_step, steps.len(), steps.len());
+        }
+
         let fork = Timeline::new_fork(session_id, source_timeline_id, at_step, label);
         self.store.create_timeline(&fork)?;
         tracing::info!(

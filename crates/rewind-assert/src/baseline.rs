@@ -22,6 +22,11 @@ impl<'a> BaselineManager<'a> {
         name: &str,
         description: &str,
     ) -> Result<Baseline> {
+        // Validate name format
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.') {
+            bail!("Invalid baseline name '{}'. Use only letters, numbers, hyphens, underscores, and dots.", name);
+        }
+
         // Check name uniqueness
         if self.store.get_baseline_by_name(name)?.is_some() {
             bail!("Baseline '{}' already exists. Choose a different name.", name);

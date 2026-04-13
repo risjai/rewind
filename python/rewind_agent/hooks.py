@@ -263,6 +263,8 @@ def wrap_langgraph(graph, recorder_name: str = "langgraph"):
 
     This wraps each node's function with @rewind.node() automatically.
     """
+    if graph is None:
+        raise TypeError("wrap_langgraph() requires a compiled LangGraph, got None")
     try:
         nodes = graph.nodes
     except AttributeError:

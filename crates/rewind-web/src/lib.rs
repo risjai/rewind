@@ -140,6 +140,13 @@ impl WebServer {
 
         let app = self.build_router();
 
+        // Bind first so port-in-use errors appear before the success banner
+        let listener = tokio::net::TcpListener::bind(addr).await
+            .map_err(|e| anyhow::anyhow!(
+                "Cannot start on port {}: {}. Try a different port with --port.",
+                addr.port(), e
+            ))?;
+
         tracing::info!("Rewind Web UI listening on http://{}", addr);
         println!();
         println!("  \x1b[36;1m⏪ Rewind Web UI\x1b[0m");
@@ -169,7 +176,6 @@ impl WebServer {
             }
         });
 
-        let listener = tokio::net::TcpListener::bind(addr).await?;
         axum::serve(listener, app).await?;
         Ok(())
     }
