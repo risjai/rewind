@@ -217,6 +217,7 @@ See the [Getting Started guide](docs/getting-started.md) for more options.
 | **Claude Code Observation** | Observe Claude Code sessions in real-time via hooks. See every tool call (Read, Edit, Bash, Grep, Agent), user prompts, and session lifecycle. Token usage extracted from transcripts. One-command setup: `rewind hooks install`. | — | — |
 | **MCP Server** | 26 tools for AI assistants (Claude Code, Cursor, Windsurf) to query recordings, view span trees, browse threads, diff timelines, create baselines, run evals — all from your IDE. | [mcp-server.md](docs/mcp-server.md) | — |
 | **OpenTelemetry Export** | Export recorded sessions as OTel traces via OTLP to Langfuse, Datadog, Grafana Tempo, Jaeger, or any OTel-compatible backend. CLI, Python SDK, and Web API. Uses `gen_ai.*` semantic conventions. Privacy-first: message content requires explicit opt-in. | [otel-export.md](docs/otel-export.md) | — |
+| **OpenTelemetry Import** | Import OTLP traces from any source into Rewind for time-travel debugging. Accepts protobuf or JSON via HTTP API (`POST /v1/traces`), CLI (`rewind import otel`), or Python SDK. Imported sessions with content blobs are forkable and replayable — debug production failures locally. | [otel-import.md](docs/otel-import.md) | — |
 | **SQL Query Explorer** | Run ad-hoc SQL against the Rewind database. Token usage by model, average step duration, sessions with errors, cost estimation — read-only, safe to explore. | [sql-queries.md](docs/sql-queries.md) | — |
 | **CLI Reference** | Full command reference for all 29 CLI commands. | [cli-reference.md](docs/cli-reference.md) | — |
 
@@ -243,6 +244,7 @@ Works with any agent framework: **[OpenAI Agents SDK](https://github.com/openai/
 | **v0.6** | Claude Code hooks integration, transcript token parsing, session observation | ✅ Shipped |
 | **v0.7** | OpenTelemetry export (CLI, Python SDK, Web API, Dashboard) | ✅ Shipped |
 | **v0.8** | LLM-as-judge evaluators, timeline scoring, `rewind eval score` command | ✅ Shipped |
+| **v0.9** | OTel trace ingestion — import OTLP traces, debug production failures locally | ✅ Shipped |
 | **v1.0** | Rewind Cloud, shared sessions, team dashboards, live breakpoints, semantic diff | Planned |
 
 ## Why "Rewind"?
