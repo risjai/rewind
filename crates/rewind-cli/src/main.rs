@@ -224,11 +224,11 @@ enum ImportAction {
 #[derive(clap::Args)]
 struct OtelImportArgs {
     /// Import from a protobuf file (ExportTraceServiceRequest)
-    #[arg(long, group = "input")]
+    #[arg(long, group = "input", required_unless_present = "json_file")]
     file: Option<std::path::PathBuf>,
 
     /// Import from a JSON file (OTLP JSON format)
-    #[arg(long, group = "input")]
+    #[arg(long, group = "input", required_unless_present = "file")]
     json_file: Option<std::path::PathBuf>,
 
     /// Override the session name

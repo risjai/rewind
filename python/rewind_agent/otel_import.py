@@ -75,26 +75,12 @@ def import_otel(
 
     try:
         with urllib.request.urlopen(req) as resp:
-            # The response is protobuf (ExportTraceServiceResponse).
-            # We don't parse it — a 200 status means success.
             _ = resp.read()
-            logger.info("Imported OTel trace via %s", url)
+            session_id = resp.headers.get("X-Rewind-Session-Id", "")
+            logger.info("Imported OTel trace via %s (session: %s)", url, session_id[:8])
+            return session_id if session_id else "<unknown — check rewind sessions>"
     except urllib.error.URLError as e:
         raise ConnectionError(
             f"Failed to connect to Rewind at {endpoint}. "
             f"Is the server running? Error: {e}"
         ) from e
-
-    # The server doesn't return the session_id in the OTLP response.
-    # Fetch the latest session to get its ID.
-    try:
-        list_url = f"{endpoint.rstrip('/')}/api/sessions"
-        list_req = urllib.request.Request(list_url)
-        with urllib.request.urlopen(list_req) as resp:
-            sessions = json.loads(resp.read())
-            if sessions:
-                return sessions[0]["id"]
-    except Exception:
-        pass
-
-    return "<unknown — check rewind sessions>"
