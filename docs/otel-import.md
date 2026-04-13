@@ -2,6 +2,8 @@
 
 Import OTLP traces from external systems into Rewind for time-travel debugging. The reverse of [OTel export](otel-export.md).
 
+> **Langfuse users:** See [Langfuse Import](langfuse-import.md) for a one-command import that fetches traces directly from Langfuse by trace ID.
+
 ## Quick Start
 
 ### CLI

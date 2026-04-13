@@ -219,6 +219,31 @@ enum Commands {
 enum ImportAction {
     /// Import traces from an OTLP file (protobuf or JSON)
     Otel(OtelImportArgs),
+    /// Import a trace from Langfuse by trace ID
+    FromLangfuse(LangfuseImportArgs),
+}
+
+#[derive(clap::Args)]
+struct LangfuseImportArgs {
+    /// Langfuse trace ID
+    #[arg(long)]
+    trace: String,
+
+    /// Langfuse public key (or LANGFUSE_PUBLIC_KEY env)
+    #[arg(long, env = "LANGFUSE_PUBLIC_KEY")]
+    public_key: Option<String>,
+
+    /// Langfuse secret key (or LANGFUSE_SECRET_KEY env)
+    #[arg(long, env = "LANGFUSE_SECRET_KEY")]
+    secret_key: Option<String>,
+
+    /// Langfuse host URL
+    #[arg(long, env = "LANGFUSE_HOST", default_value = "https://cloud.langfuse.com")]
+    host: String,
+
+    /// Override the session name in Rewind
+    #[arg(long)]
+    name: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -618,6 +643,7 @@ async fn main() -> Result<()> {
         },
         Commands::Import { action } => match action {
             ImportAction::Otel(args) => cmd_import_otel(args),
+            ImportAction::FromLangfuse(args) => cmd_import_from_langfuse(args),
         },
     }
 }
@@ -3287,6 +3313,79 @@ fn cmd_import_otel(args: OtelImportArgs) -> Result<()> {
         "   {} View with: rewind show {}",
         "→".bold(),
         result.session_id[..8].cyan()
+    );
+
+    Ok(())
+}
+
+fn cmd_import_from_langfuse(args: LangfuseImportArgs) -> Result<()> {
+    println!(
+        "{} Importing trace {} from {}",
+        "⏪".bold(),
+        args.trace.cyan(),
+        args.host.dimmed()
+    );
+
+    let payload = serde_json::json!({
+        "trace_id": args.trace,
+        "public_key": args.public_key,
+        "secret_key": args.secret_key,
+        "host": args.host,
+        "session_name": args.name,
+        "rewind_endpoint": "http://127.0.0.1:4800",
+    });
+    let payload_str = serde_json::to_string(&payload)?;
+
+    let mut cmd = std::process::Command::new("python3");
+    cmd.args(["-m", "rewind_agent.langfuse_import"]);
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to run python3 -m rewind_agent.langfuse_import: {}. \
+             Is rewind-agent installed? (pip install rewind-agent)",
+            e
+        )
+    })?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        let _ = stdin.write_all(payload_str.as_bytes());
+    }
+
+    let output = child.wait_with_output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let error_msg = if !stdout.is_empty() {
+            if let Ok(result) = serde_json::from_str::<serde_json::Value>(&stdout) {
+                result.get("error").and_then(|e| e.as_str()).unwrap_or(&stderr).to_string()
+            } else {
+                stderr.to_string()
+            }
+        } else {
+            stderr.to_string()
+        };
+        bail!("Langfuse import failed: {}", error_msg.trim());
+    }
+
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|e| anyhow::anyhow!("Failed to parse import result: {}", e))?;
+
+    let session_id = result.get("session_id").and_then(|v| v.as_str()).unwrap_or("<unknown>");
+
+    println!(
+        "\n{} Imported Langfuse trace → Rewind session {}",
+        "✓".green().bold(),
+        if session_id.len() >= 8 { &session_id[..8] } else { session_id }.yellow()
+    );
+    println!(
+        "   {} View with: rewind show {}",
+        "→".bold(),
+        if session_id.len() >= 8 { &session_id[..8] } else { session_id }.cyan()
     );
 
     Ok(())

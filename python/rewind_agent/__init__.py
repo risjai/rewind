@@ -100,4 +100,10 @@ def import_otel(**kwargs) -> str:
     return _import_otel(**kwargs)
 
 
+def import_from_langfuse(trace_id: str, **kwargs) -> str:
+    """Import a Langfuse trace into Rewind. See langfuse_import.import_from_langfuse for args."""
+    from .langfuse_import import import_from_langfuse as _import
+    return _import(trace_id, **kwargs)
+
+
 __version__ = "0.11.0"
