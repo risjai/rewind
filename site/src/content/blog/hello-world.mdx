@@ -1,15 +1,15 @@
 ---
 title: "Introducing Rewind: Chrome DevTools for AI Agents"
-description: "AI agents ship with 30-step chains, but debugging them means re-running everything from scratch. Rewind records every LLM call, lets you fork at any failure, replay with the fix, and prove it works. Open source, MIT licensed."
+description: "AI agents ship with 30-step chains, but debugging them means re-running everything from scratch. Rewind records every LLM call, lets you fork at any failure, replay with the fix, and prove it works."
 date: 2026-04-13
-author: "AgentOptics"
+author: "Rishabh Jain"
 tags: ["announcement", "open-source", "ai-agents", "debugging"]
 draft: false
 ---
 
 I spent two months debugging a 40-step booking agent. Every time it failed, I'd change the prompt, re-run the whole thing, wait 3 minutes, and check the output. Different result each time because LLMs are non-deterministic. I couldn't even tell if my fix worked.
 
-That's the state of AI agent debugging in 2026. We have tracing tools that show you what happened. We have eval frameworks that score outputs. Nobody built the thing in between: a debugger that lets you go back to the failure, change one thing, and re-run only that part.
+That's the state of AI agent debugging in 2026. We have tracing tools that show you what happened. We have eval frameworks that score outputs. But when I need to go back to a specific failure, change one thing, and re-run only that part — the existing tools don't do that. Playgrounds let you re-run a single call. Evals score the output. Neither lets you fork a full multi-step execution at step 15 and replay from there with cached context.
 
 So I built it.
 
@@ -29,11 +29,11 @@ rewind_agent.init()
 # every LLM call is recorded automatically
 ```
 
-That's the setup. One line. After your agent runs, you have a full recording.
+That's the setup. One line. After your agent runs, you have a full recording. Everything is stored locally in a SQLite database — nothing leaves your machine unless you explicitly export or share.
 
-## 🔍 See what the model saw
+## See the full execution tree
 
-The first thing you want when an agent fails: what was in the context window at each step?
+The first thing you want when an agent fails: which step broke, and what was the context?
 
 ```bash
 rewind show latest
@@ -42,57 +42,54 @@ rewind show latest
 ```
 ⏪ Rewind — Session Trace
 
-  Session: booking-agent   Steps: 12   Tokens: 274,200
-  Agents: supervisor, researcher, writer
+  Session: research-agent-demo   Steps: 5   Tokens: 1,096
+  Agents: supervisor → researcher → writer
 
-  ▼ ✓ 🤖 supervisor (agent)                          1.2s
-    ├ ✓ 🧠  gpt-4o  "Route to researcher"           320ms  4,120↓ 840↑
-    ▼ ✓ 🤖 researcher (agent)                        2.1s
-    │ ├ ✓ 🧠  gpt-4o  "Search for information"      890ms  8,340↓ 2,100↑
-    │ ├ ✓ 🔧  web_search("Tokyo population")          45ms
-    │ └ ✓ 🧠  gpt-4o  "Synthesize results"          650ms  6,280↓ 1,950↑
-    ├ ✓ 🔀 handoff: researcher → writer
-    ▼ ✗ 🤖 writer (agent)                            1.8s
-    │ ├ ✓ 🧠  gpt-4o  "Draft article"              1200ms  9,450↓ 3,180↑
-    │ └ ✗ 🧠  gpt-4o  "Polish final draft"          600ms  7,320↓ 2,120↑
-    │     ERROR: Hallucination — used stale data
-    └ ✓ 🧠  gpt-4o  "Final review"                   400ms  5,200↓ 1,450↑
+  ▼ ✗ 🤖 supervisor (agent)                             2.7s
+    ▼ ✓ 🤖 researcher (agent)                           1.3s
+    │ ├ ✓ 🧠  gpt-4o   320ms   156↓ 28↑
+    │ ├ ✓ 🔧  tool      45ms
+    │ └ ✓ 🧠  gpt-4o   890ms   312↓ 35↑
+    ├ ✓ 🔧  tool      38ms
+    ▼ ✗ 🤖 writer (agent)                               1.5s
+      └ ✗ 🧠  gpt-4o  1450ms   520↓ 180↑
+          ERROR: HALLUCINATION: Agent used stale 2019 projection
+          as current fact, ignored COVID-19 dip
 ```
 
-That's a span tree. Agent boundaries, tool calls, handoffs, token counts at each step. The writer agent hallucinated at step 8 because the researcher passed stale data. Without the tree, you'd see a flat list of 12 steps with no structure.
+That's a span tree. Agent boundaries, tool calls, handoffs, token counts at each step. The writer agent hallucinated at step 5 because the researcher's second search returned stale cached data from 2019 — but the agent treated a pre-COVID projection as current fact. Without the tree, you'd see a flat list of 5 steps with no agent structure.
+
+Click into any step in the web dashboard to see the exact prompt, system message, and response the model saw:
 
 ![Rewind web dashboard showing session trace with span tree](/screenshot-session-trace.png)
 
-## ⏪ Fork at the failure, replay with the fix
+## Fork at the failure, replay with the fix
 
-This is the core idea. Fix your code, then:
+This is the core idea. Fix your code (add a staleness check, update the prompt, whatever), then:
 
 ```bash
-rewind replay latest --from 7
+rewind replay latest --from 4
 ```
 
-Steps 1-6 are served from cache. Zero tokens, zero API calls. Only step 7+ re-runs live with your updated code. You get a new timeline ("fixed") alongside the original ("main").
+Steps 1-3 are served from cache. Zero tokens, zero API calls. Only step 4+ re-runs live with your updated code. You get a new timeline ("fixed") alongside the original ("main").
 
 ```bash
 rewind diff latest main fixed
 ```
 
 ```
-⏪ Rewind — Timeline Diff (main vs fixed, diverge at step 7)
+⏪ Rewind — Timeline Diff (main vs fixed, diverge at step 4)
 
   ═ Step  1  identical
   ═ Step  2  identical
   ═ Step  3  identical
-  ═ Step  4  identical
-  ═ Step  5  identical
-  ═ Step  6  identical
-  ≠ Step  7  [stale data]  →  [fresh data]
-  ≠ Step  8  [error] 7320tok   →  [success] 7540tok
+  ≠ Step  4  [stale data]  →  [fresh data]
+  ≠ Step  5  [error] 520↓ 180↑  →  [success] 540↓ 195↑
 ```
 
 You can see exactly where the timelines diverge and why. No guessing, no "let me re-run the whole thing and hope."
 
-## ✅ Prove the fix with LLM-as-judge
+## Prove the fix with LLM-as-judge
 
 Changed the prompt? Score both timelines automatically:
 
@@ -116,12 +113,14 @@ Original: 0.2 on correctness. Fixed: 0.95. Not you guessing. An LLM evaluator co
 Set up regression baselines for CI:
 
 ```python
-result = rewind_agent.evaluate(
+from rewind_agent import evaluate, llm_judge_evaluator, exact_match
+
+result = evaluate(
     dataset="booking-tests",
     target_fn=my_agent,
     evaluators=[
         exact_match,
-        rewind_agent.llm_judge_evaluator(criteria="correctness"),
+        llm_judge_evaluator(criteria="correctness"),
     ],
     fail_below=0.9,
 )
@@ -129,7 +128,7 @@ result = rewind_agent.evaluate(
 
 CI fails if the score drops below 90%. Ship with evidence.
 
-## 📤 Share debug sessions
+## Share debug sessions
 
 ```bash
 rewind share latest --include-content -o debug-session.html
@@ -139,7 +138,7 @@ Generates a self-contained HTML file. Open it in any browser, no install needed.
 
 ![Rewind HTML share viewer showing timelines and fork](/screenshot-share-html.png)
 
-## 🔌 Works with your existing stack
+## Works with your existing stack
 
 Rewind isn't a replacement for your observability tools. It works alongside them.
 
@@ -155,24 +154,24 @@ Fork it, replay with the fix, export the fixed trace back:
 rewind export otel latest --endpoint https://cloud.langfuse.com
 ```
 
-Same for LangSmith, Datadog, Grafana Tempo, Jaeger, or anything that speaks OpenTelemetry.
+Export works with any OTel-compatible backend: LangSmith, Datadog, Grafana Tempo, Jaeger.
 
 **Providers:** OpenAI, Anthropic, AWS Bedrock, any OpenAI-compatible API (Ollama, vLLM, LiteLLM).
 
 **Frameworks:** OpenAI Agents SDK and Pydantic AI (native, auto-detected), LangGraph and CrewAI (wrapper support), plus any framework via the HTTP proxy.
 
-## 🏗️ How it's built
+## How it's built
 
 Single Rust binary. No containers, no database servers, no config files. Everything (CLI, recording proxy, web dashboard, MCP server) is embedded in one executable. The Python SDK auto-downloads it on first use.
 
 Recording works two ways:
 
-1. **Direct mode** (Python): `rewind_agent.init()` monkey-patches OpenAI and Anthropic SDKs in-process. Zero latency overhead.
-2. **Proxy mode** (any language): `rewind record --upstream https://api.openai.com`. Point your agent's base URL at the proxy. Streaming pass-through, no added latency.
+1. **Direct mode** (Python): `rewind_agent.init()` monkey-patches OpenAI and Anthropic SDKs in-process. Negligible overhead — recording happens in-process with no network hop.
+2. **Proxy mode** (any language): `rewind record --upstream https://api.openai.com`. Point your agent's base URL at the proxy. Streaming pass-through with sub-millisecond overhead.
 
-The web dashboard runs at `http://127.0.0.1:4800` with live updates via WebSocket. Sessions appear as they're recorded.
+The web dashboard runs at `http://127.0.0.1:8080` with live updates via WebSocket. Sessions appear as they're recorded. (Or `rewind web --port 4800` if you prefer a custom port.)
 
-29 CLI commands. 26 MCP tools for AI assistants (Claude Code, Cursor, Windsurf) to query recordings from your IDE. MIT licensed.
+Dozens of CLI commands. 26 MCP tools for AI assistants (Claude Code, Cursor, Windsurf) to query recordings from your IDE. MIT licensed.
 
 ## Try it
 
@@ -181,7 +180,7 @@ pip install rewind-agent
 rewind demo && rewind inspect latest
 ```
 
-No API keys needed. `rewind demo` seeds a sample multi-agent session with a hallucination at step 5. Try `show`, `replay`, `diff`, `eval score`, `share` on it.
+No API keys needed. `rewind demo` seeds a sample research agent session with a hallucination at step 5 — the agent uses stale 2019 data as current fact. Try `show`, `replay`, `diff`, `eval score`, `share` on it.
 
 Or add one line to your own agent:
 
@@ -196,4 +195,4 @@ rewind_agent.init()
 - **Docs**: [Getting started](https://github.com/agentoptics/rewind/blob/master/docs/getting-started.md)
 - **Website**: [agentoptics.dev](https://agentoptics.dev)
 
-We're building Rewind in the open. If you're debugging AI agents and want to talk about what's broken, [open a discussion](https://github.com/agentoptics/rewind/discussions).
+I'm building Rewind in the open. If you're debugging AI agents and want to talk about what's broken, [open a discussion](https://github.com/agentoptics/rewind/discussions).
