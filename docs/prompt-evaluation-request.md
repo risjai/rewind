@@ -16,7 +16,7 @@ Here's what I need you to do:
 
 **3. Write an evaluation report** covering:
 
-**a. Integration fit**: Does Rewind support our agent framework and LLM provider? They have native adapters for OpenAI Agents SDK (`TracingProcessor` subclass), Pydantic AI (auto-patched Hooks), LangGraph (`wrap_langgraph`), and CrewAI (`wrap_crew`), plus a transparent HTTP proxy that works with any language. They also have Claude Code / Cursor / Windsurf integration via an MCP server with 25 tools. How many lines of code would it take to integrate? Show a concrete before/after snippet using our actual code.
+**a. Integration fit**: Does Rewind support our agent framework and LLM provider? They have native integrations for OpenAI Agents SDK (`TracingProcessor` subclass) and Pydantic AI (auto-patched Hooks), wrapper support for LangGraph (`wrap_langgraph`) and CrewAI (`wrap_crew`), plus a transparent HTTP proxy that works with any framework and language. They also have Claude Code / Cursor / Windsurf integration via an MCP server with 25 tools. How many lines of code would it take to integrate? Show a concrete before/after snippet using our actual code.
 
 **b. Problem/solution match**: Do we actually have the problems Rewind solves? Specifically:
    - Are we spending time/money re-running full agent chains to debug failures? (Rewind's fork-and-replay serves steps 1–N from cache at 0 tokens.)

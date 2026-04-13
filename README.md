@@ -12,6 +12,7 @@
   <em>Other tools show what happened. Rewind lets you fix it — without re-running.</em>
   <br/>
   <br/>
+  <a href="https://agentoptics.dev">Website</a> &nbsp;&bull;&nbsp;
   <a href="#the-problem">Why</a> &nbsp;&bull;&nbsp;
   <a href="#see-it-in-action">Demo</a> &nbsp;&bull;&nbsp;
   <a href="#install">Install</a> &nbsp;&bull;&nbsp;
@@ -25,7 +26,6 @@
   [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
   [![GitHub Release](https://img.shields.io/github/v/release/agentoptics/rewind?label=release)](https://github.com/agentoptics/rewind/releases)
   [![PyPI](https://img.shields.io/pypi/v/rewind-agent?style=flat)](https://pypi.org/project/rewind-agent/)
-  [![GitHub stars](https://img.shields.io/github/stars/agentoptics/rewind?style=social)](https://github.com/agentoptics/rewind)
   <br/>
   <sub>Single binary &middot; zero dependencies &middot; MIT licensed</sub>
 </p>
@@ -217,7 +217,7 @@ See the [Getting Started guide](docs/getting-started.md) for more options.
 | **Snapshots** | Checkpoint your entire workspace before an agent runs. If it breaks something, restore in one command. Compressed tar+gz in the blob store — no git required. | [snapshots.md](docs/snapshots.md) | [11_snapshots.sh](examples/11_snapshots.sh) |
 | **Web Dashboard** | Browser-based session explorer with step timeline, context window viewer, timeline diff, and live recording via WebSocket. Everything embedded in the single binary. | [web-ui.md](docs/web-ui.md) | — |
 | **Multi-Agent Tracing** | Hierarchical span tree for multi-agent workflows. Auto-captures agent boundaries, tool calls, and handoffs from OpenAI Agents SDK. Manual `@span()` decorator for custom grouping. Thread view for multi-turn conversations. | [multi-agent-tracing.md](docs/multi-agent-tracing.md) | — |
-| **Framework Integrations** | Native support for OpenAI Agents SDK, Pydantic AI, LangGraph, and CrewAI. Auto-detected on `init()` — zero config for most frameworks. | [framework-integrations.md](docs/framework-integrations.md) | [09_pydantic_ai.py](examples/09_pydantic_ai.py), [10_openai_agents_sdk.py](examples/10_openai_agents_sdk.py) |
+| **Framework Integrations** | Native support for OpenAI Agents SDK and Pydantic AI (auto-detected on `init()`). Wrapper support for LangGraph and CrewAI. Any other framework works via the HTTP proxy. | [framework-integrations.md](docs/framework-integrations.md) | [09_pydantic_ai.py](examples/09_pydantic_ai.py), [10_openai_agents_sdk.py](examples/10_openai_agents_sdk.py) |
 | **Claude Code Observation** | Observe Claude Code sessions in real-time via hooks. See every tool call (Read, Edit, Bash, Grep, Agent), user prompts, and session lifecycle. Token usage extracted from transcripts. One-command setup: `rewind hooks install`. | — | — |
 | **MCP Server** | 26 tools for AI assistants (Claude Code, Cursor, Windsurf) to query recordings, view span trees, browse threads, diff timelines, create baselines, run evals — all from your IDE. | [mcp-server.md](docs/mcp-server.md) | — |
 | **OpenTelemetry Export** | Export recorded sessions as OTel traces via OTLP to Langfuse, Datadog, Grafana Tempo, Jaeger, or any OTel-compatible backend. CLI, Python SDK, and Web API. Uses `gen_ai.*` semantic conventions. Privacy-first: message content requires explicit opt-in. | [otel-export.md](docs/otel-export.md) | — |
@@ -237,7 +237,13 @@ See the [Getting Started guide](docs/getting-started.md) for more options.
 | AWS Bedrock | ✅ | — |
 | Any OpenAI-compatible (Ollama, vLLM, LiteLLM) | ✅ | ✅ |
 
-Works with any agent framework: **[OpenAI Agents SDK](https://github.com/openai/openai-agents-python)** (native), **[Pydantic AI](https://ai.pydantic.dev/)** (native), **LangGraph**, **CrewAI**, **Autogen**, **smolagents**, or custom code.
+**Agent frameworks:**
+
+| Level | Frameworks | What it means |
+|:------|:-----------|:--------------|
+| **Native** — auto-detected on `init()` | [OpenAI Agents SDK](https://github.com/openai/openai-agents-python), [Pydantic AI](https://ai.pydantic.dev/) | Zero config. Agent boundaries, tool calls, and handoffs captured automatically. |
+| **Wrapper** — manual setup | LangGraph, CrewAI | Thin integration via `wrap_langgraph()` / `wrap_crew()`. CrewAI requires proxy mode. |
+| **Works via proxy** | Any framework using OpenAI/Anthropic APIs | Point `OPENAI_BASE_URL` at the proxy. Works with Autogen, smolagents, custom code, any language. |
 
 ## Works With Your Observability Stack
 

@@ -101,7 +101,11 @@ with rewind_agent.trace("analysis"):
     result = search("Tokyo population")
 ```
 
-## Framework Adapters
+## Framework Support
+
+**Native** (auto-detected on `init()`): OpenAI Agents SDK, Pydantic AI — zero config.
+
+**Wrapper** (manual setup):
 
 ```python
 # LangGraph
@@ -110,6 +114,8 @@ graph = rewind_agent.wrap_langgraph(compiled_graph)
 # CrewAI
 crew = rewind_agent.wrap_crew(crew)
 ```
+
+**Any other framework** works via the HTTP proxy — point `OPENAI_BASE_URL` at `rewind record`.
 
 ## Learn More
 
