@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 120">
+  <defs>
+    <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#0891b2;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#7c3aed;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  <text x="50" y="75" font-family="system-ui, -apple-system, sans-serif" font-size="64" font-weight="700" fill="url(#grad)">
+    <tspan>&#x23EA;</tspan> Rewind
+  </text>
+  <text x="52" y="105" font-family="system-ui, -apple-system, sans-serif" font-size="18" fill="#475569" font-weight="400">
+    Time-travel debugger for AI agents
+  </text>
+</svg>

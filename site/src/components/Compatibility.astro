@@ -1,0 +1,112 @@
+---
+const providers = [
+  { name: "OpenAI", sub: "GPT-4o, o1, o3", streaming: true },
+  { name: "Anthropic", sub: "Claude 3.5/4", streaming: true },
+  { name: "AWS Bedrock", sub: "", streaming: false },
+  { name: "Any OpenAI-compatible", sub: "Ollama, vLLM, LiteLLM", streaming: true },
+];
+
+const frameworks = [
+  "OpenAI Agents SDK",
+  "Pydantic AI",
+  "LangGraph",
+  "CrewAI",
+  "Autogen",
+  "smolagents",
+];
+---
+
+<section
+  id="compatibility"
+  class="border-t border-neutral-800/50 py-20 md:py-28"
+>
+  <div class="mx-auto max-w-5xl px-6">
+    <div class="text-center">
+      <h2 class="text-3xl font-bold tracking-tight md:text-4xl">
+        Works with your stack
+      </h2>
+      <p class="mx-auto mt-4 max-w-xl text-neutral-400">
+        Already using Langfuse, LangSmith, or Datadog? You don't have to
+        choose. Rewind works alongside them.
+      </p>
+    </div>
+
+    <div class="mt-14 grid gap-10 md:grid-cols-2">
+      <!-- Providers -->
+      <div>
+        <h3
+          class="mb-4 text-xs font-semibold uppercase tracking-widest text-neutral-500"
+        >
+          LLM Providers
+        </h3>
+        <div class="space-y-3">
+          {
+            providers.map((p) => (
+              <div class="flex items-center justify-between rounded-xl border border-neutral-800 bg-neutral-900/30 px-5 py-3">
+                <div>
+                  <span class="font-medium">{p.name}</span>
+                  {p.sub && (
+                    <span class="ml-2 text-sm text-neutral-500">{p.sub}</span>
+                  )}
+                </div>
+                <div class="flex items-center gap-3 text-xs text-neutral-500">
+                  <span class="flex items-center gap-1">
+                    <span aria-hidden="true" class="text-emerald-400">&#10003;</span>
+                    <span class="sr-only">Supported:</span> Non-streaming
+                  </span>
+                  {p.streaming ? (
+                    <span class="flex items-center gap-1">
+                      <span aria-hidden="true" class="text-emerald-400">&#10003;</span>
+                      <span class="sr-only">Supported:</span> Streaming
+                    </span>
+                  ) : (
+                    <span class="text-neutral-600" aria-label="Not supported">&mdash;</span>
+                  )}
+                </div>
+              </div>
+            ))
+          }
+        </div>
+      </div>
+
+      <!-- Frameworks -->
+      <div>
+        <h3
+          class="mb-4 text-xs font-semibold uppercase tracking-widest text-neutral-500"
+        >
+          Agent Frameworks
+        </h3>
+        <div class="grid grid-cols-2 gap-3">
+          {
+            frameworks.map((f) => (
+              <div class="flex items-center gap-2.5 rounded-xl border border-neutral-800 bg-neutral-900/30 px-5 py-3">
+                <span aria-hidden="true" class="text-emerald-400">&#10003;</span>
+                <span class="text-sm font-medium">{f}</span>
+              </div>
+            ))
+          }
+        </div>
+
+        <div class="mt-6 rounded-xl border border-neutral-800 bg-neutral-900/30 p-5">
+          <h4 class="text-xs font-semibold uppercase tracking-widest text-neutral-500 mb-3">
+            Observability stack
+          </h4>
+          <div class="flex flex-wrap gap-2">
+            {
+              ["Langfuse", "LangSmith", "Datadog", "Grafana Tempo", "Jaeger"].map(
+                (tool) => (
+                  <span class="rounded-lg bg-neutral-800 px-3 py-1.5 text-xs font-medium text-neutral-300">
+                    {tool}
+                  </span>
+                )
+              )
+            }
+          </div>
+          <p class="mt-3 text-xs text-neutral-500">
+            Import traces in, export sessions out, or dual-ship to both.
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>

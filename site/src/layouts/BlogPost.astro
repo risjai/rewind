@@ -1,0 +1,50 @@
+---
+import Base from "./Base.astro";
+import Nav from "../components/Nav.astro";
+import Footer from "../components/Footer.astro";
+
+interface Props {
+  title: string;
+  description: string;
+  date: Date;
+  author: string;
+}
+
+const { title, description, date, author } = Astro.props;
+const formattedDate = date.toLocaleDateString("en-US", {
+  year: "numeric",
+  month: "long",
+  day: "numeric",
+});
+---
+
+<Base title={`${title} — Rewind Blog`} description={description}>
+  <Nav />
+  <main class="pt-32 pb-20 md:pt-40 md:pb-28">
+    <article class="mx-auto max-w-3xl px-6">
+      <header class="mb-12">
+        <a
+          href="/blog"
+          class="text-sm text-neutral-500 transition hover:text-neutral-300"
+        >
+          &larr; Back to blog
+        </a>
+        <h1 class="mt-4 text-3xl font-bold tracking-tight md:text-4xl">
+          {title}
+        </h1>
+        <div class="mt-4 flex items-center gap-3 text-sm text-neutral-500">
+          <span>{author}</span>
+          <span>&middot;</span>
+          <time datetime={date.toISOString()}>{formattedDate}</time>
+        </div>
+      </header>
+
+      <div
+        class="prose prose-invert prose-neutral max-w-none prose-headings:font-semibold prose-headings:tracking-tight prose-a:text-brand-cyan prose-a:no-underline hover:prose-a:underline prose-code:rounded prose-code:bg-neutral-800 prose-code:px-1.5 prose-code:py-0.5 prose-code:text-neutral-300 prose-code:before:content-none prose-code:after:content-none prose-pre:rounded-xl prose-pre:border prose-pre:border-neutral-800 prose-pre:bg-neutral-950 prose-img:rounded-xl prose-img:border prose-img:border-neutral-800"
+      >
+        <slot />
+      </div>
+    </article>
+  </main>
+  <Footer />
+</Base>

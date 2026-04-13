@@ -1,0 +1,55 @@
+---
+const year = new Date().getFullYear();
+---
+
+<footer class="border-t border-neutral-800/50 py-12">
+  <div
+    class="mx-auto flex max-w-6xl flex-col items-center gap-6 px-6 md:flex-row md:justify-between"
+  >
+    <div class="flex items-center gap-2.5">
+      <img src="/favicon.svg" alt="" class="h-6 w-6" />
+      <span class="text-sm font-semibold">Rewind</span>
+      <span class="text-sm text-neutral-500"
+        >by <a
+          href="https://github.com/agentoptics"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="transition hover:text-neutral-300">AgentOptics</a
+        ></span
+      >
+    </div>
+
+    <div class="flex items-center gap-6 text-sm text-neutral-500">
+      <a
+        href="https://github.com/agentoptics/rewind"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="transition hover:text-neutral-300">GitHub</a
+      >
+      <a
+        href="https://github.com/agentoptics/rewind/blob/master/docs/getting-started.md"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="transition hover:text-neutral-300">Docs</a
+      >
+      <a
+        href="https://pypi.org/project/rewind-agent/"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="transition hover:text-neutral-300">PyPI</a
+      >
+      <a href="/blog" class="transition hover:text-neutral-300">Blog</a>
+    </div>
+
+    <div class="flex items-center gap-3 text-xs text-neutral-600">
+      <a
+        href="https://github.com/agentoptics/rewind/blob/master/LICENSE"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="transition hover:text-neutral-400">MIT License</a
+      >
+      <span>&middot;</span>
+      <span>&copy; {year} AgentOptics</span>
+    </div>
+  </div>
+</footer>
