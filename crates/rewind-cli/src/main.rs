@@ -1,3 +1,5 @@
+mod share;
+
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
@@ -149,6 +151,20 @@ enum Commands {
     Restore {
         /// Snapshot ID or label
         snapshot: String,
+    },
+
+    /// Share a session as a self-contained HTML file
+    Share {
+        /// Session ID or "latest"
+        session: String,
+
+        /// Include full request/response content (not just metadata)
+        #[arg(long)]
+        include_content: bool,
+
+        /// Output file path (default: rewind-session-{id}.html)
+        #[arg(short, long)]
+        output: Option<std::path::PathBuf>,
     },
 
     /// List snapshots
@@ -600,6 +616,7 @@ async fn main() -> Result<()> {
         Commands::Diff { session, left, right } => cmd_diff(session, left, right),
         Commands::Snapshot { directory, label } => cmd_snapshot(directory, label),
         Commands::Restore { snapshot } => cmd_restore(snapshot),
+        Commands::Share { session, include_content, output } => cmd_share(session, include_content, output),
         Commands::Snapshots => cmd_snapshots(),
         Commands::Cache => cmd_cache(),
         Commands::Demo => cmd_demo(),
@@ -3339,6 +3356,65 @@ async fn cmd_export_otel(args: OtelExportArgs) -> Result<()> {
             "⚠".yellow()
         );
     }
+
+    Ok(())
+}
+
+// ── Share Command ──────────────────────────────────────────
+
+fn cmd_share(session_ref: String, include_content: bool, output: Option<std::path::PathBuf>) -> Result<()> {
+    let store = Store::open_default()?;
+    let session = resolve_session(&store, &session_ref)?;
+
+    // Content warning + confirmation
+    if include_content {
+        eprintln!(
+            "{} This file will contain full LLM request/response content.",
+            "⚠".yellow().bold(),
+        );
+        eprint!("  Proceed? [y/N] ");
+        use std::io::{self, BufRead};
+        let mut line = String::new();
+        io::stdin().lock().read_line(&mut line)?;
+        if !line.trim().eq_ignore_ascii_case("y") {
+            println!("Cancelled.");
+            return Ok(());
+        }
+    }
+
+    println!(
+        "{} Exporting session {}...",
+        "⏪".bold(),
+        session.name.cyan(),
+    );
+
+    let exported = rewind_store::export::serialize_session(&store, &session.id, include_content)?;
+    let html = share::generate_share_html(&exported)?;
+
+    let out_path = output.unwrap_or_else(|| {
+        let short_id = if session.id.len() >= 8 { &session.id[..8] } else { &session.id };
+        std::path::PathBuf::from(format!("rewind-session-{}.html", short_id))
+    });
+
+    std::fs::write(&out_path, &html)?;
+
+    let size_kb = html.len() / 1024;
+    println!();
+    println!(
+        "{} Shared session saved to: {}",
+        "✓".green().bold(),
+        out_path.display().to_string().cyan(),
+    );
+    println!(
+        "   {} Open in any browser. Share via Slack, email, or any file-sharing tool.",
+        "→".bold(),
+    );
+    println!(
+        "   {} Contains: {} ({}KB)",
+        "→".bold(),
+        if include_content { "metadata + full content" } else { "metadata only (no LLM content)" },
+        size_kb,
+    );
 
     Ok(())
 }
