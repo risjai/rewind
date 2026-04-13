@@ -9,7 +9,7 @@
   <br/>
   <strong>The time-travel debugger for AI agents</strong>
   <br/>
-  <em>Built-in tracing, evals, and CI regression testing — no LangSmith required.</em>
+  <em>Other tools show what happened. Rewind lets you fix it — without re-running.</em>
   <br/>
   <br/>
   <a href="#the-problem">Why</a> &nbsp;&bull;&nbsp;
@@ -32,7 +32,7 @@
 
 ---
 
-> **Agent broke at step 30? Fix step 30 — not steps 1 through 29 again.** Each re-run costs tokens, time, and a different answer.
+> Every observability tool — Langfuse, LangSmith, Helicone — shows you **what happened**. None of them let you **change the past and observe a different future**. Rewind does.
 
 ## The Problem
 
@@ -41,28 +41,29 @@ AI agents are shipping to production — tool-calling chains with 10, 30, 50 LLM
 - **You can't see what the model saw.** What was in the context window at step 41? What got truncated?
 - **You can't reproduce it.** Re-run the agent and you get a different result. The LLM is non-deterministic.
 - **You can't isolate the failure.** Was it step 5 or step 2? You have to re-run all 50 steps ($$$, minutes) just to test a theory.
+- **You can't prove your fix works.** You changed the prompt — did it actually improve things, or just shift the problem?
 
-Every existing observability tool shows you **what happened**. None of them let you **change the past and observe a different future**.
+Agent broke at step 30? Fix step 30 — not steps 1 through 29 again. Each re-run costs tokens, time, and a different answer.
 
 ## The Solution
 
-**Rewind is Chrome DevTools for AI agents.**
+**Rewind is Chrome DevTools for AI agents — fork at any failure, replay with the fix, prove it works.**
 
 | Capability | What it means |
 |:---|:---|
-| **Record** | A transparent proxy captures every LLM call. Your agent doesn't know it's being recorded. Streaming works in real-time — zero added latency. |
-| **Inspect** | See the *exact* context window at each step. Every message, system prompt, and tool response the model saw — displayed as human-readable, color-coded views. |
-| **Fork** | Branch the execution timeline at any step. Edit the context (fix a stale tool response, tweak the prompt). Resume from there — re-run only the new steps. |
-| **Diff** | Compare the original and forked timelines. See exactly where they diverge and why. |
-| **Replay from Failure** | Agent fails at step 5? Fix your code, run `rewind replay --from 4`. Steps 1-4 served instantly from cache (0 tokens, 0ms). Only step 5 re-runs live. Diff the result. |
+| **Fork & Replay** | Branch the execution timeline at any step. Fix your code, run `rewind replay --from 4`. Steps 1-4 served from cache (0 tokens, 0ms). Only the fixed step re-runs live. **No other tool does this.** |
+| **Prove the Fix** | Score original vs. forked timelines with LLM-as-judge: `rewind replay → rewind eval score → proof the fix works`. Correctness, coherence, safety, relevance — scored automatically. |
+| **Import & Debug** | Import production traces from Langfuse, Datadog, or any OTel backend (`rewind import otel`). Fork at the failure, replay locally, export the fix back. Debug production failures without re-running in production. |
+| **Record** | A transparent proxy captures every LLM call. Streaming works in real-time — zero added latency. Or one-line Python SDK: `rewind_agent.init()`. |
+| **Inspect** | See the *exact* context window at each step. Every message, system prompt, and tool response the model saw. |
+| **Diff** | Compare original and forked timelines. See exactly where they diverge and why. |
 | **Instant Replay** | Identical requests are served from cache at **0 tokens, 0ms latency**. Run the same agent 10 times — only the first run hits the LLM. |
-| **Regression Testing** | Turn any session into a baseline. After code changes, check the new behavior: step types, models, tool calls, token counts. Run in CI. |
-| **Evaluation** | Create datasets of test cases, run your agent against them, score with built-in evaluators (exact match, contains, regex, JSON schema, tool use, **LLM-as-judge**), compare experiments side-by-side. CI-ready with `--fail-below` thresholds. |
-| **LLM-as-Judge** | Score agent outputs with an LLM on criteria like correctness, coherence, safety, relevance, and task completion. Compare original vs. forked timelines: `rewind replay → rewind eval score → proof the fix works`. |
-| **Multi-Agent Tracing** | See which agent made which decision. Span tree visualization groups LLM calls, tool invocations, and handoffs under their parent agent. Thread view tracks multi-turn conversations across sessions. |
-| **Snapshots** | Capture your entire workspace at any point. Restore in one command if your agent breaks something. No git dependency. |
+| **Evaluation** | Create datasets, run your agent against them, score with 7 evaluator types (exact match, contains, regex, JSON schema, tool use, custom, **LLM-as-judge**). CI-ready with `--fail-below` thresholds. |
+| **Regression Testing** | Turn any session into a baseline. After code changes, check step types, models, tool calls, token counts. 3-line GitHub Action. |
+| **Multi-Agent Tracing** | Span tree visualization groups LLM calls, tool invocations, and handoffs under their parent agent. Thread view for multi-turn conversations. |
+| **Snapshots** | Capture your entire workspace. Restore in one command if your agent breaks something. No git dependency. |
 
-**The only tool where debugging, tracing, and evals share the same data model.** Fork a session, replay it, diff it, score it — all on the same timeline. No second tool needed.
+**The only tool where debugging, tracing, and evals share the same data model.** Fork a session, replay it, diff it, score it — all on the same timeline.
 
 ## See It in Action
 
@@ -232,6 +233,18 @@ See the [Getting Started guide](docs/getting-started.md) for more options.
 
 Works with any agent framework: **[OpenAI Agents SDK](https://github.com/openai/openai-agents-python)** (native), **[Pydantic AI](https://ai.pydantic.dev/)** (native), **LangGraph**, **CrewAI**, **Autogen**, **smolagents**, or custom code.
 
+## Works With Your Observability Stack
+
+Already using Langfuse, LangSmith, or Datadog? **You don't have to choose.** Rewind works alongside them:
+
+| Direction | How | Use Case |
+|:---|:---|:---|
+| **Import** traces into Rewind | `rewind import otel --file trace.pb` or `POST /v1/traces` | Debug a production failure locally — fork, replay, fix |
+| **Export** sessions to your backend | `rewind export otel latest --endpoint <langfuse>` | Send debugging sessions to the team dashboard |
+| **Dual-ship** traces to both | Configure your agent's OTel exporter to send to both endpoints | Record locally + observe in production simultaneously |
+
+Use your existing tool for production dashboards and alerting. Use Rewind when something breaks and you need to **fix it**, not just **see it**.
+
 ## Roadmap
 
 | Phase | Features | Status |
@@ -245,7 +258,7 @@ Works with any agent framework: **[OpenAI Agents SDK](https://github.com/openai/
 | **v0.7** | OpenTelemetry export (CLI, Python SDK, Web API, Dashboard) | ✅ Shipped |
 | **v0.8** | LLM-as-judge evaluators, timeline scoring, `rewind eval score` command | ✅ Shipped |
 | **v0.9** | OTel trace ingestion — import OTLP traces, debug production failures locally | ✅ Shipped |
-| **v1.0** | Rewind Cloud, shared sessions, team dashboards, live breakpoints, semantic diff | Planned |
+| **v1.0** | Rewind Cloud — collaborative debugging, shared sessions, live breakpoints, semantic diff | Planned |
 
 ## Why "Rewind"?
 
