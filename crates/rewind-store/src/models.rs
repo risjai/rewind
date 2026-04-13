@@ -615,6 +615,49 @@ impl ExperimentScore {
     }
 }
 
+// ── Timeline Scores (LLM-as-Judge) ─────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimelineScore {
+    pub id: String,
+    pub session_id: String,
+    pub timeline_id: String,
+    pub evaluator_id: String,
+    pub score: f64,
+    pub passed: bool,
+    pub reasoning: String,
+    pub input_blob: String,
+    pub output_blob: String,
+    pub created_at: DateTime<Utc>,
+}
+
+impl TimelineScore {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        session_id: &str,
+        timeline_id: &str,
+        evaluator_id: &str,
+        score: f64,
+        passed: bool,
+        reasoning: &str,
+        input_blob: &str,
+        output_blob: &str,
+    ) -> Self {
+        TimelineScore {
+            id: Uuid::new_v4().to_string(),
+            session_id: session_id.to_string(),
+            timeline_id: timeline_id.to_string(),
+            evaluator_id: evaluator_id.to_string(),
+            score,
+            passed,
+            reasoning: reasoning.to_string(),
+            input_blob: input_blob.to_string(),
+            output_blob: output_blob.to_string(),
+            created_at: Utc::now(),
+        }
+    }
+}
+
 // ── Assertion Baselines ──────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

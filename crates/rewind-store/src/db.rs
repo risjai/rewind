@@ -239,6 +239,23 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_experiment_scores_evaluator
                 ON experiment_scores(evaluator_id);
 
+            -- Timeline scores (LLM-as-Judge)
+            CREATE TABLE IF NOT EXISTS timeline_scores (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL REFERENCES sessions(id),
+                timeline_id TEXT NOT NULL REFERENCES timelines(id),
+                evaluator_id TEXT NOT NULL REFERENCES evaluators(id),
+                score REAL NOT NULL,
+                passed INTEGER NOT NULL,
+                reasoning TEXT NOT NULL DEFAULT '',
+                input_blob TEXT NOT NULL DEFAULT '',
+                output_blob TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                UNIQUE(timeline_id, evaluator_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_timeline_scores_session
+                ON timeline_scores(session_id);
+
             -- Multi-agent tracing: span tree
             CREATE TABLE IF NOT EXISTS spans (
                 id TEXT PRIMARY KEY,
@@ -1225,6 +1242,86 @@ impl Store {
                 .unwrap()
                 .with_timezone(&chrono::Utc),
         })
+    }
+
+    // ── Timeline Scores ───────────────────────────────────────
+
+    /// Upsert a timeline score (UNIQUE on timeline_id + evaluator_id).
+    pub fn create_timeline_score(&self, score: &TimelineScore) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO timeline_scores (id, session_id, timeline_id, evaluator_id, score, passed, reasoning, input_blob, output_blob, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(timeline_id, evaluator_id) DO UPDATE SET
+                score = excluded.score,
+                passed = excluded.passed,
+                reasoning = excluded.reasoning,
+                input_blob = excluded.input_blob,
+                output_blob = excluded.output_blob,
+                created_at = excluded.created_at",
+            params![
+                score.id,
+                score.session_id,
+                score.timeline_id,
+                score.evaluator_id,
+                score.score,
+                score.passed as i32,
+                score.reasoning,
+                score.input_blob,
+                score.output_blob,
+                score.created_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Get all timeline scores for a session.
+    pub fn get_timeline_scores(&self, session_id: &str) -> Result<Vec<TimelineScore>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, timeline_id, evaluator_id, score, passed, reasoning, input_blob, output_blob, created_at
+             FROM timeline_scores WHERE session_id = ?1 ORDER BY created_at",
+        )?;
+        let rows = stmt.query_map(params![session_id], |row| {
+            Ok(TimelineScore {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                timeline_id: row.get(2)?,
+                evaluator_id: row.get(3)?,
+                score: row.get(4)?,
+                passed: row.get::<_, i32>(5)? != 0,
+                reasoning: row.get(6)?,
+                input_blob: row.get(7)?,
+                output_blob: row.get(8)?,
+                created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(9)?)
+                    .unwrap()
+                    .with_timezone(&chrono::Utc),
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Check if a timeline score already exists for the given timeline + evaluator.
+    pub fn get_timeline_score(&self, timeline_id: &str, evaluator_id: &str) -> Result<Option<TimelineScore>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, timeline_id, evaluator_id, score, passed, reasoning, input_blob, output_blob, created_at
+             FROM timeline_scores WHERE timeline_id = ?1 AND evaluator_id = ?2",
+        )?;
+        let mut rows = stmt.query_map(params![timeline_id, evaluator_id], |row| {
+            Ok(TimelineScore {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                timeline_id: row.get(2)?,
+                evaluator_id: row.get(3)?,
+                score: row.get(4)?,
+                passed: row.get::<_, i32>(5)? != 0,
+                reasoning: row.get(6)?,
+                input_blob: row.get(7)?,
+                output_blob: row.get(8)?,
+                created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(9)?)
+                    .unwrap()
+                    .with_timezone(&chrono::Utc),
+            })
+        })?;
+        Ok(rows.next().transpose()?)
     }
 
     // ── Spans ─────────────────────────────────────────────────
