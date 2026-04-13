@@ -1,6 +1,7 @@
 """Tests for the Langfuse trace import module."""
 
 import json
+import urllib.error
 from unittest import mock
 
 import pytest
@@ -274,5 +275,3 @@ class TestSubprocessEntryPoint:
             with pytest.raises((SystemExit, KeyError)):
                 main()
 
-
-import urllib.error

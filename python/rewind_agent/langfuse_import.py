@@ -19,7 +19,6 @@ import json
 import logging
 import os
 import sys
-import struct
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -123,8 +122,17 @@ def _fetch_observations_paginated(
             "Authorization": f"Basic {credentials}",
             "Accept": "application/json",
         })
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            result = json.loads(resp.read())
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                result = json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            raise RuntimeError(
+                f"Langfuse observations API error ({e.code}) for trace {trace_id}"
+            ) from e
+        except urllib.error.URLError as e:
+            raise ConnectionError(
+                f"Failed to fetch observations from Langfuse at {host}: {e}"
+            ) from e
 
         all_obs.extend(result.get("data", []))
         meta = result.get("meta", {})
@@ -168,7 +176,6 @@ def _observation_to_span(obs: dict, trace_id_hex: str) -> dict | None:
     parent_obs_id = obs.get("parentObservationId")
     parent_span_id_hex = _stable_id(parent_obs_id, 8) if parent_obs_id else ""
 
-    obs_type = obs.get("type", "SPAN")
     name = _infer_span_name(obs)
 
     start_ns = _iso_to_nanos(obs.get("startTime", ""))
@@ -264,6 +271,8 @@ def _iso_to_nanos(iso_str: str) -> int:
     try:
         iso_str = iso_str.replace("Z", "+00:00")
         dt = datetime.fromisoformat(iso_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
         epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
         delta = dt - epoch
         return int(delta.total_seconds() * 1_000_000_000)
