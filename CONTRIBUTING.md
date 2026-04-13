@@ -39,7 +39,7 @@ The Python SDK lives in `python/rewind_agent/`.
 
 ## Areas where help is most welcome
 
-- **Framework adapters** — LangGraph, CrewAI, OpenAI Agents SDK integrations
+- **Framework integrations** — OpenAI Agents SDK, Pydantic AI (native); LangGraph, CrewAI (wrapper)
 - **Web UI** — browser-based timeline explorer
 - **Testing** — more test coverage across all crates
 - **Documentation** — usage guides, examples, tutorials
