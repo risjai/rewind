@@ -1,3 +1,6 @@
+/// Re-export pricing from rewind-store for backwards compatibility.
+pub use rewind_store::pricing;
+
 use anyhow::Result;
 use hyper::body::Incoming;
 use hyper::server::conn::http1;

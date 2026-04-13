@@ -5,7 +5,7 @@ use rewind_assert::{AssertionEngine, BaselineManager, Tolerance};
 use rewind_eval::{DatasetManager, EvaluatorRegistry, ExperimentRunner, RunConfig, extract_timeline_output};
 use rewind_proxy::ProxyServer;
 use rewind_replay::ReplayEngine;
-use rewind_store::Store;
+use rewind_store::{Store, Timeline};
 use rewind_tui::TuiApp;
 use rewind_web::WebServer;
 use std::net::SocketAddr;
@@ -882,11 +882,106 @@ fn cmd_show(session_ref: String, flat: bool) -> Result<()> {
         }
     }
 
+    // ── Replay savings (if session has forks) ─────────────────
+    let timelines = store.get_timelines(&session.id)?;
+    let forks: Vec<&Timeline> = timelines.iter()
+        .filter(|t| t.parent_timeline_id.is_some() && t.fork_at_step.is_some())
+        .collect();
+    if !forks.is_empty() {
+        print_session_savings(&store, &forks);
+    }
+
     println!();
     println!("  Run {} to explore interactively.", format!("rewind inspect {}", &session.id[..8]).green());
     let web_url = format!("http://127.0.0.1:4800/#/session/{}", session.id);
     println!("  Web: {}", format!("\x1b]8;;{}\x1b\\{}\x1b]8;;\x1b\\", web_url, web_url).cyan());
     Ok(())
+}
+
+fn print_session_savings(store: &Store, forks: &[&Timeline]) {
+    use rewind_proxy::pricing::{compute_savings, ReplaySavings};
+
+    let mut cumulative = ReplaySavings {
+        steps_total: 0,
+        steps_cached: 0,
+        steps_live: 0,
+        tokens_saved: 0,
+        cost_saved_usd: 0.0,
+        time_saved_ms: 0,
+    };
+
+    for fork in forks {
+        let parent_id = match &fork.parent_timeline_id {
+            Some(id) => id,
+            None => continue,
+        };
+        let fork_at = match fork.fork_at_step {
+            Some(n) => n,
+            None => continue,
+        };
+        let parent_steps = match store.get_steps(parent_id) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let own_steps = match store.get_steps(&fork.id) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        let cached: Vec<_> = parent_steps.into_iter()
+            .filter(|s| s.step_number <= fork_at)
+            .collect();
+        let savings = compute_savings(&cached, &own_steps);
+
+        cumulative.steps_total += savings.steps_total;
+        cumulative.steps_cached += savings.steps_cached;
+        cumulative.steps_live += savings.steps_live;
+        cumulative.tokens_saved += savings.tokens_saved;
+        cumulative.cost_saved_usd += savings.cost_saved_usd;
+        cumulative.time_saved_ms += savings.time_saved_ms;
+    }
+
+    if cumulative.steps_cached == 0 {
+        return;
+    }
+
+    println!();
+    println!("  {}", "⏪ Replay Savings".cyan().bold());
+    println!(
+        "    {} {} cached (served from fork cache)",
+        "Steps:".dimmed(),
+        format!("{}/{}", cumulative.steps_cached, cumulative.steps_total).yellow(),
+    );
+    println!(
+        "    {} {}",
+        "Tokens saved:".dimmed(),
+        format!("{}", cumulative.tokens_saved).blue(),
+    );
+    println!(
+        "    {} {}",
+        "Cost saved:".dimmed(),
+        format!("${:.2}", cumulative.cost_saved_usd).green().bold(),
+    );
+
+    let secs = cumulative.time_saved_ms / 1000;
+    let time_str = if secs >= 60 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("{}.{}s", secs, (cumulative.time_saved_ms % 1000) / 100)
+    };
+    println!(
+        "    {} {}",
+        "Time saved:".dimmed(),
+        time_str.yellow(),
+    );
+
+    if forks.len() > 1 {
+        println!(
+            "    {} across {} replays",
+            "Cumulative:".dimmed(),
+            forks.len().to_string().white().bold(),
+        );
+    }
 }
 
 fn render_span_tree(spans: &[rewind_store::Span], steps: &[rewind_store::Step], store: &Store, indent: usize) {

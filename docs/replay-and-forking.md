@@ -84,6 +84,55 @@ Forks use structural sharing internally — forking at step 40 of a 50-step run 
 
 ---
 
+## Replay Savings
+
+After every fork-and-execute replay, Rewind shows how many tokens, dollars, and minutes were saved by serving cached steps instead of re-running them.
+
+### CLI (`rewind show`)
+
+```
+⏪ Replay Savings
+  Steps:        27/30 cached (served from fork cache)
+  Tokens saved: 4,200
+  Cost saved:   $0.84
+  Time saved:   2m 15s
+```
+
+### Python SDK
+
+Printed to stderr when the `replay()` context manager exits:
+
+```
+⏪ Replay Savings
+  Steps cached:  27
+  Tokens saved:  4,200
+  Cost saved:    $0.84
+  Time saved:    2m 15.0s
+```
+
+### Web API
+
+```
+GET /api/sessions/{id}/savings
+```
+
+Returns:
+
+```json
+{
+  "steps_total": 30,
+  "steps_cached": 27,
+  "steps_live": 3,
+  "tokens_saved": 4200,
+  "cost_saved_usd": 0.84,
+  "time_saved_ms": 135000
+}
+```
+
+Cost estimates use a hardcoded model price table (gpt-4o, claude-sonnet, etc.) with a default fallback. Savings are cumulative across all forks in the session.
+
+---
+
 ## Instant Replay — same task, 0 tokens
 
 When you enable `--replay`, Rewind caches every successful LLM response. The next time your agent sends the exact same request, the cached response is returned instantly — no upstream call, no tokens burned.

@@ -19,6 +19,7 @@ pub fn routes(state: AppState) -> Router {
         .route("/sessions/{id}/timelines", get(get_session_timelines))
         .route("/sessions/{id}/diff", get(diff_timelines))
         .route("/sessions/{id}/export/otel", post(export_otel))
+        .route("/sessions/{id}/savings", get(get_session_savings))
         .route("/steps/{id}", get(get_step_detail))
         .route("/baselines", get(list_baselines))
         .route("/baselines/{name}", get(get_baseline))
@@ -655,4 +656,61 @@ async fn export_otel(
         spans_exported,
         trace_id: trace_id.to_string(),
     }))
+}
+
+async fn get_session_savings(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<rewind_store::pricing::ReplaySavings>, (StatusCode, String)> {
+    let store = state.store.lock().map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Lock error: {e}"))
+    })?;
+
+    let session = store.get_session(&id).map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
+    })?;
+    let session = session.ok_or_else(|| (StatusCode::NOT_FOUND, "Session not found".into()))?;
+
+    let timelines = store.get_timelines(&session.id).map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
+    })?;
+
+    let mut cumulative = rewind_store::pricing::ReplaySavings {
+        steps_total: 0,
+        steps_cached: 0,
+        steps_live: 0,
+        tokens_saved: 0,
+        cost_saved_usd: 0.0,
+        time_saved_ms: 0,
+    };
+
+    for fork in &timelines {
+        let parent_id = match &fork.parent_timeline_id {
+            Some(id) => id,
+            None => continue,
+        };
+        let fork_at = match fork.fork_at_step {
+            Some(n) => n,
+            None => continue,
+        };
+        let parent_steps = store.get_steps(parent_id).unwrap_or_default();
+        let own_steps = store.get_steps(&fork.id).unwrap_or_default();
+
+        let cached: Vec<_> = parent_steps.into_iter()
+            .filter(|s| s.step_number <= fork_at)
+            .collect();
+        let savings = rewind_store::pricing::compute_savings(&cached, &own_steps);
+
+        cumulative.steps_total += savings.steps_total;
+        cumulative.steps_cached += savings.steps_cached;
+        cumulative.steps_live += savings.steps_live;
+        cumulative.tokens_saved += savings.tokens_saved;
+        cumulative.cost_saved_usd += savings.cost_saved_usd;
+        cumulative.time_saved_ms += savings.time_saved_ms;
+    }
+
+    // Round cumulative cost
+    cumulative.cost_saved_usd = (cumulative.cost_saved_usd * 100.0).round() / 100.0;
+
+    Ok(Json(cumulative))
 }

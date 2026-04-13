@@ -14,6 +14,8 @@ from rewind_agent.recorder import (
     _extract_openai_usage,
     _extract_anthropic_usage,
     _OpenAIStreamWrapper,
+    estimate_cost,
+    _estimate_cost_from_steps,
 )
 
 
@@ -450,6 +452,110 @@ class TestMonkeyPatching(unittest.TestCase):
         self.assertIn("openai_sync", self.recorder._originals)
         self.assertIn("openai_async", self.recorder._originals)
         self.assertNotEqual(Completions.create, original, "Patches should be active on the class")
+
+
+class TestPricing(unittest.TestCase):
+    def test_known_model_gpt4o(self):
+        cost = estimate_cost("gpt-4o", 1_000_000, 1_000_000)
+        self.assertAlmostEqual(cost, 12.50, places=2)
+
+    def test_known_model_gpt4o_mini(self):
+        cost = estimate_cost("gpt-4o-mini", 1_000_000, 1_000_000)
+        self.assertAlmostEqual(cost, 0.75, places=2)
+
+    def test_known_model_claude_sonnet(self):
+        cost = estimate_cost("claude-sonnet-4-20250514", 1_000_000, 1_000_000)
+        self.assertAlmostEqual(cost, 18.00, places=2)
+
+    def test_unknown_model_default(self):
+        cost = estimate_cost("unknown-model", 1_000_000, 1_000_000)
+        self.assertAlmostEqual(cost, 4.00, places=2)
+
+    def test_zero_tokens(self):
+        self.assertEqual(estimate_cost("gpt-4o", 0, 0), 0.0)
+
+    def test_case_insensitive(self):
+        cost = estimate_cost("GPT-4o", 1_000_000, 0)
+        self.assertAlmostEqual(cost, 2.50, places=2)
+
+
+class TestEstimateCostFromSteps(unittest.TestCase):
+    def test_cached_steps_only(self):
+        steps = [
+            {"step_number": 1, "model": "gpt-4o", "tokens_in": 500, "tokens_out": 200},
+            {"step_number": 2, "model": "gpt-4o", "tokens_in": 300, "tokens_out": 100},
+            {"step_number": 3, "model": "gpt-4o", "tokens_in": 400, "tokens_out": 150},
+        ]
+        cost = _estimate_cost_from_steps(steps, fork_at_step=2)
+        # Only steps 1 and 2 are cached
+        expected = estimate_cost("gpt-4o", 500, 200) + estimate_cost("gpt-4o", 300, 100)
+        self.assertAlmostEqual(cost, round(expected, 2), places=2)
+
+    def test_no_steps(self):
+        self.assertEqual(_estimate_cost_from_steps([], 5), 0.0)
+
+
+class TestReplaySavingsTracking(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.store = Store(root=self.tmpdir)
+        sid, tid = self.store.create_session("test-replay")
+        self.session_id = sid
+        self.timeline_id = tid
+
+        # Create parent steps with blob data
+        self.parent_steps = []
+        for i in range(1, 4):
+            resp_data = json.dumps({"choices": [{"message": {"content": f"response {i}"}}]})
+            blob_hash = self.store.blobs.put(resp_data.encode())
+            step = {
+                "step_number": i,
+                "model": "gpt-4o",
+                "tokens_in": 100 * i,
+                "tokens_out": 50 * i,
+                "duration_ms": 500 * i,
+                "response_blob": blob_hash,
+            }
+            self.parent_steps.append(step)
+
+    def test_counters_increment_on_cache_hit(self):
+        recorder = Recorder(
+            self.store, self.session_id, self.timeline_id,
+            replay_steps=self.parent_steps, fork_at_step=2,
+        )
+        # First cache hit
+        result = recorder._try_replay_cached("openai")
+        self.assertIsNotNone(result)
+        self.assertEqual(recorder._cached_steps_count, 1)
+        self.assertEqual(recorder._cached_tokens, 100 + 50)  # step 1
+        self.assertEqual(recorder._cached_duration_ms, 500)
+        self.assertGreater(recorder._cached_cost, 0.0)
+
+        # Second cache hit
+        result = recorder._try_replay_cached("openai")
+        self.assertIsNotNone(result)
+        self.assertEqual(recorder._cached_steps_count, 2)
+        self.assertEqual(recorder._cached_tokens, (100 + 50) + (200 + 100))
+        self.assertEqual(recorder._cached_duration_ms, 500 + 1000)
+
+        # Cost should be cumulative
+        expected_cost = (
+            estimate_cost("gpt-4o", 100, 50) +
+            estimate_cost("gpt-4o", 200, 100)
+        )
+        self.assertAlmostEqual(recorder._cached_cost, expected_cost, places=6)
+
+        # Third call is beyond fork point — live
+        result = recorder._try_replay_cached("openai")
+        self.assertIsNone(result)
+        # Counters unchanged
+        self.assertEqual(recorder._cached_steps_count, 2)
+
+    def test_no_replay_mode_no_tracking(self):
+        recorder = Recorder(self.store, self.session_id, self.timeline_id)
+        result = recorder._try_replay_cached("openai")
+        self.assertIsNone(result)
+        self.assertEqual(recorder._cached_steps_count, 0)
 
 
 if __name__ == "__main__":

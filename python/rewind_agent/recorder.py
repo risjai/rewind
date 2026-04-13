@@ -48,6 +48,51 @@ def _serialize_request(kwargs: dict) -> dict:
     return result
 
 
+# ── Pricing helpers (mirrors crates/rewind-proxy/src/pricing.rs) ──
+
+_MODEL_PRICES = {
+    "gpt-4o-mini": (0.15, 0.60),
+    "gpt-4o": (2.50, 10.00),
+    "gpt-4.1-mini": (0.40, 1.60),
+    "gpt-4.1-nano": (0.10, 0.40),
+    "gpt-4.1": (2.00, 8.00),
+    "o1-mini": (1.10, 4.40),
+    "o1": (15.00, 60.00),
+    "claude-opus": (15.00, 75.00),
+    "claude-haiku": (0.25, 1.25),
+    "claude-sonnet": (3.00, 15.00),
+}
+_DEFAULT_PRICE = (1.00, 3.00)
+
+
+def _model_price(model: str) -> tuple:
+    """Return (input_cost_per_million, output_cost_per_million) for a model."""
+    m = model.lower()
+    for key, price in _MODEL_PRICES.items():
+        if key in m:
+            return price
+    return _DEFAULT_PRICE
+
+
+def estimate_cost(model: str, tokens_in: int, tokens_out: int) -> float:
+    """Estimate USD cost for a single LLM call."""
+    price_in, price_out = _model_price(model)
+    return (tokens_in * price_in + tokens_out * price_out) / 1_000_000
+
+
+def _estimate_cost_from_steps(steps: list, fork_at_step: int) -> float:
+    """Estimate cost saved from cached parent steps."""
+    total = 0.0
+    for s in steps:
+        if s.get("step_number", 0) <= fork_at_step:
+            total += estimate_cost(
+                s.get("model", ""),
+                int(s.get("tokens_in", 0)),
+                int(s.get("tokens_out", 0)),
+            )
+    return round(total, 2)
+
+
 def _extract_openai_usage(response_dict: dict) -> tuple:
     """Extract (tokens_in, tokens_out) from OpenAI response."""
     usage = response_dict.get("usage") or {}
@@ -436,6 +481,11 @@ class Recorder:
         self._originals = {}
         self._replay_steps = replay_steps  # list of parent step dicts
         self._fork_at_step = fork_at_step  # step cutoff for cached replay
+        # Replay savings tracking (only actual cache hits)
+        self._cached_steps_count = 0
+        self._cached_tokens = 0
+        self._cached_duration_ms = 0
+        self._cached_cost = 0.0
 
     def patch_all(self):
         """Patch all supported SDK clients."""
@@ -454,9 +504,30 @@ class Recorder:
 
     def unpatch_all(self):
         """Restore all original methods."""
+        self._print_replay_savings()
         for key, (cls, method_name, original) in self._originals.items():
             setattr(cls, method_name, original)
         self._originals.clear()
+
+    def _print_replay_savings(self):
+        """Print replay savings summary to stderr (non-intrusive)."""
+        import sys
+        if self._cached_steps_count == 0:
+            return
+
+        cost = round(self._cached_cost, 2)
+        secs = self._cached_duration_ms / 1000
+        if secs >= 60:
+            time_str = f"{int(secs // 60)}m {int(secs % 60)}s"
+        else:
+            time_str = f"{secs:.1f}s"
+
+        print("\n  \033[36m\033[1m⏪ Replay Savings\033[0m", file=sys.stderr)
+        print(f"    \033[90mSteps cached:\033[0m  {self._cached_steps_count}", file=sys.stderr)
+        print(f"    \033[90mTokens saved:\033[0m  {self._cached_tokens}", file=sys.stderr)
+        print(f"    \033[90mCost saved:\033[0m    \033[32m${cost:.2f}\033[0m", file=sys.stderr)
+        print(f"    \033[90mTime saved:\033[0m    {time_str}", file=sys.stderr)
+        print(file=sys.stderr)
 
     # ── Replay helpers ─────────────────────────────────────────
 
@@ -489,6 +560,14 @@ class Recorder:
             resp_data = json.loads(resp_bytes)
 
             self._step_counter += 1
+
+            # Track savings (only actual cache hits)
+            tok_in = int(parent.get("tokens_in", 0))
+            tok_out = int(parent.get("tokens_out", 0))
+            self._cached_steps_count += 1
+            self._cached_tokens += tok_in + tok_out
+            self._cached_duration_ms += int(parent.get("duration_ms", 0))
+            self._cached_cost += estimate_cost(parent.get("model", ""), tok_in, tok_out)
 
             logger.info(
                 "Rewind: fork replay — served cached step %d/%d (0ms, 0 tokens)",
