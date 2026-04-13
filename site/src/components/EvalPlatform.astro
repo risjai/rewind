@@ -1,0 +1,161 @@
+---
+const evaluators = [
+  { name: "Exact match", type: "deterministic" },
+  { name: "Contains", type: "deterministic" },
+  { name: "Regex", type: "deterministic" },
+  { name: "JSON schema", type: "deterministic" },
+  { name: "Tool use match", type: "deterministic" },
+  { name: "Custom", type: "custom" },
+  { name: "LLM-as-judge", type: "ai" },
+];
+
+const ciFeatures = [
+  "CI-ready with --fail-below thresholds",
+  "GitHub Action for regression testing",
+  "Side-by-side experiment comparison",
+  "Per-example regression detection",
+  "JSON output for dashboard ingestion",
+  "Versioned datasets with deduplication",
+];
+---
+
+<section id="evals" class="py-20 md:py-28">
+  <div class="mx-auto max-w-6xl px-6">
+    <div class="text-center">
+      <span class="inline-block rounded-full bg-brand-primary/10 px-4 py-1.5 text-xs font-semibold uppercase tracking-widest text-brand-primary">
+        Evaluation platform
+      </span>
+      <h2 class="mt-4 text-3xl font-bold tracking-tight md:text-4xl">
+        Ship with confidence. Catch regressions in CI.
+      </h2>
+      <p class="mx-auto mt-4 max-w-2xl text-neutral-400">
+        Create datasets, run your agent against them, score with 7 evaluator types, compare experiments side-by-side. Block merges when quality drops.
+      </p>
+    </div>
+
+    <div class="mt-16 grid gap-8 lg:grid-cols-5">
+      <!-- Left: Eval mockup (3 cols) -->
+      <div class="lg:col-span-3 overflow-hidden rounded-2xl border border-neutral-800 bg-neutral-900/30">
+        <div class="border-b border-neutral-800 bg-neutral-900 px-5 py-3 flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            <div class="h-3 w-3 rounded-full bg-red-500/70"></div>
+            <div class="h-3 w-3 rounded-full bg-yellow-500/70"></div>
+            <div class="h-3 w-3 rounded-full bg-green-500/70"></div>
+            <span class="ml-2 text-[10px] text-neutral-600 font-mono">rewind eval</span>
+          </div>
+          <div class="flex gap-1">
+            <span class="rounded bg-neutral-800 px-2 py-0.5 text-[10px] font-medium text-neutral-400">Datasets</span>
+            <span class="rounded bg-brand-primary/10 px-2 py-0.5 text-[10px] font-medium text-brand-primary">Experiments</span>
+            <span class="rounded bg-neutral-800 px-2 py-0.5 text-[10px] font-medium text-neutral-400">Compare</span>
+          </div>
+        </div>
+
+        <div class="bg-neutral-950 p-6">
+          <!-- Experiment header -->
+          <div class="flex items-center justify-between mb-5">
+            <div>
+              <div class="text-sm font-semibold text-neutral-200">booking-tests v2</div>
+              <div class="text-xs text-neutral-500">12 examples &middot; 3 evaluators &middot; 2m ago</div>
+            </div>
+            <div class="flex items-center gap-2">
+              <span class="rounded-full bg-emerald-400/10 px-3 py-1 text-xs font-bold text-emerald-400">95%</span>
+            </div>
+          </div>
+
+          <!-- Results table -->
+          <div class="overflow-x-auto -mx-3">
+            <div class="min-w-[340px] space-y-2 px-3">
+              <div class="grid grid-cols-[1fr_56px_56px_64px] sm:grid-cols-[1fr_80px_80px_80px] gap-2 text-[10px] uppercase tracking-wider text-neutral-600 px-3 pb-1">
+                <span>Example</span>
+                <span class="text-center">Exact</span>
+                <span class="text-center">Schema</span>
+                <span class="text-center">Judge</span>
+              </div>
+
+              <div class="grid grid-cols-[1fr_56px_56px_64px] sm:grid-cols-[1fr_80px_80px_80px] gap-2 rounded-lg bg-neutral-900/50 px-3 py-2.5 items-center">
+                <span class="text-xs text-neutral-300 truncate">Book a table for 2</span>
+                <span class="text-center" aria-label="Pass"><span class="text-emerald-400 text-xs">&#10003;</span></span>
+                <span class="text-center" aria-label="Pass"><span class="text-emerald-400 text-xs">&#10003;</span></span>
+                <span class="text-center text-[10px] text-emerald-400 font-mono">0.95</span>
+              </div>
+
+              <div class="grid grid-cols-[1fr_56px_56px_64px] sm:grid-cols-[1fr_80px_80px_80px] gap-2 rounded-lg bg-neutral-900/50 px-3 py-2.5 items-center">
+                <span class="text-xs text-neutral-300 truncate">Cancel reservation</span>
+                <span class="text-center" aria-label="Pass"><span class="text-emerald-400 text-xs">&#10003;</span></span>
+                <span class="text-center" aria-label="Pass"><span class="text-emerald-400 text-xs">&#10003;</span></span>
+                <span class="text-center text-[10px] text-emerald-400 font-mono">0.92</span>
+              </div>
+
+              <div class="grid grid-cols-[1fr_56px_56px_64px] sm:grid-cols-[1fr_80px_80px_80px] gap-2 rounded-lg bg-neutral-900/50 px-3 py-2.5 items-center">
+                <span class="text-xs text-neutral-300 truncate">Change date to Friday</span>
+                <span class="text-center" aria-label="Pass"><span class="text-emerald-400 text-xs">&#10003;</span></span>
+                <span class="text-center" aria-label="Warn"><span class="text-amber-400 text-xs">&#x25cf;</span></span>
+                <span class="text-center text-[10px] text-amber-400 font-mono">0.78</span>
+              </div>
+
+              <div class="grid grid-cols-[1fr_56px_56px_64px] sm:grid-cols-[1fr_80px_80px_80px] gap-2 rounded-lg bg-red-900/10 border border-red-500/10 px-3 py-2.5 items-center">
+                <span class="text-xs text-neutral-300 truncate">Refund my order</span>
+                <span class="text-center" aria-label="Fail"><span class="text-red-400 text-xs">&#x2717;</span></span>
+                <span class="text-center" aria-label="Pass"><span class="text-emerald-400 text-xs">&#10003;</span></span>
+                <span class="text-center text-[10px] text-red-400 font-mono">0.41</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- CI output -->
+          <div class="mt-5 rounded-lg bg-neutral-900 border border-neutral-800 p-3 font-mono text-[11px]">
+            <span class="text-neutral-500">Score:</span> <span class="text-emerald-400">95.0%</span> <span class="text-neutral-600">|</span> <span class="text-neutral-500">Threshold:</span> <span class="text-neutral-300">90%</span> <span class="text-neutral-600">|</span> <span class="text-emerald-400">PASS</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right: Details (2 cols) -->
+      <div class="lg:col-span-2 space-y-6">
+        <!-- Evaluator types -->
+        <div class="rounded-2xl border border-neutral-800 bg-neutral-900/30 p-6">
+          <h3 class="text-sm font-semibold mb-4">7 Evaluator Types</h3>
+          <div class="space-y-2">
+            {evaluators.map(e => (
+              <div class="flex items-center justify-between rounded-lg bg-neutral-800/30 px-3 py-2">
+                <span class="text-xs text-neutral-300">{e.name}</span>
+                <span class={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${
+                  e.type === 'ai' ? 'bg-violet-500/10 text-violet-400' :
+                  e.type === 'custom' ? 'bg-amber-500/10 text-amber-400' :
+                  'bg-neutral-700/50 text-neutral-400'
+                }`}>
+                  {e.type}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <!-- CI features -->
+        <div class="rounded-2xl border border-neutral-800 bg-neutral-900/30 p-6">
+          <h3 class="text-sm font-semibold mb-4">Built for CI/CD</h3>
+          <ul class="space-y-2.5">
+            {ciFeatures.map(f => (
+              <li class="flex items-start gap-2 text-xs text-neutral-400">
+                <span class="text-brand-primary mt-0.5 shrink-0" aria-hidden="true">&#10003;</span>
+                {f}
+              </li>
+            ))}
+          </ul>
+        </div>
+
+        <!-- Python example -->
+        <div class="rounded-2xl border border-neutral-800 bg-neutral-900/30 overflow-hidden">
+          <div class="border-b border-neutral-800 bg-neutral-900 px-4 py-2 text-[10px] text-neutral-600 font-mono">
+            test_agent.py
+          </div>
+          <pre class="bg-neutral-950 p-4 font-mono text-[11px] leading-relaxed overflow-x-auto"><code><span class="text-brand-accent">result</span> <span class="text-neutral-500">=</span> <span class="text-neutral-200">rewind_agent</span><span class="text-neutral-500">.</span><span class="text-neutral-200">evaluate</span><span class="text-neutral-500">(</span>
+  <span class="text-neutral-200">dataset</span><span class="text-neutral-500">=</span><span class="text-brand-primary">"booking-tests"</span><span class="text-neutral-500">,</span>
+  <span class="text-neutral-200">target_fn</span><span class="text-neutral-500">=</span><span class="text-neutral-200">my_agent</span><span class="text-neutral-500">,</span>
+  <span class="text-neutral-200">evaluators</span><span class="text-neutral-500">=[</span><span class="text-brand-primary">"exact_match"</span><span class="text-neutral-500">,</span> <span class="text-neutral-200">llm_judge</span><span class="text-neutral-500">],</span>
+  <span class="text-neutral-200">fail_below</span><span class="text-neutral-500">=</span><span class="text-brand-accent">0.9</span><span class="text-neutral-500">,</span>
+<span class="text-neutral-500">)</span></code></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>

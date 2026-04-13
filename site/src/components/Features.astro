@@ -35,16 +35,37 @@ const compactFeatures = [
       "Identical requests served from cache at 0 tokens, 0ms. Run the same agent 10 times — only the first hits the LLM.",
   },
   {
-    icon: `<svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>`,
-    title: "Evaluation",
-    description:
-      "Datasets, 7 evaluator types, LLM-as-judge, side-by-side experiment comparison. CI-ready with --fail-below.",
-  },
-  {
     icon: `<svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>`,
     title: "Import & Debug",
     description:
-      "Import traces from Langfuse, Datadog, or any OTel backend. Fork at the failure, replay locally.",
+      "Import traces from Langfuse, Datadog, or any OTel backend. Fork at the failure, replay locally, export the fix back.",
+  },
+  {
+    icon: `<svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>`,
+    title: "Regression Testing",
+    description:
+      "Turn any session into a baseline. Check step types, models, tool calls, and token drift. 3-line GitHub Action.",
+  },
+];
+
+const extraFeatures = [
+  {
+    icon: `<svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"/></svg>`,
+    title: "Snapshots",
+    description:
+      "Checkpoint your workspace before an agent runs. Restore in one command if it breaks something. No git required.",
+  },
+  {
+    icon: `<svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"/></svg>`,
+    title: "Web Dashboard",
+    description:
+      "Browser-based session explorer with live recording via WebSocket. Step timeline, context viewer, eval dashboard — all embedded in the binary.",
+  },
+  {
+    icon: `<svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4"/></svg>`,
+    title: "SQL Explorer",
+    description:
+      "Run ad-hoc SQL against the Rewind database. Token usage by model, cost estimation, session analytics — read-only, safe to explore.",
   },
 ];
 ---
@@ -120,6 +141,23 @@ const compactFeatures = [
     <div class="mt-6 grid gap-6 sm:grid-cols-3">
       {
         compactFeatures.map((f) => (
+          <div class="rounded-2xl border border-neutral-800 bg-neutral-900/30 p-6 transition hover:border-neutral-700">
+            <div class="mb-3 inline-flex rounded-lg bg-brand-primary/10 p-2 text-brand-primary" aria-hidden="true">
+              <Fragment set:html={f.icon} />
+            </div>
+            <h3 class="text-base font-semibold">{f.title}</h3>
+            <p class="mt-1.5 text-sm leading-relaxed text-neutral-400">
+              {f.description}
+            </p>
+          </div>
+        ))
+      }
+    </div>
+
+    <!-- Extra features: second 3-column row -->
+    <div class="mt-6 grid gap-6 sm:grid-cols-3">
+      {
+        extraFeatures.map((f) => (
           <div class="rounded-2xl border border-neutral-800 bg-neutral-900/30 p-6 transition hover:border-neutral-700">
             <div class="mb-3 inline-flex rounded-lg bg-brand-primary/10 p-2 text-brand-primary" aria-hidden="true">
               <Fragment set:html={f.icon} />

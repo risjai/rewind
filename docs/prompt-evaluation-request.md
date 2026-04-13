@@ -6,7 +6,7 @@
 
 I want you to evaluate a developer tool called **Rewind** to see if it would be useful for our project. Rewind bills itself as "Chrome DevTools for AI agents" — a unified platform for **tracing**, **evaluation**, and **time-travel debugging** of AI agent sessions. It records LLM calls, tool invocations, and context windows, then lets you inspect, fork, replay from any failure point, diff timelines, run regression tests, and score agent outputs with a built-in eval system — all from a single local-first binary.
 
-This is not a trace viewer or a hosted SaaS. It's a 9 MB statically-linked binary with a SQLite-backed store, a Python SDK, a web dashboard, an MCP server, and a CLI with 28+ commands. MIT licensed.
+This is not a trace viewer or a hosted SaaS. It's a statically-linked binary with a SQLite-backed store, a Python SDK, a web dashboard, an MCP server, and a CLI with 28+ commands. MIT licensed.
 
 Here's what I need you to do:
 

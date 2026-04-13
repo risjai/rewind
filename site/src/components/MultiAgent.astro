@@ -1,0 +1,153 @@
+---
+
+---
+
+<section id="multi-agent" class="py-20 md:py-28">
+  <div class="mx-auto max-w-6xl px-6">
+    <div class="grid gap-12 lg:grid-cols-2 items-center">
+      <!-- Left: Content -->
+      <div>
+        <span class="inline-block rounded-full bg-brand-primary/10 px-4 py-1.5 text-xs font-semibold uppercase tracking-widest text-brand-primary">
+          Multi-agent tracing
+        </span>
+        <h2 class="mt-4 text-3xl font-bold tracking-tight md:text-4xl">
+          See every agent, tool call, and handoff
+        </h2>
+        <p class="mt-4 text-neutral-400 leading-relaxed">
+          Hierarchical span tree for multi-agent workflows. Auto-captures agent boundaries and handoffs from OpenAI Agents SDK. Thread view for multi-turn conversations.
+        </p>
+
+        <div class="mt-8 space-y-4">
+          <div class="flex items-start gap-3">
+            <div class="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-brand-primary/10 text-brand-primary">
+              <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+            </div>
+            <div>
+              <div class="text-sm font-semibold text-neutral-200">Automatic agent boundaries</div>
+              <div class="text-xs text-neutral-500 mt-0.5">OpenAI Agents SDK and Pydantic AI detected on <code class="text-neutral-400">init()</code></div>
+            </div>
+          </div>
+
+          <div class="flex items-start gap-3">
+            <div class="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-brand-primary/10 text-brand-primary">
+              <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+            </div>
+            <div>
+              <div class="text-sm font-semibold text-neutral-200">Manual <code class="text-brand-primary">@span()</code> decorator</div>
+              <div class="text-xs text-neutral-500 mt-0.5">Group any code into named spans for custom agent hierarchies</div>
+            </div>
+          </div>
+
+          <div class="flex items-start gap-3">
+            <div class="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-brand-primary/10 text-brand-primary">
+              <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+            </div>
+            <div>
+              <div class="text-sm font-semibold text-neutral-200">Thread view</div>
+              <div class="text-xs text-neutral-500 mt-0.5">Multi-turn conversations grouped by thread with agent attribution</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right: Span tree mockup -->
+      <div class="overflow-hidden rounded-2xl border border-neutral-800 bg-neutral-900/30">
+        <div class="border-b border-neutral-800 bg-neutral-900 px-4 py-2.5 flex items-center gap-2">
+          <div class="h-3 w-3 rounded-full bg-red-500/70"></div>
+          <div class="h-3 w-3 rounded-full bg-yellow-500/70"></div>
+          <div class="h-3 w-3 rounded-full bg-green-500/70"></div>
+          <span class="ml-2 text-[10px] text-neutral-600 font-mono">rewind inspect latest --spans</span>
+        </div>
+
+        <div class="bg-neutral-950 p-6 font-mono text-[11px] leading-loose" role="img" aria-label="Span tree showing supervisor agent routing to researcher and writer sub-agents. Researcher completes successfully with web search tool call. Writer fails at the final step due to hallucination.">
+          <div class="text-neutral-500 mb-3" aria-hidden="true">Session: <span class="text-neutral-300">customer-service</span> &middot; Agents: <span class="text-neutral-300">3</span> &middot; Steps: <span class="text-neutral-300">12</span></div>
+
+          <!-- Supervisor -->
+          <div class="flex items-center gap-1.5">
+            <span class="text-neutral-600">&#x25BC;</span>
+            <span class="text-emerald-400">&#10003;</span>
+            <span class="text-violet-400">&#x1f916;</span>
+            <span class="text-neutral-200 font-semibold">supervisor</span>
+            <span class="text-neutral-600 ml-auto">1.2s</span>
+          </div>
+
+          <!-- Sub-items of supervisor -->
+          <div class="ml-5 border-l border-neutral-800 pl-3 space-y-0.5">
+            <div class="flex items-center gap-1.5">
+              <span class="text-emerald-400">&#10003;</span>
+              <span class="text-blue-400">&#x1f9e0;</span>
+              <span class="text-neutral-300">gpt-4o</span>
+              <span class="text-neutral-600 text-[10px] ml-1">"Route to researcher"</span>
+              <span class="text-neutral-700 ml-auto">320ms</span>
+            </div>
+
+            <!-- Researcher agent -->
+            <div class="flex items-center gap-1.5 mt-1">
+              <span class="text-neutral-600">&#x25BC;</span>
+              <span class="text-emerald-400">&#10003;</span>
+              <span class="text-violet-400">&#x1f916;</span>
+              <span class="text-neutral-200 font-semibold">researcher</span>
+              <span class="text-neutral-600 ml-auto">2.1s</span>
+            </div>
+
+            <div class="ml-5 border-l border-neutral-800 pl-3 space-y-0.5">
+              <div class="flex items-center gap-1.5">
+                <span class="text-emerald-400">&#10003;</span>
+                <span class="text-blue-400">&#x1f9e0;</span>
+                <span class="text-neutral-300">gpt-4o</span>
+                <span class="text-neutral-600 text-[10px] ml-1">"Search"</span>
+                <span class="text-neutral-700 ml-auto">890ms</span>
+              </div>
+              <div class="flex items-center gap-1.5">
+                <span class="text-emerald-400">&#10003;</span>
+                <span class="text-amber-400">&#x1f527;</span>
+                <span class="text-neutral-300">web_search</span>
+                <span class="text-neutral-700 ml-auto">45ms</span>
+              </div>
+              <div class="flex items-center gap-1.5">
+                <span class="text-emerald-400">&#10003;</span>
+                <span class="text-blue-400">&#x1f9e0;</span>
+                <span class="text-neutral-300">gpt-4o</span>
+                <span class="text-neutral-600 text-[10px] ml-1">"Synthesize"</span>
+                <span class="text-neutral-700 ml-auto">650ms</span>
+              </div>
+            </div>
+
+            <!-- Handoff -->
+            <div class="flex items-center gap-1.5 mt-1">
+              <span class="text-emerald-400">&#10003;</span>
+              <span class="text-brand-accent">&#x1f500;</span>
+              <span class="text-neutral-400">handoff: researcher &#x2192; writer</span>
+            </div>
+
+            <!-- Writer agent (with error) -->
+            <div class="flex items-center gap-1.5 mt-1">
+              <span class="text-neutral-600">&#x25BC;</span>
+              <span class="text-red-400">&#x2717;</span>
+              <span class="text-violet-400">&#x1f916;</span>
+              <span class="text-neutral-200 font-semibold">writer</span>
+              <span class="text-neutral-600 ml-auto">1.8s</span>
+            </div>
+
+            <div class="ml-5 border-l border-red-500/20 pl-3 space-y-0.5">
+              <div class="flex items-center gap-1.5">
+                <span class="text-emerald-400">&#10003;</span>
+                <span class="text-blue-400">&#x1f9e0;</span>
+                <span class="text-neutral-300">gpt-4o</span>
+                <span class="text-neutral-600 text-[10px] ml-1">"Draft article"</span>
+                <span class="text-neutral-700 ml-auto">1.2s</span>
+              </div>
+              <div class="flex items-center gap-1.5">
+                <span class="text-red-400">&#x2717;</span>
+                <span class="text-blue-400">&#x1f9e0;</span>
+                <span class="text-neutral-300">gpt-4o</span>
+                <span class="text-red-400/70 text-[10px] ml-1">hallucination</span>
+                <span class="text-neutral-700 ml-auto">600ms</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>

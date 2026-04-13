@@ -1,0 +1,158 @@
+---
+const mcpTools = [
+  "Query recordings",
+  "View span trees",
+  "Browse threads",
+  "Diff timelines",
+  "Create baselines",
+  "Run evaluations",
+];
+
+const hookEvents = [
+  { event: "Session lifecycle", icon: "\u{1F4CB}" },
+  { event: "Tool calls", icon: "\u{1F527}" },
+  { event: "User prompts", icon: "\u{1F4AC}" },
+  { event: "File edits", icon: "\u270F\uFE0F" },
+  { event: "Subagent trees", icon: "\u{1F333}" },
+  { event: "Token usage", icon: "\u{1F4B0}" },
+];
+---
+
+<section id="claude-code" class="py-20 md:py-28">
+  <div class="mx-auto max-w-6xl px-6">
+    <div class="text-center">
+      <span class="inline-block rounded-full bg-brand-primary/10 px-4 py-1.5 text-xs font-semibold uppercase tracking-widest text-brand-primary">
+        IDE integration
+      </span>
+      <h2 class="mt-4 text-3xl font-bold tracking-tight md:text-4xl">
+        Every Claude Code session. Automatically captured.
+      </h2>
+      <p class="mx-auto mt-4 max-w-2xl text-neutral-400">
+        One command installs hooks. Every prompt, tool call, and file edit is recorded — no code changes needed.
+        Also works with <strong class="text-neutral-300">Cursor</strong> and <strong class="text-neutral-300">Windsurf</strong> via MCP.
+      </p>
+    </div>
+
+    <div class="mt-16 grid gap-8 lg:grid-cols-2">
+      <!-- Left: Flow diagram -->
+      <div class="overflow-hidden rounded-2xl border border-neutral-800 bg-neutral-900/30 p-8">
+        <h3 class="text-xs font-semibold uppercase tracking-widest text-neutral-500 mb-8">
+          Integration flow
+        </h3>
+
+        <!-- Flow: Claude Code → Hooks → Rewind → Dashboard -->
+        <div class="space-y-4">
+          <!-- Claude Code box -->
+          <div class="rounded-xl border border-neutral-700 bg-neutral-800/50 px-5 py-4 flex items-center gap-3">
+            <span class="flex h-10 w-10 items-center justify-center rounded-lg bg-violet-500/10 text-lg" aria-hidden="true">&#x1f4bb;</span>
+            <div>
+              <div class="text-sm font-semibold">Claude Code / Cursor / Windsurf</div>
+              <div class="text-xs text-neutral-500">Your IDE session runs normally</div>
+            </div>
+          </div>
+
+          <!-- Arrow down -->
+          <div class="flex justify-center text-neutral-700" aria-hidden="true">
+            <svg class="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19 14l-7 7m0 0l-7-7m7 7V3"/></svg>
+          </div>
+
+          <!-- Hooks layer -->
+          <div class="rounded-xl border border-dashed border-neutral-700 bg-neutral-900/50 px-5 py-4">
+            <div class="flex items-center gap-3 mb-3">
+              <span class="flex h-10 w-10 items-center justify-center rounded-lg bg-brand-primary/10 text-lg" aria-hidden="true">&#x1f50c;</span>
+              <div>
+                <div class="text-sm font-semibold">Hooks + MCP Server</div>
+                <div class="text-xs text-neutral-500">Automatic capture — zero instrumentation</div>
+              </div>
+            </div>
+            <div class="grid grid-cols-2 gap-2 mt-4">
+              {hookEvents.map(h => (
+                <div class="flex items-center gap-2 rounded-lg bg-neutral-800/50 px-3 py-2 text-xs text-neutral-400">
+                  <span aria-hidden="true">{h.icon}</span>
+                  {h.event}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <!-- Arrow down -->
+          <div class="flex justify-center text-neutral-700" aria-hidden="true">
+            <svg class="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19 14l-7 7m0 0l-7-7m7 7V3"/></svg>
+          </div>
+
+          <!-- Rewind layer -->
+          <div class="rounded-xl border border-brand-primary/30 bg-brand-primary/5 px-5 py-4 flex items-center gap-3">
+            <span class="flex h-10 w-10 items-center justify-center rounded-lg bg-brand-primary/10" aria-hidden="true">
+              <img src="/favicon.svg" alt="" class="h-6 w-6" />
+            </span>
+            <div>
+              <div class="text-sm font-semibold text-brand-primary">Rewind Dashboard</div>
+              <div class="text-xs text-neutral-500">Inspect, fork, replay, diff, evaluate</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right: MCP server details -->
+      <div class="space-y-6">
+        <!-- MCP Server card -->
+        <div class="rounded-2xl border border-neutral-800 bg-neutral-900/30 p-6">
+          <div class="flex items-center gap-3 mb-4">
+            <div class="flex h-10 w-10 items-center justify-center rounded-xl bg-brand-primary/10 text-brand-primary">
+              <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+            </div>
+            <div>
+              <h3 class="text-lg font-bold">26 MCP Tools</h3>
+              <p class="text-xs text-neutral-500">Debug without leaving your editor</p>
+            </div>
+          </div>
+          <p class="text-sm text-neutral-400 leading-relaxed mb-4">
+            Ask your AI assistant to inspect a failed session, diff two timelines, or run an eval suite — all from within your IDE. No browser, no context switching.
+          </p>
+          <div class="grid grid-cols-2 gap-2">
+            {mcpTools.map(tool => (
+              <div class="flex items-center gap-2 text-xs text-neutral-400">
+                <span class="text-brand-primary" aria-hidden="true">&#10003;</span>
+                {tool}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <!-- Setup card -->
+        <div class="rounded-2xl border border-neutral-800 bg-neutral-900/30 overflow-hidden">
+          <div class="border-b border-neutral-800 bg-neutral-900 px-4 py-2.5 flex items-center gap-2">
+            <div class="h-3 w-3 rounded-full bg-red-500/70"></div>
+            <div class="h-3 w-3 rounded-full bg-yellow-500/70"></div>
+            <div class="h-3 w-3 rounded-full bg-green-500/70"></div>
+            <span class="ml-2 text-[10px] text-neutral-600 font-mono">terminal</span>
+          </div>
+          <pre class="bg-neutral-950 p-5 font-mono text-xs leading-relaxed overflow-x-auto"><code><span class="text-neutral-600"># One-command setup</span>
+<span class="text-neutral-500 select-none">$ </span><span class="text-neutral-200">rewind hooks install</span>
+
+<span class="text-neutral-600"># Start the dashboard</span>
+<span class="text-neutral-500 select-none">$ </span><span class="text-neutral-200">rewind web --port 4800</span>
+
+<span class="text-neutral-600"># Sessions appear automatically</span>
+<span class="text-neutral-600"># at http://127.0.0.1:4800</span></code></pre>
+        </div>
+
+        <!-- Key stats -->
+        <div class="grid grid-cols-3 gap-3 sm:grid-cols-3">
+          <div class="rounded-xl border border-neutral-800 bg-neutral-900/30 p-4 text-center">
+            <div class="text-2xl font-bold text-brand-primary">26</div>
+            <div class="text-[10px] uppercase tracking-wider text-neutral-500 mt-1">MCP tools</div>
+          </div>
+          <div class="rounded-xl border border-neutral-800 bg-neutral-900/30 p-4 text-center">
+            <div class="text-2xl font-bold text-brand-primary">0</div>
+            <div class="text-[10px] uppercase tracking-wider text-neutral-500 mt-1">Config needed</div>
+          </div>
+          <div class="rounded-xl border border-neutral-800 bg-neutral-900/30 p-4 text-center">
+            <div class="text-2xl font-bold text-brand-primary">3</div>
+            <div class="text-[10px] uppercase tracking-wider text-neutral-500 mt-1">IDEs supported</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>

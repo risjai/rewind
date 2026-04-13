@@ -32,7 +32,7 @@ cargo install --git https://github.com/agentoptics/rewind rewind-cli
 git clone https://github.com/agentoptics/rewind.git
 cd rewind
 cargo build --release
-# Binary at ./target/release/rewind (9 MB, no dependencies)
+# Binary at ./target/release/rewind (no dependencies)
 ```
 
 ---

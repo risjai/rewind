@@ -1,0 +1,106 @@
+---
+const advantages = [
+  {
+    icon: `<svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>`,
+    title: "Your data never leaves your machine",
+    description: "Every prompt, response, and context window stays in a local SQLite database. No cloud account. No telemetry. No data processing agreements to sign.",
+  },
+  {
+    icon: `<svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"/></svg>`,
+    title: "Fully open source — MIT licensed",
+    description: "Read every line. Fork it. Audit it. Contribute to it. No vendor lock-in, no license gating, no feature paywalls. The code is the product.",
+  },
+  {
+    icon: `<svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z"/></svg>`,
+    title: "Single binary, zero dependencies",
+    description: "One statically-linked Rust binary. No Docker, no Postgres, no Redis, no cloud account. Works offline, on air-gapped networks, behind any firewall.",
+  },
+  {
+    icon: `<svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>`,
+    title: "Free forever — no usage limits",
+    description: "No per-seat pricing. No eval run quotas. No metered API calls. Record as many sessions as your disk can hold. The infrastructure cost is zero.",
+  },
+];
+
+const cloudComparison = [
+  { feature: "Data residency", rewind: "Your machine", others: "Their cloud" },
+  { feature: "API key for infra", rewind: "Not needed", others: "Required" },
+  { feature: "Works offline", rewind: "Yes", others: "No" },
+  { feature: "Source code", rewind: "MIT on GitHub", others: "Closed" },
+  { feature: "Cost", rewind: "Free", others: "$49–199+/mo" },
+  { feature: "Dependencies", rewind: "Zero", others: "Cloud + DB" },
+];
+---
+
+<section class="py-20 md:py-28">
+  <div class="mx-auto max-w-6xl px-6">
+    <div class="text-center">
+      <span class="inline-block rounded-full bg-brand-primary/10 px-4 py-1.5 text-xs font-semibold uppercase tracking-widest text-brand-primary">
+        Local-first &middot; open source
+      </span>
+      <h2 class="mt-4 text-3xl font-bold tracking-tight md:text-4xl">
+        Your agents. Your data.<br class="hidden sm:block" />
+        <span class="text-brand-primary">Your machine.</span>
+      </h2>
+      <p class="mx-auto mt-4 max-w-2xl text-neutral-400">
+        Every competing tool requires a cloud account, an API key, and
+        trusting a third party with your prompts. Rewind runs entirely
+        on your laptop.
+      </p>
+    </div>
+
+    <div class="mt-16 grid gap-12 lg:grid-cols-5">
+      <!-- Left: Advantage cards (3 cols) -->
+      <div class="lg:col-span-3 grid gap-4 sm:grid-cols-2">
+        {advantages.map(a => (
+          <div class="rounded-2xl border border-neutral-800 bg-neutral-900/30 p-6 transition hover:border-neutral-700">
+            <div class="mb-3 inline-flex rounded-lg bg-brand-primary/10 p-2 text-brand-primary" aria-hidden="true">
+              <Fragment set:html={a.icon} />
+            </div>
+            <h3 class="text-sm font-semibold text-neutral-200">{a.title}</h3>
+            <p class="mt-2 text-xs leading-relaxed text-neutral-500">{a.description}</p>
+          </div>
+        ))}
+      </div>
+
+      <!-- Right: Comparison table (2 cols) -->
+      <div class="lg:col-span-2">
+        <div class="overflow-hidden rounded-2xl border border-neutral-800">
+          <div class="bg-neutral-900 px-5 py-3 border-b border-neutral-800">
+            <h3 class="text-xs font-semibold uppercase tracking-widest text-neutral-500">
+              Rewind vs. cloud platforms
+            </h3>
+          </div>
+          <div class="bg-neutral-950">
+            <table class="w-full text-xs">
+              <thead>
+                <tr class="border-b border-neutral-800">
+                  <th class="px-5 py-3 text-left font-medium text-neutral-500"></th>
+                  <th class="px-4 py-3 text-center font-semibold text-brand-primary">Rewind</th>
+                  <th class="px-4 py-3 text-center font-medium text-neutral-500">Others</th>
+                </tr>
+              </thead>
+              <tbody>
+                {cloudComparison.map((row, i) => (
+                  <tr class={i < cloudComparison.length - 1 ? "border-b border-neutral-800/50" : ""}>
+                    <td class="px-5 py-3 text-neutral-400">{row.feature}</td>
+                    <td class="px-4 py-3 text-center text-neutral-200 font-medium">{row.rewind}</td>
+                    <td class="px-4 py-3 text-center text-neutral-500">{row.others}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="mt-4 rounded-2xl border border-neutral-800 bg-neutral-900/30 p-5">
+          <p class="text-xs leading-relaxed text-neutral-400">
+            <strong class="text-neutral-200">Already using Langfuse or LangSmith?</strong>
+            You don't have to choose. Import their traces into Rewind for
+            local debugging, or export Rewind sessions back to your team dashboard.
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
