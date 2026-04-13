@@ -57,6 +57,9 @@ Agent broke at step 30? Fix step 30 — not steps 1 through 29 again. Each re-ru
 | **Record** | A transparent proxy captures every LLM call. Streaming works in real-time — zero added latency. Or one-line Python SDK: `rewind_agent.init()`. |
 | **Inspect** | See the *exact* context window at each step. Every message, system prompt, and tool response the model saw. |
 | **Diff** | Compare original and forked timelines. See exactly where they diverge and why. |
+| **Langfuse Import** | See a broken trace in Langfuse? `rewind import from-langfuse --trace <id>` — import it, fork at the failure, replay with the fix. One command from "broken production trace" to "forked, fixed, verified." |
+| **Replay Savings** | Every replay shows concrete ROI: tokens saved, estimated cost saved, time saved. CLI, Python SDK, and Web API. Know exactly how much each debug cycle is worth. |
+| **Session Sharing** | `rewind share latest` — generate a self-contained HTML file. Open in any browser, share via Slack or email. No install, no login, works offline. Like a Jupyter notebook export for debug sessions. |
 | **Instant Replay** | Identical requests are served from cache at **0 tokens, 0ms latency**. Run the same agent 10 times — only the first run hits the LLM. |
 | **Evaluation** | Create datasets, run your agent against them, score with 7 evaluator types (exact match, contains, regex, JSON schema, tool use, custom, **LLM-as-judge**). CI-ready with `--fail-below` thresholds. |
 | **Regression Testing** | Turn any session into a baseline. After code changes, check step types, models, tool calls, token counts. 3-line GitHub Action. |
@@ -219,6 +222,9 @@ See the [Getting Started guide](docs/getting-started.md) for more options.
 | **MCP Server** | 26 tools for AI assistants (Claude Code, Cursor, Windsurf) to query recordings, view span trees, browse threads, diff timelines, create baselines, run evals — all from your IDE. | [mcp-server.md](docs/mcp-server.md) | — |
 | **OpenTelemetry Export** | Export recorded sessions as OTel traces via OTLP to Langfuse, Datadog, Grafana Tempo, Jaeger, or any OTel-compatible backend. CLI, Python SDK, and Web API. Uses `gen_ai.*` semantic conventions. Privacy-first: message content requires explicit opt-in. | [otel-export.md](docs/otel-export.md) | — |
 | **OpenTelemetry Import** | Import OTLP traces from any source into Rewind for time-travel debugging. Accepts protobuf or JSON via HTTP API (`POST /v1/traces`), CLI (`rewind import otel`), or Python SDK. Imported sessions with content blobs are forkable and replayable — debug production failures locally. | [otel-import.md](docs/otel-import.md) | — |
+| **Langfuse Import** | Fetch a trace from Langfuse by ID, convert to OTLP, import into Rewind. CLI: `rewind import from-langfuse --trace <id>`. Python: `rewind_agent.import_from_langfuse(trace_id="...")`. Supports Cloud and self-hosted. Zero dependencies (`urllib` only). | [langfuse-import.md](docs/langfuse-import.md) | — |
+| **Replay Savings** | After fork-and-execute replays, shows tokens saved, estimated cost (model-aware price table), and time saved. Displayed in `rewind show`, Python SDK (stderr), and Web API (`GET /api/sessions/{id}/savings`). | [replay-and-forking.md](docs/replay-and-forking.md) | — |
+| **Session Sharing** | Export a session as a self-contained HTML file that works offline. Step tree, span tree, timeline diffs, scores — all in one portable file. `rewind share latest` for metadata-only, `--include-content` for full LLM content. | — | — |
 | **SQL Query Explorer** | Run ad-hoc SQL against the Rewind database. Token usage by model, average step duration, sessions with errors, cost estimation — read-only, safe to explore. | [sql-queries.md](docs/sql-queries.md) | — |
 | **CLI Reference** | Full command reference for all 29 CLI commands. | [cli-reference.md](docs/cli-reference.md) | — |
 
@@ -239,7 +245,7 @@ Already using Langfuse, LangSmith, or Datadog? **You don't have to choose.** Rew
 
 | Direction | How | Use Case |
 |:---|:---|:---|
-| **Import** traces into Rewind | `rewind import otel --file trace.pb` or `POST /v1/traces` | Debug a production failure locally — fork, replay, fix |
+| **Import** traces into Rewind | `rewind import otel --file trace.pb`, `POST /v1/traces`, or `rewind import from-langfuse --trace <id>` | Debug a production failure locally — fork, replay, fix |
 | **Export** sessions to your backend | `rewind export otel latest --endpoint <langfuse>` | Send debugging sessions to the team dashboard |
 | **Dual-ship** traces to both | Configure your agent's OTel exporter to send to both endpoints | Record locally + observe in production simultaneously |
 
@@ -258,7 +264,8 @@ Use your existing tool for production dashboards and alerting. Use Rewind when s
 | **v0.7** | OpenTelemetry export (CLI, Python SDK, Web API, Dashboard) | ✅ Shipped |
 | **v0.8** | LLM-as-judge evaluators, timeline scoring, `rewind eval score` command | ✅ Shipped |
 | **v0.9** | OTel trace ingestion — import OTLP traces, debug production failures locally | ✅ Shipped |
-| **v1.0** | Rewind Cloud — collaborative debugging, shared sessions, live breakpoints, semantic diff | Planned |
+| **v0.10** | Langfuse import, replay cost savings calculator, session sharing (HTML export) | ✅ Shipped |
+| **v1.0** | Rewind Cloud — collaborative debugging, hosted sharing, live breakpoints, semantic diff | Planned |
 
 ## Why "Rewind"?
 
