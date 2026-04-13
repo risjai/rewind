@@ -29,6 +29,7 @@ pub struct IngestResult {
     pub session_id: String,
     pub spans_ingested: usize,
     pub steps_created: usize,
+    pub total_tokens: u64,
     /// True if at least one step has content blobs (making replay possible).
     pub replay_possible: bool,
 }
@@ -51,8 +52,6 @@ pub fn ingest_trace_request(
 
     // 2. Build parent-child tree
     let children_map = build_children_map(&spans);
-    let span_by_id = build_span_index(&spans);
-
     // 3. Identify root span(s) — those with empty parent_span_id
     let root_spans: Vec<&OtelSpan> = spans
         .iter()
@@ -96,7 +95,6 @@ pub fn ingest_trace_request(
     let (timeline_spans, step_spans) = classify_spans(
         &root_spans,
         &children_map,
-        &span_by_id,
         &spans,
     );
 
@@ -115,7 +113,7 @@ pub fn ingest_trace_request(
     } else {
         timeline_spans
             .first()
-            .map(|s| s.name.clone())
+            .map(|s| s.name.strip_prefix("timeline ").unwrap_or(&s.name).to_string())
             .unwrap_or_else(|| "main".to_string())
     };
 
@@ -238,14 +236,11 @@ pub fn ingest_trace_request(
         store.create_step(step)?;
     }
 
-    // Use absolute token update — create_session already set initial values,
-    // and update_session_stats is additive (would double-count).
-    store.update_session_tokens(&session_id, total_tokens)?;
-
     Ok(IngestResult {
         session_id,
         spans_ingested,
         steps_created: steps.len(),
+        total_tokens,
         replay_possible: has_content,
     })
 }
@@ -312,15 +307,6 @@ fn build_children_map(spans: &[OtelSpan]) -> HashMap<Vec<u8>, Vec<usize>> {
     map
 }
 
-/// Build a map: span_id → span index.
-fn build_span_index(spans: &[OtelSpan]) -> HashMap<Vec<u8>, usize> {
-    spans
-        .iter()
-        .enumerate()
-        .map(|(idx, s)| (s.span_id.clone(), idx))
-        .collect()
-}
-
 /// Classify spans into timeline-level and step-level.
 ///
 /// Hierarchy patterns:
@@ -330,7 +316,6 @@ fn build_span_index(spans: &[OtelSpan]) -> HashMap<Vec<u8>, usize> {
 fn classify_spans<'a>(
     root_spans: &[&'a OtelSpan],
     children_map: &HashMap<Vec<u8>, Vec<usize>>,
-    _span_by_id: &HashMap<Vec<u8>, usize>,
     all_spans: &'a [OtelSpan],
 ) -> (Vec<&'a OtelSpan>, Vec<&'a OtelSpan>) {
     if root_spans.len() != 1 {
@@ -449,7 +434,12 @@ fn get_i64_attr(span: &OtelSpan, key: &str) -> Option<i64> {
 
 /// Encode bytes as lowercase hex string.
 fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    use std::fmt::Write;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
 }
 
 /// Convert nanoseconds since epoch to `chrono::DateTime<Utc>`.
@@ -658,11 +648,10 @@ mod tests {
         let span2 = make_otel_span("span2", &[1; 16], &[2; 8], &[], vec![]);
         let spans = vec![span1, span2];
         let children_map = build_children_map(&spans);
-        let span_by_id = build_span_index(&spans);
         let roots: Vec<&OtelSpan> = spans.iter().collect();
 
         let (tl_spans, step_spans) =
-            classify_spans(&roots, &children_map, &span_by_id, &spans);
+            classify_spans(&roots, &children_map, &spans);
         assert!(tl_spans.is_empty());
         assert_eq!(step_spans.len(), 2);
     }
@@ -675,11 +664,10 @@ mod tests {
         let step2 = make_otel_span("tool.execute search", &[1; 16], &[3; 8], &[1; 8], vec![]);
         let spans = vec![root, step1, step2];
         let children_map = build_children_map(&spans);
-        let span_by_id = build_span_index(&spans);
         let roots: Vec<&OtelSpan> = vec![&spans[0]];
 
         let (tl_spans, step_spans) =
-            classify_spans(&roots, &children_map, &span_by_id, &spans);
+            classify_spans(&roots, &children_map, &spans);
         assert!(tl_spans.is_empty());
         assert_eq!(step_spans.len(), 2); // root's children are steps
     }
@@ -693,11 +681,10 @@ mod tests {
         let step2 = make_otel_span("tool.execute search", &[1; 16], &[4; 8], &[2; 8], vec![]);
         let spans = vec![root, tl, step1, step2];
         let children_map = build_children_map(&spans);
-        let span_by_id = build_span_index(&spans);
         let roots: Vec<&OtelSpan> = vec![&spans[0]];
 
         let (tl_spans, step_spans) =
-            classify_spans(&roots, &children_map, &span_by_id, &spans);
+            classify_spans(&roots, &children_map, &spans);
         assert_eq!(tl_spans.len(), 1);
         assert_eq!(tl_spans[0].name, "timeline main");
         assert_eq!(step_spans.len(), 2);
@@ -762,7 +749,7 @@ mod tests {
         // Verify timeline
         let timelines = store.get_timelines(&result.session_id).unwrap();
         assert_eq!(timelines.len(), 1);
-        assert_eq!(timelines[0].label, "timeline main");
+        assert_eq!(timelines[0].label, "main");
 
         // Verify steps
         let steps = store.get_steps(&timelines[0].id).unwrap();

@@ -54,7 +54,7 @@ pub async fn otlp_ingest_traces(
         session_id: result.session_id.clone(),
         status: "completed".to_string(),
         total_steps: result.steps_created as u32,
-        total_tokens: 0,
+        total_tokens: result.total_tokens,
     });
 
     tracing::info!(
