@@ -1,6 +1,6 @@
 # CLI Reference
 
-Rewind is a time-travel debugger for AI agents -- a single 9 MB binary with zero dependencies. Below is the complete command reference.
+Rewind is a time-travel debugger for AI agents -- a single binary with zero dependencies. Below is the complete command reference.
 
 ## Commands
 

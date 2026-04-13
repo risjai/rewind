@@ -27,7 +27,7 @@
   [![PyPI](https://img.shields.io/pypi/v/rewind-agent?style=flat)](https://pypi.org/project/rewind-agent/)
   [![GitHub stars](https://img.shields.io/github/stars/agentoptics/rewind?style=social)](https://github.com/agentoptics/rewind)
   <br/>
-  <sub>Single binary &middot; 9 MB &middot; zero dependencies &middot; MIT licensed</sub>
+  <sub>Single binary &middot; zero dependencies &middot; MIT licensed</sub>
 </p>
 
 ---
