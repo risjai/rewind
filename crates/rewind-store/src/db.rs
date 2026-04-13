@@ -18,8 +18,21 @@ impl Store {
         let db_path = root.join("rewind.db");
         let blobs_path = root.join("objects");
 
-        let conn = Connection::open(&db_path)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        let conn = Connection::open(&db_path).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to open database at {path}: {e}.\n\
+                 If this persists, back up and delete {path} and retry.",
+                path = db_path.display(), e = e
+            )
+        })?;
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Database at {path} appears corrupted: {e}.\n\
+                     Back up and delete {path} to start fresh.",
+                    path = db_path.display(), e = e
+                )
+            })?;
 
         let blobs = BlobStore::new(&blobs_path)?;
 
@@ -557,6 +570,10 @@ impl Store {
     }
 
     pub fn get_snapshot(&self, snapshot_ref: &str) -> Result<Option<Snapshot>> {
+        if snapshot_ref == "latest" {
+            let snapshots = self.list_snapshots()?;
+            return Ok(snapshots.into_iter().last());
+        }
         // Try exact ID, then prefix, then label
         let snapshots = self.list_snapshots()?;
         if let Some(s) = snapshots.iter().find(|s| s.id == snapshot_ref) {

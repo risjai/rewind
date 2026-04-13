@@ -14,6 +14,7 @@ interface Props {
 type ExportState = 'idle' | 'exporting' | 'success' | 'error'
 
 export function ExportOtelModal({ isOpen, onClose, sessionId, timelines }: Props) {
+  const [endpoint, setEndpoint] = useState('')
   const [includeContent, setIncludeContent] = useState(false)
   const [timelineMode, setTimelineMode] = useState<'main' | 'all' | 'specific'>('main')
   const [selectedTimeline, setSelectedTimeline] = useState<string>('')
@@ -38,8 +39,11 @@ export function ExportOtelModal({ isOpen, onClose, sessionId, timelines }: Props
     setResult(null)
 
     try {
-      const opts: { include_content?: boolean; timeline_id?: string | null; all_timelines?: boolean } = {
+      const opts: { endpoint?: string; include_content?: boolean; timeline_id?: string | null; all_timelines?: boolean } = {
         include_content: includeContent,
+      }
+      if (endpoint.trim()) {
+        opts.endpoint = endpoint.trim()
       }
       if (timelineMode === 'all') {
         opts.all_timelines = true
@@ -53,7 +57,7 @@ export function ExportOtelModal({ isOpen, onClose, sessionId, timelines }: Props
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Export failed'
       if (msg.startsWith('API error 501')) {
-        setError('OTel export not configured. Set REWIND_OTEL_ENDPOINT on the server.')
+        setError('No endpoint provided. Enter a collector URL above or set REWIND_OTEL_ENDPOINT on the server.')
       } else {
         setError(msg)
       }
@@ -65,6 +69,7 @@ export function ExportOtelModal({ isOpen, onClose, sessionId, timelines }: Props
     setState('idle')
     setResult(null)
     setError('')
+    setEndpoint('')
     onClose()
   }
 
@@ -88,6 +93,18 @@ export function ExportOtelModal({ isOpen, onClose, sessionId, timelines }: Props
 
         {/* Body */}
         <div className="px-5 py-4 space-y-4">
+          {/* Endpoint URL */}
+          <div>
+            <label className="block text-xs font-medium text-neutral-400 mb-1.5">Collector endpoint</label>
+            <input
+              type="url"
+              value={endpoint}
+              onChange={(e) => setEndpoint(e.target.value)}
+              placeholder="http://localhost:4318 (or set REWIND_OTEL_ENDPOINT)"
+              className="w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-1.5 text-xs text-neutral-200 placeholder:text-neutral-500 focus:border-cyan-600 focus:outline-none focus:ring-1 focus:ring-cyan-600"
+            />
+          </div>
+
           {/* Timeline selection */}
           {timelines.length > 1 && (
             <div>

@@ -364,8 +364,10 @@ def _patch_existing_clients(proxy_url: str):
     """Patch already-instantiated OpenAI clients if the module is loaded."""
     try:
         import openai
-        if hasattr(openai, "_client"):
+        if hasattr(openai, "_client") and openai._client is not None:
             openai._client.base_url = f"{proxy_url}/v1"
+        if hasattr(openai, "_async_client") and openai._async_client is not None:
+            openai._async_client.base_url = f"{proxy_url}/v1"
     except ImportError:
         pass
 

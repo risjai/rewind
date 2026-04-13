@@ -165,6 +165,10 @@ enum Commands {
         /// Output file path (default: rewind-session-{id}.html)
         #[arg(short, long)]
         output: Option<std::path::PathBuf>,
+
+        /// Skip interactive confirmation for --include-content
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
 
     /// List snapshots
@@ -616,7 +620,7 @@ async fn main() -> Result<()> {
         Commands::Diff { session, left, right } => cmd_diff(session, left, right),
         Commands::Snapshot { directory, label } => cmd_snapshot(directory, label),
         Commands::Restore { snapshot } => cmd_restore(snapshot),
-        Commands::Share { session, include_content, output } => cmd_share(session, include_content, output),
+        Commands::Share { session, include_content, output, yes } => cmd_share(session, include_content, output, yes),
         Commands::Snapshots => cmd_snapshots(),
         Commands::Cache => cmd_cache(),
         Commands::Demo => cmd_demo(),
@@ -3362,20 +3366,24 @@ async fn cmd_export_otel(args: OtelExportArgs) -> Result<()> {
 
 // ── Share Command ──────────────────────────────────────────
 
-fn cmd_share(session_ref: String, include_content: bool, output: Option<std::path::PathBuf>) -> Result<()> {
+fn cmd_share(session_ref: String, include_content: bool, output: Option<std::path::PathBuf>, yes: bool) -> Result<()> {
     let store = Store::open_default()?;
     let session = resolve_session(&store, &session_ref)?;
 
     // Content warning + confirmation
-    if include_content {
+    if include_content && !yes {
+        use std::io::IsTerminal;
+        if !std::io::stdin().is_terminal() {
+            anyhow::bail!("--include-content requires interactive confirmation. Use --yes to skip.");
+        }
         eprintln!(
             "{} This file will contain full LLM request/response content.",
             "⚠".yellow().bold(),
         );
         eprint!("  Proceed? [y/N] ");
-        use std::io::{self, BufRead};
+        use std::io::BufRead;
         let mut line = String::new();
-        io::stdin().lock().read_line(&mut line)?;
+        std::io::stdin().lock().read_line(&mut line)?;
         if !line.trim().eq_ignore_ascii_case("y") {
             println!("Cancelled.");
             return Ok(());

@@ -593,6 +593,7 @@ fn extract_preview(store: &rewind_store::Store, blob_hash: &str) -> String {
 
 #[derive(Deserialize)]
 struct OtelExportRequest {
+    endpoint: Option<String>,
     #[serde(default)]
     include_content: bool,
     timeline_id: Option<String>,
@@ -611,13 +612,25 @@ async fn export_otel(
     Path(id): Path<String>,
     Json(body): Json<OtelExportRequest>,
 ) -> Result<Json<OtelExportResponse>, (StatusCode, String)> {
-    // Check if OTel is configured server-side
-    let otel_config = state.otel_config.as_ref().ok_or_else(|| {
-        (
+    // Destructure body to take ownership (avoids unnecessary clones)
+    let OtelExportRequest { endpoint: body_endpoint, include_content, timeline_id, all_timelines } = body;
+
+    // Resolve endpoint: request body takes priority, then server-side env var
+    let export_endpoint = body_endpoint
+        .or_else(|| state.otel_config.as_ref().map(|c| c.endpoint.clone()))
+        .unwrap_or_default();
+    if export_endpoint.is_empty() {
+        return Err((
             StatusCode::NOT_IMPLEMENTED,
-            "OTel export not configured. Set REWIND_OTEL_ENDPOINT environment variable.".to_string(),
-        )
-    })?;
+            "No endpoint provided. Pass 'endpoint' in request body or set REWIND_OTEL_ENDPOINT.".to_string(),
+        ));
+    }
+    if !export_endpoint.starts_with("http://") && !export_endpoint.starts_with("https://") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Endpoint must start with http:// or https://".to_string(),
+        ));
+    }
 
     // Extract session data synchronously (Store is not Send)
     let data = {
@@ -630,20 +643,21 @@ async fn export_otel(
             .map_err(|e| (StatusCode::NOT_FOUND, format!("{e}")))?;
 
         let opts = rewind_otel::extract::ExtractOptions {
-            timeline_id: body.timeline_id.clone(),
-            all_timelines: body.all_timelines,
+            timeline_id,
+            all_timelines,
         };
 
         rewind_otel::extract::extract_session_data(&store, &session.id, &opts)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Extract error: {e}")))?
     };
 
-    // Build export config from server-side settings
+    // Build export config: use request endpoint, fall back to server-side protocol/headers
+    let server_config = state.otel_config.as_ref();
     let config = rewind_otel::export::ExportConfig {
-        endpoint: otel_config.endpoint.clone(),
-        protocol: otel_config.protocol,
-        headers: otel_config.headers.clone(),
-        include_content: body.include_content,
+        endpoint: export_endpoint,
+        protocol: server_config.map(|c| c.protocol).unwrap_or(rewind_otel::export::Protocol::Http),
+        headers: server_config.map(|c| c.headers.clone()).unwrap_or_default(),
+        include_content,
     };
 
     let trace_id = rewind_otel::export::trace_id_from_session(&data.session.id);
@@ -666,10 +680,9 @@ async fn get_session_savings(
         (StatusCode::INTERNAL_SERVER_ERROR, format!("Lock error: {e}"))
     })?;
 
-    let session = store.get_session(&id).map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
+    let session = resolve_session(&store, &id).map_err(|e| {
+        (StatusCode::NOT_FOUND, e.to_string())
     })?;
-    let session = session.ok_or_else(|| (StatusCode::NOT_FOUND, "Session not found".into()))?;
 
     let timelines = store.get_timelines(&session.id).map_err(|e| {
         (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
