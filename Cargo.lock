@@ -1819,6 +1819,7 @@ dependencies = [
  "rewind-store",
  "serde",
  "serde_json",
+ "tempfile",
  "tracing",
  "uuid",
 ]
