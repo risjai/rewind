@@ -9,7 +9,7 @@
         See it in action
       </h2>
       <p class="mx-auto mt-4 max-w-xl text-neutral-400">
-        Agent fails at step 30? Fix step 30 — not steps 1 through 29 again.
+        A full debug cycle in under 60 seconds — record, inspect, fork, diff.
       </p>
     </div>
 
@@ -40,45 +40,41 @@
         </div>
       </div>
 
-      <!-- Step annotations -->
+      <!-- What you're seeing -->
       <div class="space-y-4">
         <div class="rounded-xl border border-neutral-800 bg-neutral-900/30 p-4">
           <div class="flex items-center gap-2.5 mb-2">
-            <span class="flex h-6 w-6 items-center justify-center rounded-full bg-brand-primary/10 text-xs font-bold text-brand-primary">1</span>
-            <span class="text-sm font-semibold">Record</span>
+            <span class="flex h-6 w-6 items-center justify-center rounded-full bg-brand-primary/10 text-brand-primary" aria-hidden="true">
+              <svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>
+            </span>
+            <span class="text-sm font-semibold">No API keys</span>
           </div>
           <p class="text-xs leading-relaxed text-neutral-400">
-            Run your agent with <code class="rounded bg-neutral-800 px-1 text-neutral-300">rewind_agent.init()</code>. Every LLM call is captured.
+            The demo runs with built-in sample data. No OpenAI key, no cloud account, nothing to configure.
           </p>
         </div>
 
         <div class="rounded-xl border border-neutral-800 bg-neutral-900/30 p-4">
           <div class="flex items-center gap-2.5 mb-2">
-            <span class="flex h-6 w-6 items-center justify-center rounded-full bg-brand-primary/10 text-xs font-bold text-brand-primary">2</span>
-            <span class="text-sm font-semibold">Inspect</span>
+            <span class="flex h-6 w-6 items-center justify-center rounded-full bg-brand-primary/10 text-brand-primary" aria-hidden="true">
+              <svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+            </span>
+            <span class="text-sm font-semibold">Cached steps = free</span>
           </div>
           <p class="text-xs leading-relaxed text-neutral-400">
-            Open the session. See every step, token count, latency, and full request/response.
+            Watch the replay counter — steps before the fork point return instantly from cache. Zero tokens, zero cost.
           </p>
         </div>
 
         <div class="rounded-xl border border-neutral-800 bg-neutral-900/30 p-4">
           <div class="flex items-center gap-2.5 mb-2">
-            <span class="flex h-6 w-6 items-center justify-center rounded-full bg-brand-primary/10 text-xs font-bold text-brand-primary">3</span>
-            <span class="text-sm font-semibold">Fork & Fix</span>
+            <span class="flex h-6 w-6 items-center justify-center rounded-full bg-brand-primary/10 text-brand-primary" aria-hidden="true">
+              <svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+            </span>
+            <span class="text-sm font-semibold">Everything local</span>
           </div>
           <p class="text-xs leading-relaxed text-neutral-400">
-            Branch at the failure. Fix your prompt or code. Replay from that point — cached steps cost 0 tokens.
-          </p>
-        </div>
-
-        <div class="rounded-xl border border-neutral-800 bg-neutral-900/30 p-4">
-          <div class="flex items-center gap-2.5 mb-2">
-            <span class="flex h-6 w-6 items-center justify-center rounded-full bg-brand-primary/10 text-xs font-bold text-brand-primary">4</span>
-            <span class="text-sm font-semibold">Prove it</span>
-          </div>
-          <p class="text-xs leading-relaxed text-neutral-400">
-            Diff original vs. forked timelines. Score with LLM-as-judge. Ship with evidence.
+            All data in a SQLite database on your machine. The entire tool is one binary — nothing phones home.
           </p>
         </div>
       </div>
