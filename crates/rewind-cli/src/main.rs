@@ -1,4 +1,5 @@
 mod share;
+mod update_check;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -653,6 +654,8 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+
+    update_check::check_for_updates_background();
 
     match cli.command {
         Commands::Record { name, port, upstream, replay, web, web_port, insecure } => cmd_record(name, port, upstream, replay, web, web_port, insecure).await,
