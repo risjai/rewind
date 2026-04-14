@@ -1,4 +1,4 @@
-import { useMemo, useRef, useCallback, useReducer, useEffect } from 'react'
+import { useMemo, useRef, useCallback, useReducer, useEffect, useState } from 'react'
 import { cn, formatDuration, formatTokens } from '@/lib/utils'
 import { Brain, Wrench, ClipboardList, MessageSquare, Radio } from 'lucide-react'
 import type { SpanResponse, StepResponse, Session } from '@/types/api'
@@ -228,17 +228,23 @@ function computeBarLayouts(
   steps: StepResponse[],
   positionMode: 'created_at' | 'step_number',
   sessionBounds: { startMs: number; endMs: number; maxStep: number },
+  axisMode: AxisMode = 'duration',
 ): BarLayout[] {
   if (steps.length === 0) return []
 
   if (positionMode === 'step_number') {
     const { maxStep } = sessionBounds
     if (maxStep <= 0) return []
-    return steps.map(step => ({
-      step,
-      leftPct: ((step.step_number - 1) / maxStep) * 100,
-      widthPct: Math.max(0.4, (1 / maxStep) * 100 * Math.min(1, step.duration_ms / 1000 + 0.3)),
-    }))
+    return steps.map(step => {
+      const metric = axisMode === 'tokens' ? step.tokens_in + step.tokens_out
+        : axisMode === 'cost' ? (step.tokens_in * 3 + step.tokens_out * 15) / 1_000_000
+        : step.duration_ms
+      return {
+        step,
+        leftPct: ((step.step_number - 1) / maxStep) * 100,
+        widthPct: Math.max(0.4, (1 / maxStep) * 100 * Math.min(1, (metric > 0 ? 0.3 + metric / (metric + 100) : 0.3))),
+      }
+    })
   }
 
   const { startMs, endMs } = sessionBounds
@@ -248,8 +254,13 @@ function computeBarLayouts(
   return steps.map(step => {
     const stepStart = new Date(step.created_at).getTime()
     const leftPct = ((stepStart - startMs) / totalMs) * 100
-    const widthPct = Math.max(0.3, (step.duration_ms / totalMs) * 100)
-    return { step, leftPct, widthPct }
+    const metric = axisMode === 'tokens' ? step.tokens_in + step.tokens_out
+      : axisMode === 'cost' ? (step.tokens_in * 3 + step.tokens_out * 15) / 1_000_000
+      : step.duration_ms
+    const widthPct = axisMode === 'duration'
+      ? Math.max(0.3, (step.duration_ms / totalMs) * 100)
+      : Math.max(0.3, (metric / Math.max(1, totalMs)) * 100 * 50)
+    return { step, leftPct, widthPct: Math.min(widthPct, 30) }
   })
 }
 
@@ -267,6 +278,8 @@ function StepTypeIcon({ type }: { type: string }) {
 
 // --- Component ---
 
+export type AxisMode = 'duration' | 'tokens' | 'cost'
+
 interface ActivityTimelineProps {
   spans: SpanResponse[]
   steps: StepResponse[]
@@ -274,6 +287,7 @@ interface ActivityTimelineProps {
   selectedStepId: string | null
   onSelectStep: (id: string | null) => void
   isLive?: boolean
+  isCursor?: boolean
 }
 
 const LANE_HEIGHT = 36
@@ -286,14 +300,19 @@ export function ActivityTimeline({
   selectedStepId,
   onSelectStep,
   isLive,
+  isCursor,
 }: ActivityTimelineProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const laneAreaRef = useRef<HTMLDivElement>(null)
   const isDragging = useRef(false)
   const dragStartX = useRef(0)
   const dragStartOffset = useRef(0)
+  const prevStepCount = useRef(steps.length)
 
   const [viewport, dispatch] = useReducer(viewportReducer, INITIAL_VIEWPORT)
+  const [autoFollow, setAutoFollow] = useState(true)
+  const [axisMode, setAxisMode] = useState<AxisMode>('duration')
+  const [analyticsLaneId, setAnalyticsLaneId] = useState<string | null>(null)
 
   const lanes = useMemo(() => buildLanes(spans, steps, session), [spans, steps, session])
 
@@ -310,6 +329,14 @@ export function ActivityTimeline({
     }
   }, [lanes])
 
+  const stepMetricValue = useCallback((step: StepResponse): number => {
+    switch (axisMode) {
+      case 'tokens': return step.tokens_in + step.tokens_out
+      case 'cost': return (step.tokens_in * 3 + step.tokens_out * 15) / 1_000_000
+      default: return step.duration_ms
+    }
+  }, [axisMode])
+
   const totalRange = lanes[0]?.positionMode === 'step_number'
     ? sessionBounds.maxStep
     : sessionBounds.endMs - sessionBounds.startMs
@@ -318,19 +345,32 @@ export function ActivityTimeline({
     onSelectStep(stepId === selectedStepId ? null : stepId)
   }, [onSelectStep, selectedStepId])
 
-  // Wheel zoom handler
+  // Auto-follow: when new steps arrive during live recording, pan viewport to show them
+  useEffect(() => {
+    if (!isLive || !autoFollow) return
+    if (steps.length > prevStepCount.current && totalRange > 0) {
+      const visibleRange = totalRange / viewport.zoom
+      const newOffset = Math.max(0, totalRange - visibleRange)
+      dispatch({ type: 'set_offset', offset: newOffset })
+    }
+    prevStepCount.current = steps.length
+  }, [steps.length, isLive, autoFollow, totalRange, viewport.zoom])
+
+  // Wheel zoom handler — disables auto-follow
   const handleWheel = useCallback((e: React.WheelEvent) => {
     if (Math.abs(e.deltaY) < 4) return
     e.preventDefault()
+    setAutoFollow(false)
     const rect = laneAreaRef.current?.getBoundingClientRect()
     if (!rect) return
     const cursorFraction = Math.max(0, Math.min(1, (e.clientX - rect.left - LABEL_WIDTH) / (rect.width - LABEL_WIDTH)))
     dispatch({ type: 'wheel_zoom', deltaY: e.deltaY, cursorFraction, totalRange })
   }, [totalRange])
 
-  // Drag-to-pan handlers
+  // Drag-to-pan handlers — disables auto-follow
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     if (e.button !== 0) return
+    setAutoFollow(false)
     isDragging.current = true
     dragStartX.current = e.clientX
     dragStartOffset.current = viewport.offset
@@ -436,6 +476,19 @@ export function ActivityTimeline({
             LIVE
           </span>
         )}
+        {isLive && (
+          <button
+            onClick={() => setAutoFollow(!autoFollow)}
+            className={cn(
+              'text-[10px] px-1.5 py-0.5 rounded transition-colors',
+              autoFollow
+                ? 'bg-cyan-900/40 text-cyan-300 border border-cyan-700/50'
+                : 'text-neutral-500 border border-neutral-700/50 hover:text-neutral-300'
+            )}
+          >
+            {autoFollow ? 'Following' : 'Follow'}
+          </button>
+        )}
         {viewport.zoom > 1 && (
           <button
             onClick={() => dispatch({ type: 'reset' })}
@@ -444,8 +497,38 @@ export function ActivityTimeline({
             {viewport.zoom.toFixed(1)}x — Reset
           </button>
         )}
+
+        {/* Axis mode selector */}
+        <div className="flex items-center border border-neutral-700/50 rounded overflow-hidden ml-1">
+          {(['duration', 'tokens', 'cost'] as const).map(mode => {
+            const disabled = mode !== 'duration' && isCursor
+            return (
+              <button
+                key={mode}
+                onClick={() => !disabled && setAxisMode(mode)}
+                disabled={disabled}
+                title={disabled ? 'Token/cost data unavailable for Cursor sessions' : undefined}
+                className={cn(
+                  'text-[9px] px-1.5 py-0.5 transition-colors capitalize',
+                  axisMode === mode
+                    ? 'bg-neutral-700 text-neutral-100'
+                    : disabled
+                      ? 'text-neutral-700 cursor-not-allowed'
+                      : 'text-neutral-500 hover:text-neutral-300'
+                )}
+              >
+                {mode}
+              </button>
+            )
+          })}
+        </div>
+
         <span className="ml-auto text-[10px] text-neutral-600">
           {lanes.length} {lanes.length === 1 ? 'lane' : 'lanes'} · {steps.length} steps
+          {(() => {
+            const errorCount = steps.filter(s => s.status === 'error').length
+            return errorCount > 0 ? <span className="text-red-400 ml-1">· {errorCount} errors</span> : null
+          })()}
         </span>
       </div>
 
@@ -458,6 +541,12 @@ export function ActivityTimeline({
         onSetOffset={(offset) => dispatch({ type: 'set_offset', offset })}
       />
 
+      {/* Lane Analytics Popover */}
+      {analyticsLaneId && (() => {
+        const lane = lanes.find(l => l.id === analyticsLaneId)
+        return lane ? <LaneAnalytics lane={lane} onClose={() => setAnalyticsLaneId(null)} /> : null
+      })()}
+
       {/* Swim lanes */}
       <div
         ref={laneAreaRef}
@@ -468,7 +557,7 @@ export function ActivityTimeline({
       >
         <div className="relative" style={{ minHeight: lanes.length * LANE_HEIGHT + 28 }}>
           {lanes.map((lane, laneIdx) => {
-            const bars = computeBarLayouts(lane.steps, lane.positionMode, sessionBounds)
+            const bars = computeBarLayouts(lane.steps, lane.positionMode, sessionBounds, axisMode)
             const isFocused = viewport.focusedLaneIndex === laneIdx
 
             return (
@@ -478,13 +567,15 @@ export function ActivityTimeline({
                 style={{ height: LANE_HEIGHT }}
               >
                 {/* Label column */}
-                <div
+                <button
+                  onClick={() => setAnalyticsLaneId(analyticsLaneId === lane.id ? null : lane.id)}
                   className={cn(
                     'shrink-0 flex items-center gap-1.5 px-2 border-b border-r border-neutral-800/50',
-                    'bg-neutral-900/80 sticky left-0 z-10',
+                    'bg-neutral-900/80 sticky left-0 z-10 text-left cursor-pointer hover:bg-neutral-800/50 transition-colors',
                     isFocused && 'border-l-2 border-l-cyan-500',
                   )}
                   style={{ width: LABEL_WIDTH }}
+                  title="Click for analytics"
                 >
                   <span className={cn('w-2 h-2 rounded-full shrink-0', lane.color)} />
                   <span className={cn(
@@ -493,7 +584,10 @@ export function ActivityTimeline({
                   )}>
                     {lane.isSubLane ? '↳ ' : ''}{lane.label}
                   </span>
-                </div>
+                  {lane.steps.some(s => s.status === 'error') && (
+                    <span className="w-1.5 h-1.5 rounded-full bg-red-500 shrink-0 ml-auto" />
+                  )}
+                </button>
 
                 {/* Bar area */}
                 <div className="flex-1 relative border-b border-neutral-800/30 bg-neutral-950/30 overflow-hidden">
@@ -568,6 +662,86 @@ export function ActivityTimeline({
           </div>
         </div>
       </div>
+    </div>
+  )
+}
+
+// --- Lane Analytics Popover ---
+
+export function computeLaneAnalytics(steps: StepResponse[]) {
+  const total = steps.length
+  if (total === 0) return null
+
+  const totalDuration = steps.reduce((s, st) => s + st.duration_ms, 0)
+  const totalTokens = steps.reduce((s, st) => s + st.tokens_in + st.tokens_out, 0)
+  const errors = steps.filter(s => s.status === 'error').length
+
+  const typeCounts: Record<string, number> = {}
+  const toolCounts: Record<string, number> = {}
+  for (const step of steps) {
+    typeCounts[step.step_type] = (typeCounts[step.step_type] || 0) + 1
+    if (step.tool_name) toolCounts[step.tool_name] = (toolCounts[step.tool_name] || 0) + 1
+  }
+
+  const topTools = Object.entries(toolCounts).sort((a, b) => b[1] - a[1]).slice(0, 5)
+
+  return { total, totalDuration, totalTokens, errors, typeCounts, topTools }
+}
+
+function LaneAnalytics({ lane, onClose }: { lane: Lane; onClose: () => void }) {
+  const analytics = computeLaneAnalytics(lane.steps)
+  if (!analytics) return null
+
+  return (
+    <div className="border-b border-neutral-800 bg-neutral-900/90 px-3 py-2 shrink-0">
+      <div className="flex items-center justify-between mb-1.5">
+        <span className="text-[11px] font-medium text-neutral-200">{lane.label}</span>
+        <button onClick={onClose} className="text-[10px] text-neutral-500 hover:text-neutral-300">✕</button>
+      </div>
+      <div className="grid grid-cols-4 gap-3 text-[10px]">
+        <div>
+          <span className="text-neutral-500">Steps</span>
+          <div className="text-neutral-200 font-medium">{analytics.total}</div>
+        </div>
+        <div>
+          <span className="text-neutral-500">Duration</span>
+          <div className="text-amber-400 font-medium">{formatDuration(analytics.totalDuration)}</div>
+        </div>
+        <div>
+          <span className="text-neutral-500">Tokens</span>
+          <div className="text-blue-400 font-medium">{formatTokens(analytics.totalTokens)}</div>
+        </div>
+        <div>
+          <span className="text-neutral-500">Errors</span>
+          <div className={cn('font-medium', analytics.errors > 0 ? 'text-red-400' : 'text-green-400')}>
+            {analytics.errors > 0 ? analytics.errors : 'None'}
+          </div>
+        </div>
+      </div>
+      {analytics.topTools.length > 0 && (
+        <div className="mt-1.5 flex flex-wrap gap-1">
+          {analytics.topTools.map(([name, count]) => (
+            <span key={name} className="text-[9px] bg-neutral-800 text-neutral-400 px-1.5 py-0.5 rounded">
+              {name} ×{count}
+            </span>
+          ))}
+        </div>
+      )}
+      {Object.keys(analytics.typeCounts).length > 1 && (
+        <div className="mt-1.5 flex gap-1">
+          {Object.entries(analytics.typeCounts).map(([type, count]) => {
+            const maxCount = Math.max(...Object.values(analytics.typeCounts))
+            return (
+              <div key={type} className="flex-1">
+                <div className="h-1.5 rounded-full bg-neutral-800 overflow-hidden">
+                  <div className="h-full bg-neutral-500 rounded-full" style={{ width: `${(count / maxCount) * 100}%` }} />
+                </div>
+                <span className="text-[8px] text-neutral-600">{type.replace('_', ' ')} ({count})</span>
+              </div>
+            )
+          })}
+        </div>
+      )}
     </div>
   )
 }

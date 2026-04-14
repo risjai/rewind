@@ -112,6 +112,11 @@ export function SessionView({ sessionId }: { sessionId: string }) {
               <span className="flex items-center gap-1 text-neutral-500"><Zap size={12} /> {formatTokens(session.metadata.cache_tokens as number)} cached</span>
             )}
             <span className="flex items-center gap-1"><Clock size={12} /> {formatDuration(totalDuration)}</span>
+            {steps.filter(s => s.status === 'error').length > 0 && (
+              <span className="flex items-center gap-1 text-red-400">
+                {steps.filter(s => s.status === 'error').length} errors
+              </span>
+            )}
             {spans.length > 0 && (() => {
               const agentNames = spans.filter(s => s.span_type === 'agent').map(s => s.name);
               return agentNames.length > 0 ? (
@@ -178,6 +183,7 @@ export function SessionView({ sessionId }: { sessionId: string }) {
                 selectedStepId={selectedStepId}
                 onSelectStep={selectStep}
                 isLive={isLive}
+                isCursor={isCursor}
               />
             )}
           </div>

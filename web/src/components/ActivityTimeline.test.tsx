@@ -1,7 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
-import userEvent from '@testing-library/user-event'
-import { buildLanes, viewportReducer, ActivityTimeline, type Lane, type ViewportState } from './ActivityTimeline'
+import { buildLanes, viewportReducer, computeLaneAnalytics, ActivityTimeline, type Lane, type ViewportState } from './ActivityTimeline'
 import type { SpanResponse, StepResponse, Session } from '@/types/api'
 
 function makeStep(overrides: Partial<StepResponse> = {}): StepResponse {
@@ -315,5 +314,84 @@ describe('ActivityTimeline keyboard navigation', () => {
     const { timeline } = renderTimeline(null)
     fireEvent.keyDown(timeline, { key: '+' })
     expect(screen.getByText(/Reset/)).toBeTruthy()
+  })
+})
+
+describe('computeLaneAnalytics', () => {
+  it('computes correct aggregate metrics', () => {
+    const steps: StepResponse[] = [
+      makeStep({ id: 'a', duration_ms: 100, tokens_in: 50, tokens_out: 25, status: 'success', tool_name: 'Read' }),
+      makeStep({ id: 'b', duration_ms: 200, tokens_in: 100, tokens_out: 50, status: 'error', tool_name: 'Write' }),
+      makeStep({ id: 'c', duration_ms: 300, tokens_in: 75, tokens_out: 30, status: 'success', tool_name: 'Read' }),
+    ]
+    const result = computeLaneAnalytics(steps)!
+    expect(result.total).toBe(3)
+    expect(result.totalDuration).toBe(600)
+    expect(result.totalTokens).toBe(330)
+    expect(result.errors).toBe(1)
+    expect(result.topTools).toEqual([['Read', 2], ['Write', 1]])
+  })
+
+  it('returns null for empty steps', () => {
+    expect(computeLaneAnalytics([])).toBeNull()
+  })
+})
+
+describe('ActivityTimeline axis mode', () => {
+  const threeSteps: StepResponse[] = [
+    makeStep({ id: 'a', step_number: 1, created_at: '2026-04-14T10:00:00Z', duration_ms: 1000, tokens_in: 100, tokens_out: 50 }),
+    makeStep({ id: 'b', step_number: 2, created_at: '2026-04-14T10:00:01Z', duration_ms: 2000, tokens_in: 200, tokens_out: 100 }),
+    makeStep({ id: 'c', step_number: 3, created_at: '2026-04-14T10:00:03Z', duration_ms: 500, tokens_in: 50, tokens_out: 25 }),
+  ]
+  const spanWithSteps = makeSpan({ id: 'agent-1', name: 'main-agent', steps: threeSteps })
+  const session = makeSession()
+
+  it('renders Duration/Tokens/Cost axis selector', () => {
+    render(
+      <ActivityTimeline spans={[spanWithSteps]} steps={threeSteps} session={session} selectedStepId={null} onSelectStep={() => {}} />
+    )
+    expect(screen.getByText('duration')).toBeTruthy()
+    expect(screen.getByText('tokens')).toBeTruthy()
+    expect(screen.getByText('cost')).toBeTruthy()
+  })
+
+  it('disables tokens and cost for Cursor sessions', () => {
+    render(
+      <ActivityTimeline spans={[spanWithSteps]} steps={threeSteps} session={session} selectedStepId={null} onSelectStep={() => {}} isCursor={true} />
+    )
+    const tokensBtn = screen.getByText('tokens')
+    expect(tokensBtn.closest('button')?.disabled).toBe(true)
+    const costBtn = screen.getByText('cost')
+    expect(costBtn.closest('button')?.disabled).toBe(true)
+  })
+
+  it('shows error count in header when errors exist', () => {
+    const stepsWithError = [
+      ...threeSteps,
+      makeStep({ id: 'd', step_number: 4, status: 'error', created_at: '2026-04-14T10:00:04Z' }),
+    ]
+    const span = makeSpan({ id: 'agent-1', name: 'main', steps: stepsWithError })
+    render(
+      <ActivityTimeline spans={[span]} steps={stepsWithError} session={session} selectedStepId={null} onSelectStep={() => {}} />
+    )
+    expect(screen.getByText(/1 error/)).toBeTruthy()
+  })
+
+  it('renders auto-follow button when isLive', () => {
+    render(
+      <ActivityTimeline spans={[spanWithSteps]} steps={threeSteps} session={session} selectedStepId={null} onSelectStep={() => {}} isLive={true} />
+    )
+    expect(screen.getByText('Following')).toBeTruthy()
+  })
+
+  it('shows lane analytics popover on label click', () => {
+    const { container } = render(
+      <ActivityTimeline spans={[spanWithSteps]} steps={threeSteps} session={session} selectedStepId={null} onSelectStep={() => {}} />
+    )
+    const label = screen.getByText('main-agent')
+    fireEvent.click(label.closest('button')!)
+    expect(screen.getByText('Steps')).toBeTruthy()
+    expect(screen.getByText('Duration')).toBeTruthy()
+    expect(screen.getByText('Tokens')).toBeTruthy()
   })
 })
