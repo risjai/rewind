@@ -28,6 +28,13 @@ The binary will be at `./target/release/rewind-mcp`.
 
 ## Configure
 
+Find the full path to the binary — IDE MCP clients don't inherit your shell PATH:
+
+```bash
+which rewind-mcp
+# typical output: /Users/you/.cargo/bin/rewind-mcp
+```
+
 ### Claude Code
 
 Add to `.claude/settings.json`:
@@ -36,19 +43,7 @@ Add to `.claude/settings.json`:
 {
   "mcpServers": {
     "rewind": {
-      "command": "rewind-mcp"
-    }
-  }
-}
-```
-
-If you used Option 2 (build from source), use the full path instead:
-
-```json
-{
-  "mcpServers": {
-    "rewind": {
-      "command": "/path/to/rewind/target/release/rewind-mcp"
+      "command": "/Users/you/.cargo/bin/rewind-mcp"
     }
   }
 }
@@ -62,11 +57,13 @@ Add to `.cursor/mcp.json`:
 {
   "mcpServers": {
     "rewind": {
-      "command": "rewind-mcp"
+      "command": "/Users/you/.cargo/bin/rewind-mcp"
     }
   }
 }
 ```
+
+Replace `/Users/you/.cargo/bin/rewind-mcp` with the output of `which rewind-mcp`.
 
 ## Available Tools
 
