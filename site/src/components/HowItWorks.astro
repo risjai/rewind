@@ -84,30 +84,30 @@
         </div>
       </div>
 
-      <!-- Step 3: Fork & Fix -->
+      <!-- Step 3: Fix -->
       <div class="group">
         <div class="overflow-hidden rounded-2xl border border-neutral-800 bg-neutral-900/30 transition group-hover:border-neutral-700">
-          <!-- Mockup diff view -->
+          <!-- Mockup rewind fix output -->
           <div class="border-b border-neutral-800 bg-neutral-900 px-4 py-2.5 flex items-center gap-2">
             <div class="h-3 w-3 rounded-full bg-red-500/70"></div>
             <div class="h-3 w-3 rounded-full bg-yellow-500/70"></div>
             <div class="h-3 w-3 rounded-full bg-green-500/70"></div>
-            <span class="ml-2 text-[10px] text-neutral-600 font-mono">rewind diff main fixed</span>
+            <span class="ml-2 text-[10px] text-neutral-600 font-mono">rewind fix latest</span>
           </div>
           <div class="bg-neutral-950 p-5 font-mono text-[11px] leading-loose">
-            <div class="text-neutral-500">Diverge at step <span class="text-neutral-300">4</span></div>
-            <div class="mt-2"><span class="text-neutral-600">&#x2550;</span> <span class="text-neutral-500">Step 1-3</span> <span class="text-neutral-600">identical</span></div>
-            <div><span class="text-brand-accent">&#x2260;</span> <span class="text-neutral-300">Step 4</span> <span class="text-red-400/70 line-through">stale data</span> <span class="text-neutral-600">&#x2192;</span> <span class="text-emerald-400/80">fresh data</span></div>
-            <div><span class="text-brand-accent">&#x2260;</span> <span class="text-neutral-300">Step 5</span> <span class="text-red-400/70 line-through">error</span> <span class="text-neutral-600">&#x2192;</span> <span class="text-emerald-400/80">success</span></div>
+            <div class="text-neutral-500">&#x23EA; Diagnosing <span class="text-neutral-300">"my-agent"</span> <span class="text-neutral-600">(12 steps)</span></div>
+            <div class="mt-2"><span class="text-red-400">&#x2717;</span> <span class="text-neutral-300">Step 8</span> <span class="text-red-400/70">hallucination</span></div>
+            <div class="mt-1 text-neutral-500">Root cause: <span class="text-neutral-300">stale data from rate-limited API</span></div>
+            <div class="text-neutral-500">Fix: <span class="text-brand-primary">retry_step</span> <span class="text-emerald-400/80">high confidence</span></div>
           </div>
 
           <div class="p-6">
             <div class="flex items-center gap-3 mb-3">
               <span class="flex h-8 w-8 items-center justify-center rounded-full bg-brand-primary/10 text-sm font-bold text-brand-primary">3</span>
-              <h3 class="text-lg font-bold">Fork & Fix</h3>
+              <h3 class="text-lg font-bold">Fix</h3>
             </div>
             <p class="text-sm leading-relaxed text-neutral-400">
-              Branch at the failure. Fix your code, replay from that point. Cached steps cost 0 tokens. Diff original vs. fixed. Score with LLM-as-judge.
+              <code class="text-brand-primary text-xs">rewind fix</code> diagnoses the failure with AI, suggests a fix, and optionally forks + replays with the patch applied. One command from broken to proven.
             </p>
           </div>
         </div>

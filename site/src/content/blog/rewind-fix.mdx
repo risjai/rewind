@@ -1,0 +1,100 @@
+---
+title: "Your agent failed at step 30. rewind fix diagnosed and repaired it in 12 seconds."
+description: "Introducing rewind fix — AI-powered diagnosis and repair for failed agent sessions. One command finds the root cause, suggests a fix, and verifies it works."
+date: 2026-04-14
+author: "Rishabh Jain"
+tags: ["announcement", "rewind-fix", "ai-agents", "debugging", "automation"]
+draft: false
+---
+
+My agent failed at step 5. Again.
+
+I opened the trace, scrolled through the context windows, stared at the token counts, and eventually figured out that the model hallucinated because the search API returned stale data due to a rate limit. Took me 20 minutes. Then I changed the prompt, re-ran the entire agent, and... different failure, different step. Non-deterministic LLMs are fun like that.
+
+The debugging loop for AI agents is brutal: read the trace, guess what went wrong, change something, re-run the whole thing, compare manually. Every iteration costs tokens, time, and patience.
+
+So I built a command that does this entire loop automatically.
+
+## `rewind fix`
+
+```bash
+rewind fix latest
+```
+
+One command. Rewind loads the failed session, extracts the full context around the failure, and sends it to an LLM for diagnosis. The LLM returns a structured result: what went wrong, which step failed, and what to change.
+
+```
+⏪ Diagnosing session "research-agent-demo" (5 steps)...
+
+  Failure: Step 5 — llmcall (gpt-4o) — error
+  Error: HALLUCINATION: Agent used stale 2019 projection as current fact
+  Root cause: The agent relied on outdated data due to a search API rate
+              limit, leading to incorrect population figures.
+
+  Suggested fix: retry_step
+  Confidence:    high
+
+  To apply this fix automatically:
+    rewind fix latest --apply
+```
+
+## The fix loop — automated
+
+The diagnosis is useful on its own. But the real power is `--apply`:
+
+```bash
+rewind fix latest --apply --yes --command "python agent.py"
+```
+
+This does everything:
+1. **Diagnoses** the failure with an LLM
+2. **Forks** the timeline at the step before the failure
+3. **Starts the proxy** with request rewrites (model swap, system prompt injection, etc.)
+4. **Runs your agent** against the patched proxy
+5. **Reports savings** — tokens, cost, and time saved
+
+Steps before the fork are served from cache (0 tokens, 0ms). Only the fixed steps hit the LLM.
+
+## Five fix types
+
+The diagnosis LLM can suggest any of these:
+
+| Fix | When it helps |
+|:---|:---|
+| **Model swap** | Context window overflow, capability mismatch — switch to a better model |
+| **System prompt injection** | Missing guardrails — add instructions to prevent hallucination |
+| **Temperature adjustment** | Too much randomness — reduce temperature for consistency |
+| **Retry** | Non-deterministic failure — same request, different roll of the dice |
+| **No fix** | Agent code issue — the LLM parameters aren't the problem |
+
+## Skip the AI — test your own theory
+
+If you already know what to try, skip the diagnosis entirely:
+
+```bash
+rewind fix latest --hypothesis "swap_model:gpt-4o" --apply --yes --command "python agent.py"
+```
+
+This directly forks and replays with your specified fix — no LLM call for diagnosis, no waiting. Power users love this.
+
+## How it works under the hood
+
+The proxy already sits between your agent and the LLM provider. In `--apply` mode, it does something new: **request rewriting**. After the fork point, the proxy modifies the outgoing request body before forwarding it upstream.
+
+For a model swap, it changes the `model` field. For system prompt injection, it prepends a message (OpenAI format) or sets the `system` field (Anthropic format — both string and array with prompt caching). For temperature, it overrides the parameter.
+
+The rewrite only applies to steps after the fork. Cached steps are served verbatim.
+
+## Try it
+
+```bash
+pip install rewind-agent[openai]
+
+rewind demo                    # seed a session with a known failure
+rewind fix latest              # diagnose it
+rewind fix latest --apply      # fork + replay with the fix
+```
+
+No API keys needed for the demo. The diagnosis call uses your own `OPENAI_API_KEY` (gpt-4o-mini by default, ~$0.03 per diagnosis).
+
+Full documentation: [docs/fix.md](https://github.com/agentoptics/rewind/blob/master/docs/fix.md)
