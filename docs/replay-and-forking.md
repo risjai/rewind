@@ -151,7 +151,7 @@ rewind record --name "my-agent" --upstream https://api.openai.com --replay
 ### Cache stats
 
 ```bash
-rewind cache   # see stats
+rewind cache
 # Cached responses: 2
 # Total cache hits: 1
 # Tokens saved: 184
