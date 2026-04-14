@@ -3698,11 +3698,11 @@ async fn run_fix_subprocess(payload: &serde_json::Value) -> Result<serde_json::V
             ))?;
 
         if let Some(mut stdin) = child.stdin.take() {
-            if let Err(e) = stdin.write_all(payload_str.as_bytes()) {
+            stdin.write_all(payload_str.as_bytes()).map_err(|e| {
                 let _ = child.kill();
                 let _ = child.wait();
-                bail!("Failed to write diagnostic payload ({} bytes): {}", payload_str.len(), e);
-            }
+                anyhow::anyhow!("Failed to write diagnostic payload ({} bytes): {}", payload_str.len(), e)
+            })?;
         }
 
         let start = std::time::Instant::now();

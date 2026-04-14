@@ -189,7 +189,7 @@ class TestStore(unittest.TestCase):
         req_hash = self.store.blobs.put_json({"model": "gpt-4o", "messages": []})
         resp_hash = self.store.blobs.put_json({"choices": []})
 
-        step_id = self.store.create_step(
+        self.store.create_step(
             session_id=sid, timeline_id=tid, step_number=1,
             step_type="tool_call", status="success", model="gpt-4o",
             duration_ms=50, tokens_in=5, tokens_out=3,
