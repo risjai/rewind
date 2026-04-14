@@ -1,9 +1,0 @@
-{
-  "git": {
-    "deploymentEnabled": {
-      "master": true,
-      "main": true
-    }
-  },
-  "ignoreCommand": "git diff HEAD^ HEAD --quiet -- site/"
-}
