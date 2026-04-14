@@ -42,6 +42,6 @@ Rewind is a time-travel debugger for AI agents -- a single binary with zero depe
 | `rewind export otel <session>` | Export a session as OpenTelemetry traces via OTLP ([guide](otel-export.md)) |
 | `rewind query "SQL"` | Run a read-only SQL query against the Rewind database |
 | `rewind query --tables` | Show all tables and their column schemas |
-| `rewind web [--port 8080]` | Start the web dashboard (flight recorder + live) |
+| `rewind web [--port 4800]` | Start the web dashboard (flight recorder + live) |
 | `rewind record --web` | Start recording with live web dashboard |
 | `rewind demo` | Seed demo data to explore without API keys |

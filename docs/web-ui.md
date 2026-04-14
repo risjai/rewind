@@ -8,10 +8,10 @@ Rewind is a time-travel debugger for AI agents that records every LLM call for i
 
 ## Getting Started
 
-Run `rewind web` and open `http://localhost:8080`:
+Run `rewind web` and open `http://localhost:4800`:
 
 ```bash
-rewind web [--port 8080]
+rewind web [--port 4800]
 ```
 
 To start recording with the live web dashboard:
