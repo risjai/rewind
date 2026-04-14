@@ -1,6 +1,6 @@
 # CLI Walkthrough — Every Command, Real Output
 
-All output captured from a clean `pip install rewind-agent` on Python 3.14, macOS (Apple Silicon), Rewind v0.12.0.
+All output captured from a clean `pip install rewind-agent` on Python 3.14, macOS (Apple Silicon). For the command reference table, see [cli-reference.md](cli-reference.md).
 
 ---
 
@@ -107,6 +107,8 @@ Creates a new timeline branch at the specified step. Steps before the fork point
 
 ## 5. Replay from a Fork Point
 
+`replay` creates its own fork internally — this is a separate operation from the manual fork in section 4.
+
 ```
 $ rewind replay latest --from 4
 ⏪ Rewind — Fork & Execute Replay
@@ -145,7 +147,7 @@ $ rewind diff latest main fixed
   ≠ Step  5 [error] 700tok → [success] 715tok
 ```
 
-Shows where timelines diverge. Steps 1-4 are identical (cached), step 5 changed from error to success.
+The first argument is the session (`latest`), and `main`/`fixed` are timeline labels within that session. Shows where timelines diverge. Steps 1-4 are identical (cached), step 5 changed from error to success.
 
 ---
 
@@ -500,16 +502,13 @@ $ rewind query --tables
 ### Run Queries
 
 ```
-$ rewind query "SELECT name, total_steps, total_tokens, status FROM sessions ORDER BY created_at DESC LIMIT 5"
+$ rewind query "SELECT name, total_steps, total_tokens, status FROM sessions ORDER BY created_at DESC LIMIT 3"
   name                    total_steps  total_tokens  status
   ────────────────────────────────────────────────────────────
   research-agent-demo     5            1231          failed
-  research-agent-demo     5            1231          failed
-  research-agent-demo     5            1231          failed
-  research-agent-demo     5            1231          failed
   claude-code (38a9afa6)  29           0             recording
 
-  5 row(s)
+  2 row(s)
 ```
 
 Read-only SQL against the Rewind SQLite database. Full access to all tables.
@@ -565,9 +564,16 @@ Starts a browser-based dashboard at `http://127.0.0.1:4800`. Shows all sessions,
 
 ```
 $ rewind hooks install
+⏪ Rewind — Installing Claude Code Hooks
+
+  ✓ Hook script written to ~/.claude/rewind-hook.sh
+  ✓ Claude Code settings updated at ~/.claude/settings.json
+  ✓ 5 hook event types configured
+
+  → Start the server with rewind web to begin observing Claude Code sessions.
 ```
 
-Installs Claude Code hooks for automatic session observation. Every Claude Code session gets recorded as a Rewind session.
+Writes a hook script and registers it in Claude Code's `settings.json`. Every Claude Code session gets recorded as a Rewind session. Idempotent — safe to re-run.
 
 ---
 

@@ -25,7 +25,7 @@ Rewind is a time-travel debugger for AI agents -- a single binary with zero depe
 | `rewind eval dataset create <name>` | Create a new evaluation dataset |
 | `rewind eval dataset import <name> <file.jsonl>` | Import test cases from JSONL |
 | `rewind eval dataset show <name>` | Show dataset with example previews |
-| `rewind eval evaluator create <name> -t <type>` | Create an evaluator (exact_match, contains, regex, json_schema, tool_use_match) |
+| `rewind eval evaluator create <name> -t <type>` | Create an evaluator (exact_match, contains, regex, json_schema, tool_use_match, llm_judge, custom) |
 | `rewind eval run <dataset> -c <cmd> -e <evaluator>` | Run experiment -- execute command per example, score, aggregate |
 | `rewind eval compare <left> <right>` | Compare two experiments side-by-side |
 | `rewind eval show <experiment>` | Show detailed experiment results |
