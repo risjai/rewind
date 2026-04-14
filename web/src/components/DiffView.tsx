@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { useStore } from '@/hooks/use-store'
 import { cn, formatTokens, formatDuration } from '@/lib/utils'
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { ArrowLeft, Equal, Diff, ArrowLeftRight } from 'lucide-react'
 import type { Timeline, TimelineDiff, StepDiffEntry } from '@/types/api'
 
@@ -10,6 +10,7 @@ export function DiffView({ sessionId }: { sessionId: string }) {
   const { setView } = useStore()
   const [leftId, setLeftId] = useState<string>('')
   const [rightId, setRightId] = useState<string>('')
+  const [selectedDiffStep, setSelectedDiffStep] = useState<number | null>(null)
 
   const { data: timelines = [] } = useQuery({
     queryKey: ['timelines', sessionId],
@@ -24,13 +25,14 @@ export function DiffView({ sessionId }: { sessionId: string }) {
     enabled: canDiff,
   })
 
-  // Auto-select when timelines load
-  if (timelines.length >= 2 && !leftId) {
-    const root = timelines.find(t => !t.parent_timeline_id)
-    const fork = timelines.find(t => t.parent_timeline_id)
-    if (root) setLeftId(root.id)
-    if (fork) setRightId(fork.id)
-  }
+  useEffect(() => {
+    if (timelines.length >= 2 && !leftId) {
+      const root = timelines.find(t => !t.parent_timeline_id)
+      const fork = timelines.find(t => t.parent_timeline_id)
+      if (root) setLeftId(root.id)
+      if (fork) setRightId(fork.id)
+    }
+  }, [timelines, leftId])
 
   return (
     <div className="flex flex-col h-full">
@@ -51,6 +53,9 @@ export function DiffView({ sessionId }: { sessionId: string }) {
 
       {diff && (
         <div className="flex-1 overflow-auto scrollbar-thin">
+          {/* Visual Timeline Diff */}
+          <DiffTimeline diff={diff} selectedStep={selectedDiffStep} onSelectStep={setSelectedDiffStep} />
+
           {diff.diverge_at_step && (
             <div className="px-4 py-2 bg-amber-950/20 border-b border-amber-900/30 text-xs text-amber-400">
               Diverges at step {diff.diverge_at_step}
@@ -58,7 +63,13 @@ export function DiffView({ sessionId }: { sessionId: string }) {
           )}
           <div className="divide-y divide-neutral-800/50">
             {diff.step_diffs.map((entry) => (
-              <DiffRow key={entry.step_number} entry={entry} diff={diff} />
+              <DiffRow
+                key={entry.step_number}
+                entry={entry}
+                diff={diff}
+                isSelected={selectedDiffStep === entry.step_number}
+                onSelect={() => setSelectedDiffStep(selectedDiffStep === entry.step_number ? null : entry.step_number)}
+              />
             ))}
           </div>
         </div>
@@ -82,7 +93,7 @@ function TimelineSelect({ value, onChange, timelines, label }: { value: string; 
   )
 }
 
-function DiffRow({ entry, diff }: { entry: StepDiffEntry; diff: TimelineDiff }) {
+function DiffRow({ entry, diff, isSelected, onSelect }: { entry: StepDiffEntry; diff: TimelineDiff; isSelected?: boolean; onSelect?: () => void }) {
   const typeStyles: Record<string, string> = {
     Same: 'border-l-green-800',
     Modified: 'border-l-amber-500',
@@ -98,7 +109,14 @@ function DiffRow({ entry, diff }: { entry: StepDiffEntry; diff: TimelineDiff }) 
   }
 
   return (
-    <div className={cn('flex items-start border-l-2 px-4 py-2.5', typeStyles[entry.diff_type])}>
+    <div
+      onClick={onSelect}
+      className={cn(
+        'flex items-start border-l-2 px-4 py-2.5 cursor-pointer transition-colors',
+        typeStyles[entry.diff_type],
+        isSelected ? 'bg-neutral-800/50' : 'hover:bg-neutral-900/50',
+      )}
+    >
       <div className="w-12 text-xs font-mono text-neutral-500 shrink-0">#{entry.step_number}</div>
       <div className="flex-1 grid grid-cols-2 gap-4">
         {entry.left ? (
@@ -138,6 +156,105 @@ function StepSummaryCell({ summary }: { summary: { step_type: string; status: st
       </div>
       {summary.response_preview && (
         <p className="text-neutral-600 truncate">{summary.response_preview}</p>
+      )}
+    </div>
+  )
+}
+
+const DIFF_COLORS: Record<string, string> = {
+  Same: 'bg-neutral-600',
+  Modified: 'bg-amber-500',
+  LeftOnly: 'bg-red-500',
+  RightOnly: 'bg-green-500',
+}
+
+function DiffTimeline({ diff, selectedStep, onSelectStep }: { diff: TimelineDiff; selectedStep: number | null; onSelectStep: (n: number | null) => void }) {
+  const total = diff.step_diffs.length
+  if (total === 0) return null
+
+  const maxDuration = Math.max(1, ...diff.step_diffs.map(d => {
+    const l = d.left?.duration_ms ?? 0
+    const r = d.right?.duration_ms ?? 0
+    return Math.max(l, r)
+  }))
+
+  return (
+    <div className="border-b border-neutral-800 bg-neutral-950/50 px-4 py-2">
+      <div className="flex items-center gap-2 mb-1.5">
+        <span className="text-[10px] uppercase tracking-wider font-semibold text-neutral-500">Timeline Diff</span>
+        <div className="flex items-center gap-3 ml-auto text-[9px]">
+          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-neutral-600" /> Same</span>
+          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-amber-500" /> Modified</span>
+          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-red-500" /> {diff.left_label} only</span>
+          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-green-500" /> {diff.right_label} only</span>
+        </div>
+      </div>
+
+      {/* Left timeline */}
+      <div className="flex items-center gap-1 mb-1">
+        <span className="text-[9px] text-neutral-500 w-12 shrink-0 truncate">{diff.left_label}</span>
+        <div className="flex-1 flex gap-px h-5">
+          {diff.step_diffs.map((entry) => {
+            const width = entry.left ? Math.max(0.5, (entry.left.duration_ms / maxDuration) * 8 + 0.5) : 0.5
+            return (
+              <button
+                key={entry.step_number}
+                onClick={() => onSelectStep(selectedStep === entry.step_number ? null : entry.step_number)}
+                className={cn(
+                  'rounded-sm transition-all flex-shrink-0',
+                  DIFF_COLORS[entry.diff_type],
+                  entry.diff_type === 'RightOnly' ? 'opacity-20' : 'opacity-70',
+                  selectedStep === entry.step_number && 'ring-1 ring-cyan-400 opacity-100',
+                )}
+                style={{ width: `${width}%`, minWidth: 3 }}
+                title={`Step ${entry.step_number}: ${entry.diff_type}`}
+              />
+            )
+          })}
+        </div>
+      </div>
+
+      {/* Right timeline */}
+      <div className="flex items-center gap-1">
+        <span className="text-[9px] text-neutral-500 w-12 shrink-0 truncate">{diff.right_label}</span>
+        <div className="flex-1 flex gap-px h-5">
+          {diff.step_diffs.map((entry) => {
+            const width = entry.right ? Math.max(0.5, (entry.right.duration_ms / maxDuration) * 8 + 0.5) : 0.5
+            return (
+              <button
+                key={entry.step_number}
+                onClick={() => onSelectStep(selectedStep === entry.step_number ? null : entry.step_number)}
+                className={cn(
+                  'rounded-sm transition-all flex-shrink-0',
+                  DIFF_COLORS[entry.diff_type],
+                  entry.diff_type === 'LeftOnly' ? 'opacity-20' : 'opacity-70',
+                  selectedStep === entry.step_number && 'ring-1 ring-cyan-400 opacity-100',
+                )}
+                style={{ width: `${width}%`, minWidth: 3 }}
+                title={`Step ${entry.step_number}: ${entry.diff_type}`}
+              />
+            )
+          })}
+        </div>
+      </div>
+
+      {/* Divergence marker */}
+      {diff.diverge_at_step && (
+        <div className="flex items-center gap-1 mt-1">
+          <span className="text-[9px] text-neutral-500 w-12 shrink-0" />
+          <div className="flex-1 relative h-3">
+            <div
+              className="absolute top-0 h-full border-l border-dashed border-amber-500/60"
+              style={{ left: `${((diff.diverge_at_step - 1) / total) * 100}%` }}
+            />
+            <span
+              className="absolute text-[8px] text-amber-500/60 -translate-x-1/2"
+              style={{ left: `${((diff.diverge_at_step - 1) / total) * 100}%`, top: 0 }}
+            >
+              ↑ diverge
+            </span>
+          </div>
+        </div>
       )}
     </div>
   )

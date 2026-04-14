@@ -7,9 +7,10 @@ import { StepDetailPanel } from './StepDetailPanel'
 import { TimelineSelector } from './TimelineSelector'
 import { SpanTree } from './SpanTree'
 import { formatTokens, formatDuration, cn } from '@/lib/utils'
-import { Radio, Clock, Layers, Zap, GitBranch, Bot, Plug, Upload } from 'lucide-react'
+import { Radio, Clock, Layers, Zap, GitBranch, Bot, Plug, Upload, BarChart3, List } from 'lucide-react'
 import { useCallback, useState } from 'react'
 import { ExportOtelModal } from './ExportOtelModal'
+import { ActivityTimeline } from './ActivityTimeline'
 import type { StepResponse } from '@/types/api'
 
 export function SessionView({ sessionId }: { sessionId: string }) {
@@ -17,6 +18,7 @@ export function SessionView({ sessionId }: { sessionId: string }) {
   const queryClient = useQueryClient()
   const [autoFollow, setAutoFollow] = useState(true)
   const [exportOpen, setExportOpen] = useState(false)
+  const [viewMode, setViewMode] = useState<'timeline' | 'list'>('timeline')
 
   const { data: detail, isLoading: detailLoading } = useQuery({
     queryKey: ['session', sessionId],
@@ -64,6 +66,7 @@ export function SessionView({ sessionId }: { sessionId: string }) {
   }
 
   const totalDuration = steps.reduce((sum, s) => sum + s.duration_ms, 0)
+  const errorCount = steps.filter(s => s.status === 'error').length
   const hasForked = (detail?.timelines.length ?? 0) > 1
   const isHook = session.source === 'hooks'
   const isCursor = isHook && (
@@ -110,6 +113,11 @@ export function SessionView({ sessionId }: { sessionId: string }) {
               <span className="flex items-center gap-1 text-neutral-500"><Zap size={12} /> {formatTokens(session.metadata.cache_tokens as number)} cached</span>
             )}
             <span className="flex items-center gap-1"><Clock size={12} /> {formatDuration(totalDuration)}</span>
+            {errorCount > 0 && (
+              <span className="flex items-center gap-1 text-red-400">
+                {errorCount} errors
+              </span>
+            )}
             {spans.length > 0 && (() => {
               const agentNames = spans.filter(s => s.span_type === 'agent').map(s => s.name);
               return agentNames.length > 0 ? (
@@ -126,6 +134,28 @@ export function SessionView({ sessionId }: { sessionId: string }) {
                 <GitBranch size={12} /> {detail!.timelines.length} timelines
               </button>
             )}
+            <div className="flex items-center border border-neutral-700 rounded-md overflow-hidden">
+              <button
+                onClick={() => setViewMode('timeline')}
+                className={cn(
+                  'flex items-center gap-1 px-2 py-0.5 text-[10px] transition-colors',
+                  viewMode === 'timeline' ? 'bg-neutral-700 text-neutral-100' : 'text-neutral-500 hover:text-neutral-300'
+                )}
+                title="Timeline view"
+              >
+                <BarChart3 size={10} /> Timeline
+              </button>
+              <button
+                onClick={() => setViewMode('list')}
+                className={cn(
+                  'flex items-center gap-1 px-2 py-0.5 text-[10px] transition-colors',
+                  viewMode === 'list' ? 'bg-neutral-700 text-neutral-100' : 'text-neutral-500 hover:text-neutral-300'
+                )}
+                title="List view"
+              >
+                <List size={10} /> List
+              </button>
+            </div>
             <button
               onClick={() => setExportOpen(true)}
               className="flex items-center gap-1 text-neutral-400 hover:text-cyan-300 transition-colors"
@@ -140,36 +170,65 @@ export function SessionView({ sessionId }: { sessionId: string }) {
       {/* Timeline selector */}
       {hasForked && detail && <TimelineSelector timelines={detail.timelines} />}
 
-      {/* Step timeline + detail */}
-      <div className="flex flex-1 overflow-hidden">
-        <div className="w-[420px] border-r border-neutral-800 overflow-hidden flex flex-col">
-          {stepsLoading ? (
-            <div className="flex-1 flex items-center justify-center text-neutral-500 text-sm">Loading steps...</div>
-          ) : spans.length > 0 ? (
-            <SpanTree
-              spans={spans}
-              selectedStepId={selectedStepId}
-              onSelectStep={selectStep}
-            />
-          ) : (
-            <StepTimeline
-              steps={steps}
-              selectedStepId={selectedStepId}
-              onSelectStep={selectStep}
-              autoFollow={autoFollow && isLive}
-            />
-          )}
+      {/* Content area: timeline or list mode */}
+      {viewMode === 'timeline' ? (
+        <div className="flex flex-col flex-1 overflow-hidden">
+          <div className="border-b border-neutral-800 overflow-hidden" style={{ minHeight: 160, maxHeight: 400, height: '40%' }}>
+            {stepsLoading ? (
+              <div className="flex items-center justify-center h-full text-neutral-500 text-sm">Loading steps...</div>
+            ) : (
+              <ActivityTimeline
+                spans={spans}
+                steps={steps}
+                session={session}
+                selectedStepId={selectedStepId}
+                onSelectStep={selectStep}
+                isLive={isLive}
+                isCursor={isCursor}
+              />
+            )}
+          </div>
+          <div className="flex-1 overflow-hidden">
+            {selectedStepId ? (
+              <StepDetailPanel stepId={selectedStepId} />
+            ) : (
+              <div className="flex items-center justify-center h-full text-neutral-500 text-sm">
+                Click a bar to inspect a step
+              </div>
+            )}
+          </div>
         </div>
-        <div className="flex-1 overflow-hidden">
-          {selectedStepId ? (
-            <StepDetailPanel stepId={selectedStepId} />
-          ) : (
-            <div className="flex items-center justify-center h-full text-neutral-500 text-sm">
-              Select a step to inspect
-            </div>
-          )}
+      ) : (
+        <div className="flex flex-1 overflow-hidden">
+          <div className="w-[420px] border-r border-neutral-800 overflow-hidden flex flex-col">
+            {stepsLoading ? (
+              <div className="flex-1 flex items-center justify-center text-neutral-500 text-sm">Loading steps...</div>
+            ) : spans.length > 0 ? (
+              <SpanTree
+                spans={spans}
+                selectedStepId={selectedStepId}
+                onSelectStep={selectStep}
+              />
+            ) : (
+              <StepTimeline
+                steps={steps}
+                selectedStepId={selectedStepId}
+                onSelectStep={selectStep}
+                autoFollow={autoFollow && isLive}
+              />
+            )}
+          </div>
+          <div className="flex-1 overflow-hidden">
+            {selectedStepId ? (
+              <StepDetailPanel stepId={selectedStepId} />
+            ) : (
+              <div className="flex items-center justify-center h-full text-neutral-500 text-sm">
+                Select a step to inspect
+              </div>
+            )}
+          </div>
         </div>
-      </div>
+      )}
 
       {/* OTel Export Modal */}
       <ExportOtelModal
