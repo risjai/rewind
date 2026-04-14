@@ -55,7 +55,7 @@ rewind snapshot . --label "before-agent"
 # 4. Run your agent as usual
 python3 my_agent.py
 
-# 5. See what happened
+# 5. See what happened (trace view, interactive TUI, cache stats)
 rewind show latest
 rewind inspect latest
 rewind cache
