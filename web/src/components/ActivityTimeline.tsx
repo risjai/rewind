@@ -403,48 +403,65 @@ export function ActivityTimeline({
     }
   }, [totalRange, viewport.zoom])
 
-  // Keyboard navigation — React event handler (not addEventListener)
+  // Keyboard navigation — arrows/vim keys match the visual layout:
+  // ←/→ (h/l) = step navigation within focused lane (bars are horizontal)
+  // ↑/↓ (k/j) = lane navigation (lanes stack vertically)
+  // Shift+←/→ (H/L) = pan viewport
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    const allSteps = lanes.flatMap(l => l.steps)
+    const navSteps = viewport.focusedLaneIndex !== null && viewport.focusedLaneIndex < lanes.length
+      ? lanes[viewport.focusedLaneIndex].steps
+      : lanes.flatMap(l => l.steps)
     switch (e.key) {
       case '+': case '=': e.preventDefault(); dispatch({ type: 'zoom_in' }); break
       case '-': e.preventDefault(); dispatch({ type: 'zoom_out' }); break
       case '0': e.preventDefault(); dispatch({ type: 'reset' }); break
-      case 'h': case 'ArrowLeft':
-        if (!e.shiftKey) { e.preventDefault(); dispatch({ type: 'pan', delta: -totalRange / viewport.zoom * 0.15 }) }
+      case 'L': case 'H':
+        e.preventDefault()
+        dispatch({ type: 'pan', delta: (e.key === 'L' ? 1 : -1) * totalRange / viewport.zoom * 0.15 })
         break
-      case 'l': case 'ArrowRight':
-        if (!e.shiftKey) { e.preventDefault(); dispatch({ type: 'pan', delta: totalRange / viewport.zoom * 0.15 }) }
-        break
-      case 'j': case 'ArrowDown': {
+      case 'l': case 'ArrowRight': {
         e.preventDefault()
         if (e.shiftKey) {
-          const next = viewport.focusedLaneIndex !== null
-            ? Math.min(lanes.length - 1, viewport.focusedLaneIndex + 1)
-            : 0
-          dispatch({ type: 'focus_lane', index: next })
+          dispatch({ type: 'pan', delta: totalRange / viewport.zoom * 0.15 })
         } else {
-          const currentIdx = allSteps.findIndex(s => s.id === selectedStepId)
-          if (currentIdx < allSteps.length - 1) onSelectStep(allSteps[currentIdx + 1].id)
-          else if (currentIdx === -1 && allSteps.length > 0) onSelectStep(allSteps[0].id)
+          const currentIdx = navSteps.findIndex(s => s.id === selectedStepId)
+          if (currentIdx < navSteps.length - 1) onSelectStep(navSteps[currentIdx + 1].id)
+          else if (currentIdx === -1 && navSteps.length > 0) onSelectStep(navSteps[0].id)
         }
+        break
+      }
+      case 'h': case 'ArrowLeft': {
+        e.preventDefault()
+        if (e.shiftKey) {
+          dispatch({ type: 'pan', delta: -totalRange / viewport.zoom * 0.15 })
+        } else {
+          const currentIdx = navSteps.findIndex(s => s.id === selectedStepId)
+          if (currentIdx > 0) onSelectStep(navSteps[currentIdx - 1].id)
+          else if (currentIdx === -1 && navSteps.length > 0) onSelectStep(navSteps[navSteps.length - 1].id)
+        }
+        break
+      }
+      case 'j': case 'ArrowDown': {
+        e.preventDefault()
+        const next = viewport.focusedLaneIndex !== null
+          ? Math.min(lanes.length - 1, viewport.focusedLaneIndex + 1)
+          : 0
+        dispatch({ type: 'focus_lane', index: next })
         break
       }
       case 'k': case 'ArrowUp': {
         e.preventDefault()
-        if (e.shiftKey) {
-          const prev = viewport.focusedLaneIndex !== null
-            ? Math.max(0, viewport.focusedLaneIndex - 1)
-            : 0
-          dispatch({ type: 'focus_lane', index: prev })
-        } else {
-          const currentIdx = allSteps.findIndex(s => s.id === selectedStepId)
-          if (currentIdx > 0) onSelectStep(allSteps[currentIdx - 1].id)
-        }
+        const prev = viewport.focusedLaneIndex !== null
+          ? Math.max(0, viewport.focusedLaneIndex - 1)
+          : 0
+        dispatch({ type: 'focus_lane', index: prev })
         break
       }
-      case 'Enter': break
-      case 'Escape': e.preventDefault(); onSelectStep(null); break
+      case 'Escape':
+        e.preventDefault()
+        onSelectStep(null)
+        dispatch({ type: 'focus_lane', index: null })
+        break
     }
   }, [lanes, selectedStepId, onSelectStep, viewport.zoom, viewport.focusedLaneIndex, totalRange])
 
