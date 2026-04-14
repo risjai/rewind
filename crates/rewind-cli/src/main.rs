@@ -10,7 +10,7 @@ use rewind_replay::ReplayEngine;
 use rewind_store::{Store, Timeline};
 use rewind_tui::TuiApp;
 use rewind_web::WebServer;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, TcpStream};
 
 #[derive(Parser)]
 #[command(
@@ -873,7 +873,7 @@ fn cmd_sessions() -> Result<()> {
 
     println!();
     println!("  Run {} to inspect a session.", "rewind inspect <session-id>".green());
-    println!("  Web: {}", "\x1b]8;;http://127.0.0.1:4800\x1b\\http://127.0.0.1:4800\x1b]8;;\x1b\\".cyan());
+    print_web_hint(4800, None);
     Ok(())
 }
 
@@ -963,8 +963,7 @@ fn cmd_show(session_ref: String, flat: bool) -> Result<()> {
 
     println!();
     println!("  Run {} to explore interactively.", format!("rewind inspect {}", &session.id[..8]).green());
-    let web_url = format!("http://127.0.0.1:4800/#/session/{}", session.id);
-    println!("  Web: {}", format!("\x1b]8;;{}\x1b\\{}\x1b]8;;\x1b\\", web_url, web_url).cyan());
+    print_web_hint(4800, Some(&session.id));
     Ok(())
 }
 
@@ -3869,6 +3868,26 @@ fn format_time_ago(dt: chrono::DateTime<chrono::Utc>) -> String {
         format!("{}h ago", duration.num_hours())
     } else {
         format!("{}d ago", duration.num_days())
+    }
+}
+
+fn is_web_server_running(port: u16) -> bool {
+    TcpStream::connect_timeout(
+        &SocketAddr::from(([127, 0, 0, 1], port)),
+        std::time::Duration::from_millis(80),
+    )
+    .is_ok()
+}
+
+fn print_web_hint(port: u16, session_path: Option<&str>) {
+    if is_web_server_running(port) {
+        let url = match session_path {
+            Some(path) => format!("http://127.0.0.1:{}/#/session/{}", port, path),
+            None => format!("http://127.0.0.1:{}", port),
+        };
+        println!("  Web: {}", format!("\x1b]8;;{}\x1b\\{}\x1b]8;;\x1b\\", url, url).cyan());
+    } else {
+        println!("  Run {} to open the web dashboard.", "rewind web".green());
     }
 }
 
