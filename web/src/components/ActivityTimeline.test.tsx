@@ -359,10 +359,40 @@ describe('ActivityTimeline keyboard navigation', () => {
     expect(onSelectStep).toHaveBeenCalledWith(null)
   })
 
+  it('ArrowLeft selects last step when nothing is selected', () => {
+    const { onSelectStep, timeline } = renderTimeline(null)
+    fireEvent.keyDown(timeline, { key: 'ArrowLeft' })
+    expect(onSelectStep).toHaveBeenCalledWith('c')
+  })
+
+  it('j moves to next lane', () => {
+    const { onSelectStep, timeline } = renderTimeline(null)
+    fireEvent.keyDown(timeline, { key: 'j' })
+    expect(onSelectStep).not.toHaveBeenCalled()
+  })
+
+  it('k moves to previous lane', () => {
+    const { onSelectStep, timeline } = renderTimeline(null)
+    fireEvent.keyDown(timeline, { key: 'k' })
+    expect(onSelectStep).not.toHaveBeenCalled()
+  })
+
   it('Shift+ArrowRight pans viewport instead of selecting step', () => {
     const { onSelectStep, timeline } = renderTimeline(null)
     fireEvent.keyDown(timeline, { key: 'ArrowRight', shiftKey: true })
     expect(onSelectStep).not.toHaveBeenCalled()
+  })
+
+  it('Shift+ArrowLeft pans viewport instead of selecting step', () => {
+    const { onSelectStep, timeline } = renderTimeline(null)
+    fireEvent.keyDown(timeline, { key: 'ArrowLeft', shiftKey: true })
+    expect(onSelectStep).not.toHaveBeenCalled()
+  })
+
+  it('Escape clears both step selection and lane focus', () => {
+    const { onSelectStep, timeline } = renderTimeline('b')
+    fireEvent.keyDown(timeline, { key: 'Escape' })
+    expect(onSelectStep).toHaveBeenCalledWith(null)
   })
 
   it('zoom keys do not call onSelectStep', () => {
