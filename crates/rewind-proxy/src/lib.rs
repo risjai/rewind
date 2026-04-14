@@ -28,6 +28,12 @@ pub struct RewriteConfig {
     pub temperature: Option<f64>,
 }
 
+impl RewriteConfig {
+    pub fn is_empty(&self) -> bool {
+        self.model.is_none() && self.system_inject.is_none() && self.temperature.is_none()
+    }
+}
+
 pub struct ProxyServer {
     store: Arc<Mutex<Store>>,
     session_id: String,
@@ -387,7 +393,9 @@ async fn handle_request(
         }
     }
 
-    let final_body = if let Some(ref rewrite) = state.rewrite_config {
+    let final_body = if let Some(ref rewrite) = state.rewrite_config
+        && !rewrite.is_empty()
+    {
         let rewritten = apply_rewrites(&body_bytes, rewrite, &model);
         tracing::info!(
             step = step_number,

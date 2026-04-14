@@ -3288,7 +3288,7 @@ async fn cmd_fix(
         );
     }
 
-    let failure_step = find_failure_step(&steps, &session, step_override);
+    let failure_step = find_failure_step(&steps, &session, step_override)?;
     let failure_step_num = failure_step.step_number;
 
     // ── Hypothesis mode: skip diagnosis, parse fix directly ──
@@ -3315,7 +3315,7 @@ async fn cmd_fix(
             &store, &session, &steps, failure_step, failure_step_num,
             &expected, &diagnosis_model,
         );
-        run_fix_subprocess(&payload)?
+        run_fix_subprocess(&payload).await?
     };
 
     let fix_type = result.get("fix_type").and_then(|v| v.as_str()).unwrap_or("no_fix");
@@ -3443,12 +3443,15 @@ async fn cmd_fix(
             }
         }
 
+        // TODO: replace abort() with graceful shutdown (CancellationToken or oneshot)
+        // to avoid losing in-flight step data if the proxy is mid-write.
         proxy_handle.abort();
     } else {
         // ── --apply mode: wait for manual re-run ──
         if !json_output {
             println!("  {} Point your agent at this proxy:", "→".cyan());
             println!("    {}", format!("export OPENAI_BASE_URL=http://127.0.0.1:{}/v1", port).green());
+            println!("    {}", format!("export ANTHROPIC_BASE_URL=http://127.0.0.1:{}/anthropic", port).green());
             println!();
             println!("  {} to stop and score.", "Ctrl+C".yellow().bold());
             println!();
@@ -3457,10 +3460,10 @@ async fn cmd_fix(
         proxy.run(addr).await?;
     }
 
-    // ── Score both timelines ──
+    // ── Replay savings ──
     if !json_output {
         eprintln!();
-        eprintln!("{}", "⏪ Scoring both timelines...".cyan().bold());
+        eprintln!("{}", "⏪ Replay savings".cyan().bold());
     }
 
     let score_store = Store::open_default()?;
@@ -3649,19 +3652,21 @@ fn find_failure_step<'a>(
     steps: &'a [rewind_store::Step],
     session: &rewind_store::Session,
     step_override: Option<u32>,
-) -> &'a rewind_store::Step {
+) -> Result<&'a rewind_store::Step> {
     if let Some(n) = step_override {
-        if let Some(s) = steps.iter().find(|s| s.step_number == n) {
-            return s;
-        }
+        return steps.iter().find(|s| s.step_number == n)
+            .context(format!(
+                "--step {} not found (session has steps 1..{})",
+                n, steps.last().unwrap().step_number
+            ));
     }
 
     if let Some(s) = steps.iter().find(|s| s.status == rewind_store::StepStatus::Error) {
-        return s;
+        return Ok(s);
     }
 
     if matches!(session.status, rewind_store::SessionStatus::Failed) {
-        return steps.last().unwrap();
+        return Ok(steps.last().unwrap());
     }
 
     eprintln!(
@@ -3669,81 +3674,77 @@ fn find_failure_step<'a>(
         "⚠".yellow().bold(),
         "--expected 'description of correct behavior'".dimmed()
     );
-    steps.last().unwrap()
+    Ok(steps.last().unwrap())
 }
 
-fn run_fix_subprocess(payload: &serde_json::Value) -> Result<serde_json::Value> {
-    use std::io::Read;
-    use std::process::{Command, Stdio};
-
+async fn run_fix_subprocess(payload: &serde_json::Value) -> Result<serde_json::Value> {
     let payload_str = serde_json::to_string(payload)?;
-
-    let mut cmd = Command::new("python3");
-    cmd.args(["-m", "rewind_agent.fix"]);
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let start = std::time::Instant::now();
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| anyhow::anyhow!(
-            "Failed to spawn diagnosis subprocess (python3 -m rewind_agent.fix): {}. \
-             Is rewind-agent installed? Run: pip install rewind-agent[openai]",
-            e
-        ))?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        use std::io::Write;
-        if let Err(e) = stdin.write_all(payload_str.as_bytes()) {
-            let _ = child.kill();
-            let _ = child.wait();
-            bail!("Failed to write diagnostic payload ({} bytes) to subprocess: {}", payload_str.len(), e);
-        }
-    }
-
     let timeout = std::time::Duration::from_secs(120);
-    loop {
-        match child.try_wait()? {
-            Some(status) => {
-                let mut stdout_str = String::new();
-                if let Some(mut stdout) = child.stdout.take() {
-                    let _ = stdout.read_to_string(&mut stdout_str);
-                }
-                stdout_str.truncate(100_000);
 
-                if !status.success() {
-                    if let Ok(result) = serde_json::from_str::<serde_json::Value>(stdout_str.trim()) {
-                        return Ok(result);
-                    }
-                    let mut stderr_str = String::new();
-                    if let Some(mut stderr) = child.stderr.take() {
-                        let _ = stderr.read_to_string(&mut stderr_str);
-                    }
-                    stderr_str.truncate(1000);
-                    bail!(
-                        "Diagnosis subprocess failed (exit {}): {}",
-                        status, stderr_str.trim()
-                    );
-                }
+    let output = tokio::task::spawn_blocking(move || -> Result<std::process::Output> {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
 
-                let result: serde_json::Value = serde_json::from_str(stdout_str.trim())
-                    .map_err(|e| anyhow::anyhow!(
-                        "Diagnosis output is not valid JSON: {}. Got: '{}'",
-                        e, stdout_str.chars().take(200).collect::<String>()
-                    ))?;
-                return Ok(result);
-            }
-            None => {
-                if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    bail!("Diagnosis timed out after {}s", timeout.as_secs());
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
+        let mut child = Command::new("python3")
+            .args(["-m", "rewind_agent.fix"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| anyhow::anyhow!(
+                "Failed to spawn diagnosis subprocess (python3 -m rewind_agent.fix): {}. \
+                 Is rewind-agent installed? Run: pip install rewind-agent[openai]",
+                e
+            ))?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            if let Err(e) = stdin.write_all(payload_str.as_bytes()) {
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!("Failed to write diagnostic payload ({} bytes): {}", payload_str.len(), e);
             }
         }
+
+        let start = std::time::Instant::now();
+        loop {
+            match child.try_wait()? {
+                Some(_) => {
+                    let output = child.wait_with_output()?;
+                    return Ok(output);
+                }
+                None => {
+                    if start.elapsed() >= timeout {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        bail!("Diagnosis timed out after {}s", timeout.as_secs());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
+        }
+    }).await.map_err(|e| anyhow::anyhow!("Diagnosis task panicked: {}", e))??;
+
+    let mut stdout_str = String::from_utf8_lossy(&output.stdout).to_string();
+    stdout_str.truncate(100_000);
+
+    if !output.status.success() {
+        if let Ok(result) = serde_json::from_str::<serde_json::Value>(stdout_str.trim()) {
+            return Ok(result);
+        }
+        let mut stderr_str = String::from_utf8_lossy(&output.stderr).to_string();
+        stderr_str.truncate(1000);
+        bail!(
+            "Diagnosis subprocess failed (exit {}): {}",
+            output.status, stderr_str.trim()
+        );
     }
+
+    let result: serde_json::Value = serde_json::from_str(stdout_str.trim())
+        .map_err(|e| anyhow::anyhow!(
+            "Diagnosis output is not valid JSON: {}. Got: '{}'",
+            e, stdout_str.chars().take(200).collect::<String>()
+        ))?;
+    Ok(result)
 }
 
 fn print_fix_diagnosis(result: &serde_json::Value, failure_step: &rewind_store::Step) {
