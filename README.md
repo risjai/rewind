@@ -312,7 +312,7 @@ Use your existing tool for production dashboards and alerting. Use Rewind when s
 | **v0.9** | OTel trace ingestion - import OTLP traces, debug production failures locally | ✅ Shipped |
 | **v0.10** | Langfuse import, replay cost savings calculator, session sharing (HTML export) | ✅ Shipped |
 | **v0.11** | `rewind fix` - AI-powered diagnosis, proxy request rewriting, hypothesis testing | ✅ Shipped |
-| **v1.0** | Rewind Cloud - collaborative debugging, hosted sharing, live breakpoints, semantic diff | Planned |
+| **v1.0** | Enterprise readiness | Planned |
 
 ## Why "Rewind"?
 
