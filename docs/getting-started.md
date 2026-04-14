@@ -56,9 +56,9 @@ rewind snapshot . --label "before-agent"
 python3 my_agent.py
 
 # 5. See what happened
-rewind show latest           # quick trace view
-rewind inspect latest        # interactive TUI
-rewind cache                 # see replay savings
+rewind show latest
+rewind inspect latest
+rewind cache
 
 # 6. Something broke? Roll back
 rewind restore before-agent

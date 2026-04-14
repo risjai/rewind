@@ -74,7 +74,8 @@ Agent broke at step 30? Fix step 30 - not steps 1 through 29 again. Each re-run 
 </p>
 
 ```bash
-rewind demo && rewind inspect latest   # try it now - no API keys needed
+# try it now - no API keys needed
+rewind demo && rewind inspect latest
 ```
 
 ### See what the model saw - find the bug in 5 seconds
@@ -104,10 +105,11 @@ The writer agent hallucinated at step 8 because the researcher used stale data. 
 ### Fix and replay - only re-run what changed
 
 ```bash
-rewind replay latest --from 4          # fix your code, then:
+# fix your code, then replay from the fork point:
+rewind replay latest --from 4
 # Steps 1-3: cached instantly (0ms, 0 tokens)
 # Steps 4-5: re-run live with corrected context
-rewind diff latest main fixed           # see exactly what diverged
+rewind diff latest main fixed
 ```
 
 ```
@@ -220,9 +222,9 @@ rewind record --name "my-agent" --upstream https://api.openai.com --replay
 export OPENAI_BASE_URL=http://127.0.0.1:8443/v1
 python3 my_agent.py   # or node, go, rust - anything
 
-# See what happened
-rewind show latest           # trace view
-rewind inspect latest        # interactive TUI
+# See what happened (trace view / interactive TUI)
+rewind show latest
+rewind inspect latest
 ```
 
 > If the proxy is unreachable, the SDK automatically falls back to direct recording mode. Your agent never stops working. See [proxy-resilience.md](docs/proxy-resilience.md).

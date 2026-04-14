@@ -202,8 +202,10 @@ When using the Agents SDK, Rewind auto-extracts the `group_id` from traces as th
 ### View span tree
 
 ```bash
-rewind show latest          # span tree (default when spans exist)
-rewind show latest --flat   # flat step list (ignore spans)
+# span tree (default when spans exist)
+rewind show latest
+# flat step list (ignore spans)
+rewind show latest --flat
 ```
 
 ### List threads
