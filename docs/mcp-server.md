@@ -4,15 +4,21 @@ Rewind is a time-travel debugger for AI agents that records every LLM call for i
 
 ## Install
 
-### Option 1: `cargo install` (easiest)
+### pip (recommended)
+
+```bash
+pip install rewind-mcp
+```
+
+The native binary is auto-downloaded on first use — no Rust toolchain required.
+
+### cargo install (no Python needed)
 
 ```bash
 cargo install --git https://github.com/agentoptics/rewind rewind-mcp
 ```
 
-This puts `rewind-mcp` in your Cargo bin directory (usually `~/.cargo/bin/`).
-
-### Option 2: Build from source
+### Build from source
 
 ```bash
 git clone https://github.com/agentoptics/rewind.git
@@ -20,13 +26,13 @@ cd rewind
 cargo build --release -p rewind-mcp
 ```
 
-The binary will be at `./target/release/rewind-mcp`.
-
-> **Note:** `rewind-mcp` is a separate binary from the `rewind` CLI.
-> Installing via `pip install rewind-agent` does **not** include the MCP server.
-> You need Rust (`cargo`) to build it — install Rust at https://rustup.rs if needed.
-
 ## Configure
+
+Find the absolute path — IDEs don't inherit your shell PATH:
+
+```bash
+which rewind-mcp
+```
 
 ### Claude Code
 
@@ -36,19 +42,7 @@ Add to `.claude/settings.json`:
 {
   "mcpServers": {
     "rewind": {
-      "command": "rewind-mcp"
-    }
-  }
-}
-```
-
-If you used Option 2 (build from source), use the full path instead:
-
-```json
-{
-  "mcpServers": {
-    "rewind": {
-      "command": "/path/to/rewind/target/release/rewind-mcp"
+      "command": "/absolute/path/to/rewind-mcp"
     }
   }
 }
@@ -62,11 +56,13 @@ Add to `.cursor/mcp.json`:
 {
   "mcpServers": {
     "rewind": {
-      "command": "rewind-mcp"
+      "command": "/absolute/path/to/rewind-mcp"
     }
   }
 }
 ```
+
+Replace `/absolute/path/to/rewind-mcp` with the output of `which rewind-mcp`.
 
 ## Available Tools
 

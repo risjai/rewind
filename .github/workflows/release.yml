@@ -93,8 +93,9 @@ jobs:
         run: |
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/rewind" dist/
+          cp "target/${{ matrix.target }}/release/rewind-mcp" dist/
           cd dist
-          tar -czf "rewind-${RELEASE_TAG}-${MATRIX_NAME}.tar.gz" rewind
+          tar -czf "rewind-${RELEASE_TAG}-${MATRIX_NAME}.tar.gz" rewind rewind-mcp
           shasum -a 256 "rewind-${RELEASE_TAG}-${MATRIX_NAME}.tar.gz" > "rewind-${RELEASE_TAG}-${MATRIX_NAME}.tar.gz.sha256"
 
       - name: Upload artifacts

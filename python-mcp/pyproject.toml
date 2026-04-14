@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rewind-mcp"
+version = "0.11.1"
+description = "MCP server for Rewind — the time-travel debugger for AI agents."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+authors = [
+    {name = "Rewind Contributors"},
+]
+keywords = [
+    "ai",
+    "agents",
+    "mcp",
+    "debugging",
+    "llm",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Debuggers",
+]
+
+[project.scripts]
+rewind-mcp = "rewind_mcp_cli:main"
+
+[project.urls]
+Homepage = "https://github.com/agentoptics/rewind"
+Documentation = "https://github.com/agentoptics/rewind/blob/master/docs/mcp-server.md"
+Repository = "https://github.com/agentoptics/rewind"
+Issues = "https://github.com/agentoptics/rewind/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = []
+
+[tool.hatch.build.targets.wheel.force-include]
+"rewind_mcp_cli.py" = "rewind_mcp_cli.py"
