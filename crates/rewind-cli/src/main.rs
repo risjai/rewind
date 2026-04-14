@@ -243,11 +243,11 @@ enum Commands {
         #[arg(long, default_value = "gpt-4o-mini")]
         diagnosis_model: String,
 
-        /// Apply the fix automatically (fork + replay with patch) [not yet implemented]
+        /// Apply the fix: fork, start proxy with rewrites, and optionally score
         #[arg(long)]
         apply: bool,
 
-        /// Agent command to re-run (requires --apply) [not yet implemented]
+        /// Agent command to re-run against the patched proxy (requires --apply)
         #[arg(long, short)]
         command: Option<String>,
 
@@ -3260,22 +3260,15 @@ async fn cmd_fix(
     session_ref: String,
     diagnosis_model: String,
     apply: bool,
-    _command: Option<String>,
-    _upstream: String,
-    _port: u16,
+    agent_command: Option<String>,
+    upstream: String,
+    port: u16,
     step_override: Option<u32>,
     expected: Option<String>,
     hypothesis: Option<String>,
-    _yes: bool,
+    yes: bool,
     json_output: bool,
 ) -> Result<()> {
-    if apply {
-        bail!("--apply is not yet implemented. Run `rewind fix` for diagnosis only.");
-    }
-    if hypothesis.is_some() {
-        bail!("--hypothesis requires --apply, which is not yet implemented.");
-    }
-
     let store = Store::open_default()?;
     let session = resolve_session(&store, &session_ref)?;
     let timeline = store.get_root_timeline(&session.id)?
@@ -3286,21 +3279,198 @@ async fn cmd_fix(
         bail!("Session has no steps to diagnose.");
     }
 
-    let failure_step = find_failure_step(&steps, &session, step_override);
-    let failure_step_num = failure_step.step_number;
-
-    if !json_output {
-        eprintln!(
-            "{}\n",
-            format!(
-                "⏪ Diagnosing session \"{}\" ({} steps)...",
-                session.name, steps.len()
-            )
-            .cyan()
-            .bold()
+    if matches!(session.source, rewind_store::SessionSource::Direct) && apply {
+        bail!(
+            "This session was recorded in direct mode. \
+             --apply requires a proxy-recorded session. \
+             Re-record with `rewind record` to use --apply."
         );
     }
 
+    let failure_step = find_failure_step(&steps, &session, step_override);
+    let failure_step_num = failure_step.step_number;
+
+    // ── Hypothesis mode: skip diagnosis, parse fix directly ──
+    let result = if let Some(ref hyp) = hypothesis {
+        if !apply {
+            bail!("--hypothesis requires --apply to test the fix.");
+        }
+        parse_hypothesis(hyp, failure_step_num)?
+    } else {
+        // ── Diagnosis mode: call LLM ──
+        if !json_output {
+            eprintln!(
+                "{}\n",
+                format!(
+                    "⏪ Diagnosing session \"{}\" ({} steps)...",
+                    session.name, steps.len()
+                )
+                .cyan()
+                .bold()
+            );
+        }
+
+        let payload = build_diagnosis_payload(
+            &store, &session, &steps, failure_step, failure_step_num,
+            &expected, &diagnosis_model,
+        );
+        run_fix_subprocess(&payload)?
+    };
+
+    let fix_type = result.get("fix_type").and_then(|v| v.as_str()).unwrap_or("no_fix");
+
+    // ── Diagnosis-only mode ──
+    if !apply {
+        if json_output {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        } else {
+            print_fix_diagnosis(&result, failure_step);
+        }
+        return Ok(());
+    }
+
+    // ── Apply mode ──
+    if fix_type == "no_fix" {
+        if json_output {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        } else {
+            print_fix_diagnosis(&result, failure_step);
+            eprintln!("  {} No proxy-level fix available. The issue is in agent code.", "⚠".yellow().bold());
+        }
+        return Ok(());
+    }
+
+    let fork_from = result.get("fork_from").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+    let fork_from = fork_from.max(1).min(steps.len() as u32);
+
+    let rewrite_config = build_rewrite_config(&result);
+
+    // Dry-run preview
+    if !yes && !json_output {
+        print_fix_diagnosis(&result, failure_step);
+        println!();
+        println!("  {}", "⏪ Proposed fix:".cyan().bold());
+        println!("  {} {}", "Fix type:".dimmed(), fix_type.yellow().bold());
+        if let Some(ref m) = rewrite_config.model {
+            println!("  {} {} → {}", "Model:".dimmed(), failure_step.model, m.green());
+        }
+        if rewrite_config.system_inject.is_some() {
+            println!("  {} system message will be injected", "Inject:".dimmed());
+        }
+        if let Some(t) = rewrite_config.temperature {
+            println!("  {} {}", "Temperature:".dimmed(), t);
+        }
+        println!("  {} step {}", "Fork from:".dimmed(), fork_from);
+        println!("  {} {} (0 tokens, 0ms)", "Steps cached:".dimmed(), fork_from);
+        println!("  {} {}+ (forwarded with rewrite)", "Steps live:".dimmed(), fork_from + 1);
+        println!();
+
+        eprint!("  Apply this fix? [y/N] ");
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        if !input.trim().eq_ignore_ascii_case("y") {
+            eprintln!("  Cancelled.");
+            return Ok(());
+        }
+    }
+
+    // Fork
+    let engine = ReplayEngine::new(&store);
+    let parent_steps = engine.get_full_timeline_steps(&timeline.id, &session.id)?;
+    let fork = engine.fork(&session.id, &timeline.id, fork_from, &format!("fix-{}", fix_type))?;
+
+    // Start proxy with rewrites (or without for retry_step)
+    let proxy = if fix_type == "retry_step" {
+        ProxyServer::new_fork_execute(
+            store, &session.id, &fork.id, parent_steps.clone(), fork_from, &upstream,
+        )?
+    } else {
+        ProxyServer::new_fork_execute_with_rewrites(
+            store, &session.id, &fork.id, parent_steps.clone(), fork_from, &upstream,
+            rewrite_config,
+        )?
+    };
+
+    if !json_output {
+        println!();
+        println!("{}", "⏪ Fix applied — proxy running".cyan().bold());
+        println!("  {} {}", "Session:".dimmed(), session.name.white().bold());
+        println!("  {} step {}", "Fork at:".dimmed(), fork_from);
+        println!("  {} {}", "Fix type:".dimmed(), fix_type.yellow());
+        println!("  {} {}", "Fork ID:".dimmed(), fork.id[..12].to_string().dimmed());
+        println!("  {} {}", "Proxy:".dimmed(), format!("http://127.0.0.1:{}", port).yellow());
+        println!();
+    }
+
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse()?;
+
+    if let Some(ref cmd_str) = agent_command {
+        // ── --command mode: run agent automatically ──
+        if !json_output {
+            eprintln!("  {} {}", "Running:".dimmed(), cmd_str.green());
+            eprintln!();
+        }
+
+        let proxy_handle = tokio::spawn(async move {
+            let _ = proxy.run(addr).await;
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let status = run_agent_command(cmd_str, port)?;
+        if !json_output {
+            if status.success() {
+                eprintln!("  {} Agent finished (exit 0)", "✓".green());
+            } else {
+                eprintln!("  {} Agent finished (exit {})", "⚠".yellow(), status);
+            }
+        }
+
+        proxy_handle.abort();
+    } else {
+        // ── --apply mode: wait for manual re-run ──
+        if !json_output {
+            println!("  {} Point your agent at this proxy:", "→".cyan());
+            println!("    {}", format!("export OPENAI_BASE_URL=http://127.0.0.1:{}/v1", port).green());
+            println!();
+            println!("  {} to stop and score.", "Ctrl+C".yellow().bold());
+            println!();
+        }
+
+        proxy.run(addr).await?;
+    }
+
+    // ── Score both timelines ──
+    if !json_output {
+        eprintln!();
+        eprintln!("{}", "⏪ Scoring both timelines...".cyan().bold());
+    }
+
+    let score_store = Store::open_default()?;
+    let all_timelines = score_store.get_timelines(&session.id)?;
+    let forks: Vec<_> = all_timelines.iter().filter(|t| t.id == fork.id).collect();
+    print_session_savings(&score_store, &forks);
+
+    if !json_output {
+        println!();
+        println!("  {} Compare in detail:", "→".cyan());
+        println!("    {}", format!("rewind diff {} {} {}", &session.id[..8], &timeline.id[..8], &fork.id[..8]).green());
+        println!("    {}", format!("rewind eval score {} --compare-timelines -e task_completion", &session.id[..8]).green());
+    }
+
+    println!();
+    Ok(())
+}
+
+fn build_diagnosis_payload(
+    store: &Store,
+    session: &rewind_store::Session,
+    steps: &[rewind_store::Step],
+    failure_step: &rewind_store::Step,
+    failure_step_num: u32,
+    expected: &Option<String>,
+    diagnosis_model: &str,
+) -> serde_json::Value {
     let failure_request = if !failure_step.request_blob.is_empty() {
         store.blobs.get_json::<serde_json::Value>(&failure_step.request_blob).ok()
     } else {
@@ -3350,7 +3520,7 @@ async fn cmd_fix(
         })
     }).collect();
 
-    let payload = serde_json::json!({
+    serde_json::json!({
         "session": {
             "id": session.id,
             "name": session.name,
@@ -3368,17 +3538,99 @@ async fn cmd_fix(
         "config": {
             "model": diagnosis_model,
         },
-    });
+    })
+}
 
-    let result = run_fix_subprocess(&payload)?;
+fn parse_hypothesis(hyp: &str, failure_step_num: u32) -> Result<serde_json::Value> {
+    let parts: Vec<&str> = hyp.splitn(2, ':').collect();
+    let fix_type = parts[0];
+    let param = parts.get(1).unwrap_or(&"");
 
-    if json_output {
-        println!("{}", serde_json::to_string_pretty(&result)?);
-    } else {
-        print_fix_diagnosis(&result, &failure_step);
+    let valid_types = ["swap_model", "inject_system", "adjust_temperature", "retry_step"];
+    if !valid_types.contains(&fix_type) {
+        bail!(
+            "Unknown fix type '{}'. Valid: {}",
+            fix_type,
+            valid_types.join(", ")
+        );
     }
 
-    Ok(())
+    let fix_params = match fix_type {
+        "swap_model" => {
+            if param.is_empty() {
+                bail!("swap_model requires a model name, e.g., --hypothesis swap_model:gpt-4o");
+            }
+            serde_json::json!({"model": param})
+        }
+        "inject_system" => {
+            if param.is_empty() {
+                bail!("inject_system requires content, e.g., --hypothesis 'inject_system:Be more careful'");
+            }
+            serde_json::json!({"content": param})
+        }
+        "adjust_temperature" => {
+            let temp: f64 = param.parse().map_err(|_| anyhow::anyhow!(
+                "adjust_temperature requires a number, e.g., --hypothesis adjust_temperature:0.2"
+            ))?;
+            serde_json::json!({"temperature": temp})
+        }
+        "retry_step" => serde_json::json!({}),
+        _ => serde_json::json!({}),
+    };
+
+    Ok(serde_json::json!({
+        "root_cause": format!("User hypothesis: {}", hyp),
+        "failed_step": failure_step_num,
+        "fork_from": failure_step_num.saturating_sub(1).max(1),
+        "fix_type": fix_type,
+        "fix_params": fix_params,
+        "explanation": format!("Testing user-specified fix: {}", hyp),
+        "confidence": "manual",
+    }))
+}
+
+fn build_rewrite_config(result: &serde_json::Value) -> rewind_proxy::RewriteConfig {
+    let fix_type = result.get("fix_type").and_then(|v| v.as_str()).unwrap_or("no_fix");
+    let fix_params = result.get("fix_params").cloned().unwrap_or(serde_json::json!({}));
+
+    rewind_proxy::RewriteConfig {
+        model: if fix_type == "swap_model" {
+            fix_params.get("model").and_then(|v| v.as_str()).map(String::from)
+        } else {
+            None
+        },
+        system_inject: if fix_type == "inject_system" {
+            fix_params.get("content").and_then(|v| v.as_str()).map(String::from)
+        } else {
+            None
+        },
+        temperature: if fix_type == "adjust_temperature" {
+            fix_params.get("temperature").and_then(|v| v.as_f64())
+        } else {
+            None
+        },
+    }
+}
+
+fn run_agent_command(cmd_str: &str, port: u16) -> Result<std::process::ExitStatus> {
+    use std::process::Command;
+
+    let parts: Vec<&str> = cmd_str.split_whitespace().collect();
+    if parts.is_empty() {
+        bail!("Empty --command string");
+    }
+
+    let mut cmd = Command::new(parts[0]);
+    if parts.len() > 1 {
+        cmd.args(&parts[1..]);
+    }
+    cmd.env("OPENAI_BASE_URL", format!("http://127.0.0.1:{}/v1", port));
+    cmd.env("ANTHROPIC_BASE_URL", format!("http://127.0.0.1:{}/anthropic", port));
+
+    let status = cmd.status().map_err(|e| {
+        anyhow::anyhow!("Failed to run agent command '{}': {}", cmd_str, e)
+    })?;
+    Ok(status)
 }
 
 fn find_failure_step<'a>(
