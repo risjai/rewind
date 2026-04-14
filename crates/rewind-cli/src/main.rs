@@ -233,6 +233,52 @@ enum Commands {
         #[command(subcommand)]
         action: ImportAction,
     },
+
+    /// Diagnose a failed session and suggest a fix
+    Fix {
+        /// Session ID, prefix, or 'latest'
+        session: String,
+
+        /// Model for the diagnosis LLM call
+        #[arg(long, default_value = "gpt-4o-mini")]
+        diagnosis_model: String,
+
+        /// Apply the fix automatically (fork + replay with patch) [not yet implemented]
+        #[arg(long)]
+        apply: bool,
+
+        /// Agent command to re-run (requires --apply) [not yet implemented]
+        #[arg(long, short)]
+        command: Option<String>,
+
+        /// Upstream LLM base URL for replay
+        #[arg(long, default_value = "https://api.openai.com")]
+        upstream: String,
+
+        /// Proxy port for replay
+        #[arg(long, default_value_t = 8443)]
+        port: u16,
+
+        /// Analyze a specific step instead of auto-detecting the error step
+        #[arg(long)]
+        step: Option<u32>,
+
+        /// Describe expected behavior (for soft failures with no error step)
+        #[arg(long)]
+        expected: Option<String>,
+
+        /// Skip diagnosis — directly test a fix hypothesis (e.g., 'swap_model:gpt-4o')
+        #[arg(long)]
+        hypothesis: Option<String>,
+
+        /// Skip confirmation prompts
+        #[arg(long)]
+        yes: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -665,6 +711,9 @@ async fn main() -> Result<()> {
         Commands::Import { action } => match action {
             ImportAction::Otel(args) => cmd_import_otel(args),
             ImportAction::FromLangfuse(args) => cmd_import_from_langfuse(args),
+        },
+        Commands::Fix { session, diagnosis_model, apply, command, upstream, port, step, expected, hypothesis, yes, json } => {
+            cmd_fix(session, diagnosis_model, apply, command, upstream, port, step, expected, hypothesis, yes, json).await
         },
     }
 }
@@ -3202,6 +3251,287 @@ fn create_step_with_blobs(
 
     store.create_step(&step)?;
     Ok(())
+}
+
+// ── Fix Command ──────────────────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+async fn cmd_fix(
+    session_ref: String,
+    diagnosis_model: String,
+    apply: bool,
+    _command: Option<String>,
+    _upstream: String,
+    _port: u16,
+    step_override: Option<u32>,
+    expected: Option<String>,
+    hypothesis: Option<String>,
+    _yes: bool,
+    json_output: bool,
+) -> Result<()> {
+    if apply {
+        bail!("--apply is not yet implemented. Run `rewind fix` for diagnosis only.");
+    }
+    if hypothesis.is_some() {
+        bail!("--hypothesis requires --apply, which is not yet implemented.");
+    }
+
+    let store = Store::open_default()?;
+    let session = resolve_session(&store, &session_ref)?;
+    let timeline = store.get_root_timeline(&session.id)?
+        .context("No timeline found for session")?;
+
+    let steps = store.get_steps(&timeline.id)?;
+    if steps.is_empty() {
+        bail!("Session has no steps to diagnose.");
+    }
+
+    let failure_step = find_failure_step(&steps, &session, step_override);
+    let failure_step_num = failure_step.step_number;
+
+    if !json_output {
+        eprintln!(
+            "{}\n",
+            format!(
+                "⏪ Diagnosing session \"{}\" ({} steps)...",
+                session.name, steps.len()
+            )
+            .cyan()
+            .bold()
+        );
+    }
+
+    let failure_request = if !failure_step.request_blob.is_empty() {
+        store.blobs.get_json::<serde_json::Value>(&failure_step.request_blob).ok()
+    } else {
+        None
+    };
+    let failure_response = if !failure_step.response_blob.is_empty() {
+        store.blobs.get_json::<serde_json::Value>(&failure_step.response_blob).ok()
+    } else {
+        None
+    };
+
+    let preceding_steps: Vec<serde_json::Value> = steps.iter()
+        .filter(|s| {
+            s.step_number < failure_step_num
+                && s.step_number >= failure_step_num.saturating_sub(3)
+        })
+        .map(|s| {
+            let req = if !s.request_blob.is_empty() {
+                store.blobs.get_json::<serde_json::Value>(&s.request_blob).ok()
+            } else {
+                None
+            };
+            let resp = if !s.response_blob.is_empty() {
+                store.blobs.get_json::<serde_json::Value>(&s.response_blob).ok()
+            } else {
+                None
+            };
+            serde_json::json!({
+                "step_number": s.step_number,
+                "request": req,
+                "response": resp,
+            })
+        })
+        .collect();
+
+    let steps_summary: Vec<serde_json::Value> = steps.iter().map(|s| {
+        serde_json::json!({
+            "step_number": s.step_number,
+            "step_type": format!("{:?}", s.step_type).to_lowercase(),
+            "status": format!("{:?}", s.status).to_lowercase(),
+            "model": s.model,
+            "tokens_in": s.tokens_in,
+            "tokens_out": s.tokens_out,
+            "duration_ms": s.duration_ms,
+            "tool_name": s.tool_name,
+            "error": s.error,
+        })
+    }).collect();
+
+    let payload = serde_json::json!({
+        "session": {
+            "id": session.id,
+            "name": session.name,
+            "status": format!("{:?}", session.status).to_lowercase(),
+            "total_steps": session.total_steps,
+        },
+        "steps": steps_summary,
+        "failure_step": failure_step_num,
+        "failure_context": {
+            "request": failure_request,
+            "response": failure_response,
+            "preceding_steps": preceding_steps,
+        },
+        "expected": expected,
+        "config": {
+            "model": diagnosis_model,
+        },
+    });
+
+    let result = run_fix_subprocess(&payload)?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        print_fix_diagnosis(&result, &failure_step);
+    }
+
+    Ok(())
+}
+
+fn find_failure_step<'a>(
+    steps: &'a [rewind_store::Step],
+    session: &rewind_store::Session,
+    step_override: Option<u32>,
+) -> &'a rewind_store::Step {
+    if let Some(n) = step_override {
+        if let Some(s) = steps.iter().find(|s| s.step_number == n) {
+            return s;
+        }
+    }
+
+    if let Some(s) = steps.iter().find(|s| s.status == rewind_store::StepStatus::Error) {
+        return s;
+    }
+
+    if matches!(session.status, rewind_store::SessionStatus::Failed) {
+        return steps.last().unwrap();
+    }
+
+    eprintln!(
+        "  {} No error step found. Analyzing last step. For better results, pass {}.",
+        "⚠".yellow().bold(),
+        "--expected 'description of correct behavior'".dimmed()
+    );
+    steps.last().unwrap()
+}
+
+fn run_fix_subprocess(payload: &serde_json::Value) -> Result<serde_json::Value> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+
+    let payload_str = serde_json::to_string(payload)?;
+
+    let mut cmd = Command::new("python3");
+    cmd.args(["-m", "rewind_agent.fix"]);
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let start = std::time::Instant::now();
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| anyhow::anyhow!(
+            "Failed to spawn diagnosis subprocess (python3 -m rewind_agent.fix): {}. \
+             Is rewind-agent installed? Run: pip install rewind-agent[openai]",
+            e
+        ))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        let _ = stdin.write_all(payload_str.as_bytes());
+    }
+
+    let timeout = std::time::Duration::from_secs(120);
+    loop {
+        match child.try_wait()? {
+            Some(status) => {
+                let mut stdout_str = String::new();
+                if let Some(mut stdout) = child.stdout.take() {
+                    let _ = stdout.read_to_string(&mut stdout_str);
+                }
+                stdout_str.truncate(100_000);
+
+                if !status.success() {
+                    if let Ok(result) = serde_json::from_str::<serde_json::Value>(stdout_str.trim()) {
+                        return Ok(result);
+                    }
+                    let mut stderr_str = String::new();
+                    if let Some(mut stderr) = child.stderr.take() {
+                        let _ = stderr.read_to_string(&mut stderr_str);
+                    }
+                    stderr_str.truncate(1000);
+                    bail!(
+                        "Diagnosis subprocess failed (exit {}): {}",
+                        status, stderr_str.trim()
+                    );
+                }
+
+                let result: serde_json::Value = serde_json::from_str(stdout_str.trim())
+                    .map_err(|e| anyhow::anyhow!(
+                        "Diagnosis output is not valid JSON: {}. Got: '{}'",
+                        e, stdout_str.chars().take(200).collect::<String>()
+                    ))?;
+                return Ok(result);
+            }
+            None => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    bail!("Diagnosis timed out after {}s", timeout.as_secs());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    }
+}
+
+fn print_fix_diagnosis(result: &serde_json::Value, failure_step: &rewind_store::Step) {
+    let fix_type = result.get("fix_type").and_then(|v| v.as_str()).unwrap_or("no_fix");
+    let confidence = result.get("confidence").and_then(|v| v.as_str()).unwrap_or("low");
+    let root_cause = result.get("root_cause").and_then(|v| v.as_str()).unwrap_or("Unknown");
+    let explanation = result.get("explanation").and_then(|v| v.as_str()).unwrap_or("");
+    let fork_from = result.get("fork_from").and_then(|v| v.as_u64()).unwrap_or(0);
+
+    let step_type = format!("{:?}", failure_step.step_type).to_lowercase();
+    let status = format!("{:?}", failure_step.status).to_lowercase();
+
+    println!("  {} Step {} — {} ({}) — {}", "Failure:".dimmed(),
+        failure_step.step_number, step_type, failure_step.model, status);
+
+    if let Some(ref err) = failure_step.error {
+        println!("  {} {}", "Error:".dimmed(), err.red());
+    }
+
+    println!("  {} {}", "Root cause:".dimmed(), root_cause.white());
+    println!();
+
+    if fix_type != "no_fix" {
+        let fix_params = result.get("fix_params").cloned().unwrap_or(serde_json::json!({}));
+        let params_str = if fix_params.is_object() && !fix_params.as_object().unwrap().is_empty() {
+            serde_json::to_string(&fix_params).unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        println!("  {} {} {}", "Suggested fix:".dimmed(),
+            fix_type.yellow().bold(),
+            if params_str.is_empty() { String::new() } else { format!("→ {}", params_str) });
+        if !explanation.is_empty() {
+            println!("  {} {}", "Reasoning:".dimmed(), explanation);
+        }
+        println!("  {} {}", "Confidence:".dimmed(), match confidence {
+            "high" => confidence.green().bold().to_string(),
+            "medium" => confidence.yellow().to_string(),
+            _ => confidence.red().to_string(),
+        });
+
+        if fork_from > 0 {
+            println!();
+            println!("  To apply this fix automatically:");
+            println!("    {}", format!("rewind fix {} --apply", "latest").green());
+        }
+    } else {
+        println!("  {} {}", "Diagnosis:".dimmed(), "no_fix — issue is in agent code, not LLM behavior".yellow());
+        if !explanation.is_empty() {
+            println!("  {} {}", "Reasoning:".dimmed(), explanation);
+        }
+        println!("  {} {}", "Confidence:".dimmed(), confidence.dimmed());
+    }
+
+    println!();
 }
 
 // ── Helpers ───────────────────────────────────────────────────
