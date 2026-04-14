@@ -248,7 +248,7 @@ enum Commands {
         apply: bool,
 
         /// Agent command to re-run against the patched proxy (requires --apply)
-        #[arg(long, short)]
+        #[arg(long, short, requires = "apply")]
         command: Option<String>,
 
         /// Upstream LLM base URL for replay
@@ -3279,11 +3279,12 @@ async fn cmd_fix(
         bail!("Session has no steps to diagnose.");
     }
 
-    if matches!(session.source, rewind_store::SessionSource::Direct) && apply {
+    if apply && !matches!(session.source, rewind_store::SessionSource::Proxy) {
         bail!(
-            "This session was recorded in direct mode. \
-             --apply requires a proxy-recorded session. \
-             Re-record with `rewind record` to use --apply."
+            "This session was recorded in {:?} mode. \
+             --apply requires a proxy-recorded session (source=proxy). \
+             Re-record with `rewind record` to use --apply.",
+            session.source
         );
     }
 
@@ -3412,12 +3413,28 @@ async fn cmd_fix(
         }
 
         let proxy_handle = tokio::spawn(async move {
-            let _ = proxy.run(addr).await;
+            if let Err(e) = proxy.run(addr).await {
+                eprintln!("  {} Proxy error: {}", "✗".red(), e);
+            }
         });
 
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        // Wait for the proxy to be ready (poll health endpoint)
+        let health_url = format!("http://127.0.0.1:{}/_rewind/health", port);
+        let client = reqwest::Client::new();
+        let mut ready = false;
+        for _ in 0..20 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if client.get(&health_url).send().await.is_ok() {
+                ready = true;
+                break;
+            }
+        }
+        if !ready {
+            proxy_handle.abort();
+            bail!("Proxy failed to start on port {} within 2s. Is the port in use?", port);
+        }
 
-        let status = run_agent_command(cmd_str, port)?;
+        let status = run_agent_command(cmd_str, port).await?;
         if !json_output {
             if status.success() {
                 eprintln!("  {} Agent finished (exit 0)", "✓".green());
@@ -3612,22 +3629,17 @@ fn build_rewrite_config(result: &serde_json::Value) -> rewind_proxy::RewriteConf
     }
 }
 
-fn run_agent_command(cmd_str: &str, port: u16) -> Result<std::process::ExitStatus> {
-    use std::process::Command;
-
-    let parts: Vec<&str> = cmd_str.split_whitespace().collect();
-    if parts.is_empty() {
+async fn run_agent_command(cmd_str: &str, port: u16) -> Result<std::process::ExitStatus> {
+    if cmd_str.trim().is_empty() {
         bail!("Empty --command string");
     }
 
-    let mut cmd = Command::new(parts[0]);
-    if parts.len() > 1 {
-        cmd.args(&parts[1..]);
-    }
+    let mut cmd = tokio::process::Command::new("sh");
+    cmd.args(["-c", cmd_str]);
     cmd.env("OPENAI_BASE_URL", format!("http://127.0.0.1:{}/v1", port));
     cmd.env("ANTHROPIC_BASE_URL", format!("http://127.0.0.1:{}/anthropic", port));
 
-    let status = cmd.status().map_err(|e| {
+    let status = cmd.status().await.map_err(|e| {
         anyhow::anyhow!("Failed to run agent command '{}': {}", cmd_str, e)
     })?;
     Ok(status)
