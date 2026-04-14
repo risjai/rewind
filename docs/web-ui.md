@@ -22,7 +22,7 @@ rewind record --web
 
 ## Key Features
 
-- **Activity Timeline** -- Horizontal swim-lane visualization where each agent or tool type gets its own lane. Steps rendered as duration bars showing relative timing. Zoom, pan, keyboard navigation (j/k/+/-/h/l), and per-lane analytics on click.
+- **Activity Timeline** -- Horizontal swim-lane visualization where each agent or tool type gets its own lane. Steps rendered as duration bars showing relative timing. Zoom, pan, full keyboard navigation, and per-lane analytics on click.
 - **Timeline / List toggle** -- Switch between the visual activity timeline and the classic step-by-step list view
 - **Multi-metric axis** -- Toggle bar widths between duration, token count, and estimated cost
 - **Session explorer** -- Browse all recorded sessions with stats
