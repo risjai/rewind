@@ -16,9 +16,9 @@
       </p>
     </div>
 
-    <div class="mt-16 grid gap-8 lg:grid-cols-3">
+    <div class="mt-16 grid gap-8 lg:grid-cols-3 items-stretch">
       <!-- Step 1: Record -->
-      <div class="group relative">
+      <div class="group relative flex">
         <div class="overflow-hidden rounded-2xl border border-neutral-800 bg-neutral-900/30 transition group-hover:border-neutral-700">
           <!-- Mockup terminal -->
           <div class="border-b border-neutral-800 bg-neutral-900 px-4 py-2.5 flex items-center gap-2">
@@ -52,7 +52,7 @@
       </div>
 
       <!-- Step 2: Inspect -->
-      <div class="group relative">
+      <div class="group relative flex">
         <div class="overflow-hidden rounded-2xl border border-neutral-800 bg-neutral-900/30 transition group-hover:border-neutral-700">
           <!-- Mockup trace view -->
           <div class="border-b border-neutral-800 bg-neutral-900 px-4 py-2.5 flex items-center gap-2">
@@ -85,7 +85,7 @@
       </div>
 
       <!-- Step 3: Fix -->
-      <div class="group">
+      <div class="group flex">
         <div class="overflow-hidden rounded-2xl border border-neutral-800 bg-neutral-900/30 transition group-hover:border-neutral-700">
           <!-- Mockup rewind fix output -->
           <div class="border-b border-neutral-800 bg-neutral-900 px-4 py-2.5 flex items-center gap-2">
@@ -99,6 +99,7 @@
             <div class="mt-2"><span class="text-red-400">&#x2717;</span> <span class="text-neutral-300">Step 8</span> <span class="text-red-400/70">hallucination</span></div>
             <div class="mt-1 text-neutral-500">Root cause: <span class="text-neutral-300">stale data from rate-limited API</span></div>
             <div class="text-neutral-500">Fix: <span class="text-brand-primary">retry_step</span> <span class="text-emerald-400/80">high confidence</span></div>
+            <div class="mt-1 text-neutral-600">&#x2192; rewind fix latest --apply</div>
           </div>
 
           <div class="p-6">
