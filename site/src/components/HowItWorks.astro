@@ -19,7 +19,7 @@
     <div class="mt-16 grid gap-8 lg:grid-cols-3 items-stretch">
       <!-- Step 1: Record -->
       <div class="group relative flex">
-        <div class="overflow-hidden rounded-2xl border border-neutral-800 bg-neutral-900/30 transition group-hover:border-neutral-700">
+        <div class="flex-1 overflow-hidden rounded-2xl border border-neutral-800 bg-neutral-900/30 transition group-hover:border-neutral-700">
           <!-- Mockup terminal -->
           <div class="border-b border-neutral-800 bg-neutral-900 px-4 py-2.5 flex items-center gap-2">
             <div class="h-3 w-3 rounded-full bg-red-500/70"></div>
@@ -27,7 +27,7 @@
             <div class="h-3 w-3 rounded-full bg-green-500/70"></div>
             <span class="ml-2 text-[10px] text-neutral-600 font-mono">agent.py</span>
           </div>
-          <div class="bg-neutral-950 p-5 font-mono text-xs leading-relaxed">
+          <div class="bg-neutral-950 p-5 font-mono text-xs leading-relaxed overflow-x-auto">
             <div><span class="text-brand-accent">import</span> <span class="text-neutral-200">rewind_agent</span></div>
             <div><span class="text-brand-accent">import</span> <span class="text-neutral-200">openai</span></div>
             <div class="mt-3"><span class="text-neutral-200">rewind_agent</span><span class="text-neutral-500">.</span><span class="text-brand-primary">init</span><span class="text-neutral-500">()</span> <span class="text-neutral-600"># that's it</span></div>
@@ -53,7 +53,7 @@
 
       <!-- Step 2: Inspect -->
       <div class="group relative flex">
-        <div class="overflow-hidden rounded-2xl border border-neutral-800 bg-neutral-900/30 transition group-hover:border-neutral-700">
+        <div class="flex-1 overflow-hidden rounded-2xl border border-neutral-800 bg-neutral-900/30 transition group-hover:border-neutral-700">
           <!-- Mockup trace view -->
           <div class="border-b border-neutral-800 bg-neutral-900 px-4 py-2.5 flex items-center gap-2">
             <div class="h-3 w-3 rounded-full bg-red-500/70"></div>
@@ -61,7 +61,7 @@
             <div class="h-3 w-3 rounded-full bg-green-500/70"></div>
             <span class="ml-2 text-[10px] text-neutral-600 font-mono">rewind inspect latest</span>
           </div>
-          <div class="bg-neutral-950 p-5 font-mono text-[11px] leading-loose">
+          <div class="bg-neutral-950 p-5 font-mono text-[11px] leading-loose overflow-x-auto">
             <div class="text-neutral-500">Session: <span class="text-neutral-300">support-agent</span>  Steps: <span class="text-neutral-300">8</span></div>
             <div class="mt-2 flex items-center gap-2"><span class="text-emerald-400">&#10003;</span> <span class="text-blue-400">&#x1f9e0;</span> <span class="text-neutral-300">gpt-4o</span> <span class="text-neutral-600 ml-auto">320ms 156&#x2193;</span></div>
             <div class="flex items-center gap-2"><span class="text-emerald-400">&#10003;</span> <span class="text-amber-400">&#x1f527;</span> <span class="text-neutral-300">web_search</span> <span class="text-neutral-600 ml-auto">45ms</span></div>
@@ -86,7 +86,7 @@
 
       <!-- Step 3: Fix -->
       <div class="group flex">
-        <div class="overflow-hidden rounded-2xl border border-neutral-800 bg-neutral-900/30 transition group-hover:border-neutral-700">
+        <div class="flex-1 overflow-hidden rounded-2xl border border-neutral-800 bg-neutral-900/30 transition group-hover:border-neutral-700">
           <!-- Mockup rewind fix output -->
           <div class="border-b border-neutral-800 bg-neutral-900 px-4 py-2.5 flex items-center gap-2">
             <div class="h-3 w-3 rounded-full bg-red-500/70"></div>
@@ -94,7 +94,7 @@
             <div class="h-3 w-3 rounded-full bg-green-500/70"></div>
             <span class="ml-2 text-[10px] text-neutral-600 font-mono">rewind fix latest</span>
           </div>
-          <div class="bg-neutral-950 p-5 font-mono text-[11px] leading-loose">
+          <div class="bg-neutral-950 p-5 font-mono text-[11px] leading-loose overflow-x-auto">
             <div class="text-neutral-500">&#x23EA; Diagnosing <span class="text-neutral-300">"my-agent"</span> <span class="text-neutral-600">(12 steps)</span></div>
             <div class="mt-2"><span class="text-red-400">&#x2717;</span> <span class="text-neutral-300">Step 8</span> <span class="text-red-400/70">hallucination</span></div>
             <div class="mt-1 text-neutral-500">Root cause: <span class="text-neutral-300">stale data from rate-limited API</span></div>
