@@ -1,9 +1,9 @@
 ---
 const providers = [
-  { name: "OpenAI", sub: "GPT-4o, o1, o3", streaming: true },
-  { name: "Anthropic", sub: "Claude 3.5/4", streaming: true },
-  { name: "AWS Bedrock", sub: "", streaming: false },
-  { name: "Any OpenAI-compatible", sub: "Ollama, vLLM, LiteLLM", streaming: true },
+  { name: "OpenAI", sub: "GPT-4o, o1, o3", note: "streaming + non-streaming" },
+  { name: "Anthropic", sub: "Claude 3.5/4", note: "streaming + non-streaming" },
+  { name: "AWS Bedrock", sub: "", note: "non-streaming" },
+  { name: "Any OpenAI-compatible", sub: "Ollama, vLLM, LiteLLM", note: "streaming + non-streaming" },
 ];
 
 const nativeFrameworks = [
@@ -44,26 +44,14 @@ const wrapperFrameworks = [
           {
             providers.map((p) => (
               <div class="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-neutral-800 bg-neutral-900/30 px-5 py-3 transition hover:border-neutral-700">
-                <div>
+                <div class="flex items-center gap-2">
+                  <span aria-hidden="true" class="text-emerald-400">&#10003;</span>
                   <span class="font-medium">{p.name}</span>
                   {p.sub && (
-                    <span class="ml-2 text-sm text-neutral-500">{p.sub}</span>
+                    <span class="text-sm text-neutral-500">{p.sub}</span>
                   )}
                 </div>
-                <div class="flex items-center gap-3 text-xs text-neutral-500">
-                  <span class="flex items-center gap-1">
-                    <span aria-hidden="true" class="text-emerald-400">&#10003;</span>
-                    <span class="sr-only">Supported:</span> Non-streaming
-                  </span>
-                  {p.streaming ? (
-                    <span class="flex items-center gap-1">
-                      <span aria-hidden="true" class="text-emerald-400">&#10003;</span>
-                      <span class="sr-only">Supported:</span> Streaming
-                    </span>
-                  ) : (
-                    <span class="text-neutral-600" aria-label="Not supported">&mdash;</span>
-                  )}
-                </div>
+                <span class="text-xs text-neutral-500">{p.note}</span>
               </div>
             ))
           }
