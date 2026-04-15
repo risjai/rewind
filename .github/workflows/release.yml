@@ -43,10 +43,10 @@ jobs:
     strategy:
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
+          - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             name: linux-x86_64
-          - target: aarch64-unknown-linux-gnu
+          - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
             name: linux-aarch64
           - target: x86_64-apple-darwin
@@ -74,16 +74,19 @@ jobs:
         working-directory: web
         run: npm ci && npm run build
 
-      - name: Install cross-compilation tools
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
+      - name: Install musl tools
+        if: contains(matrix.target, 'musl')
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          sudo apt-get install -y musl-tools
+          if [[ "${{ matrix.target }}" == aarch64* ]]; then
+            sudo apt-get install -y gcc-aarch64-linux-gnu
+          fi
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
         env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
 
       - name: Package
         shell: bash
