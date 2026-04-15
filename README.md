@@ -30,7 +30,7 @@
 
 ---
 
-> Every observability tool - Langfuse, LangSmith, Helicone - shows you **what happened**. None of them let you **change the past and observe a different future**. Rewind does.
+> **Rewind is an open-source time-travel debugger for LLM-powered AI agents.** Every observability tool - Langfuse, LangSmith, Helicone - shows you what happened. None of them let you **change the past and observe a different future**. Rewind does.
 
 ## The Problem
 
@@ -69,14 +69,18 @@ Agent broke at step 30? Fix step 30 - not steps 1 through 29 again. Each re-run 
 
 ## See It in Action
 
+### Debug your agent — without re-running it
+
 <p align="center">
-  <img src="https://raw.githubusercontent.com/agentoptics/rewind/master/assets/demo.gif" alt="Rewind demo - trace, diff, cache" width="800">
+  <img src="https://raw.githubusercontent.com/agentoptics/rewind/master/assets/demo-agent-builder.gif" alt="Rewind CLI demo - trace, fork, diff, assert, share" width="800">
 </p>
 
 ```bash
 # try it now - no API keys needed
 rewind demo && rewind inspect latest
 ```
+
+> If Rewind is useful to you, a ⭐ helps others find it.
 
 ### See what the model saw - find the bug in 5 seconds
 
@@ -161,6 +165,20 @@ Skip the AI entirely and test your own theory:
 ```bash
 rewind fix latest --hypothesis "swap_model:gpt-4o" --apply --yes --command "python agent.py"
 ```
+
+### Web dashboard — see everything your AI does
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/agentoptics/rewind/master/assets/demo-web-ui.gif" alt="Rewind web dashboard - activity timeline, context window, diff view" width="800">
+</p>
+
+```bash
+# Install hooks for Claude Code / Cursor, then open the dashboard
+rewind hooks install
+rewind web
+```
+
+Activity timeline with swim lanes, context window viewer, visual diff, regression baselines — all in the browser. Works with Claude Code sessions, Cursor, or any agent recorded via the SDK.
 
 ### Evaluate before shipping - catch regressions in CI
 
