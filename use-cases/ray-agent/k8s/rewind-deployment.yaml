@@ -28,7 +28,7 @@ spec:
         runAsUser: 7447
       containers:
         - name: rewind
-          image: 871501607754.dkr.ecr.us-west-2.amazonaws.com/sfci/hawking/rewind-server:latest
+          image: 871501607754.dkr.ecr.us-west-2.amazonaws.com/sfci/hawking/ray-agent/rewind-server:jenkins-hawking-ray-agent-PR-26-latest-itest
           ports:
             - containerPort: 4800
               name: http
