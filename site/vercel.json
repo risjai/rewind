@@ -9,5 +9,5 @@
       "main": true
     }
   },
-  "ignoreCommand": "git diff HEAD^ HEAD --quiet -- site/"
+  "ignoreCommand": "git fetch --deepen=2 && git diff HEAD~1 HEAD --quiet -- site/"
 }
