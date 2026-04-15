@@ -377,18 +377,28 @@ fn ensure_session(state: &AppState, claude_session_id: &str, cwd: Option<&str>, 
 fn handle_session_start(state: &AppState, payload: &ClaudeCodeHookPayload, source: &str) -> anyhow::Result<Option<String>> {
     ensure_session(state, &payload.session_id, payload.cwd.as_deref(), payload.transcript_path.as_deref(), Some(source), false)?;
 
-    // If session already existed as partial, update metadata to remove partial flag
-    // and ensure transcript_path is set
     if let Some(sess_state) = state.hooks.sessions.get(&payload.session_id) {
         let store = state.store.lock().map_err(|e| anyhow::anyhow!("Lock: {e}"))?;
         if let Some(session) = store.get_session(&sess_state.session_id)? {
+            // Revive session: Claude Code fires SessionEnd between each user turn,
+            // so a new SessionStart means the session is active again.
+            if session.status == rewind_store::SessionStatus::Completed {
+                store.update_session_status(&sess_state.session_id, rewind_store::SessionStatus::Recording)?;
+                let _ = state.event_tx.send(crate::StoreEvent::SessionUpdated {
+                    session_id: sess_state.session_id.clone(),
+                    status: "recording".to_string(),
+                    total_steps: session.total_steps,
+                    total_tokens: session.total_tokens,
+                });
+            }
+
+            // If session existed as partial, update metadata to remove partial flag
+            // and ensure transcript_path is set
             let needs_update = session.metadata.get("partial").is_some()
                 || (payload.transcript_path.is_some() && session.metadata.get("transcript_path").is_none());
             if needs_update {
                 let mut meta = session.metadata.clone();
-                // Remove partial flag
                 meta.as_object_mut().map(|m| m.remove("partial"));
-                // Set transcript_path from payload if not already present
                 if let Some(tp) = payload.transcript_path.as_deref() {
                     meta["transcript_path"] = serde_json::json!(tp);
                 }
