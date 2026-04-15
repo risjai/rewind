@@ -154,6 +154,18 @@ def _ensure_binary() -> str:
                 f"    cargo install --git https://github.com/{GITHUB_REPO} rewind-mcp"
             )
         _die(f"Download failed: {e}")
+    except urllib.error.URLError as e:
+        reason = str(getattr(e, "reason", e))
+        if "CERTIFICATE_VERIFY_FAILED" in reason:
+            _die(
+                f"Download failed: {e}\n\n"
+                f"  This is a macOS Python SSL issue, not a Rewind bug.\n"
+                f"  Fix it by running one of:\n\n"
+                f'    open "/Applications/Python 3.{sys.version_info.minor}/Install Certificates.command"\n'
+                f"    pip install certifi\n\n"
+                f"  Then retry your command."
+            )
+        _die(f"Download failed: {e}")
     except Exception as e:
         _die(f"Download failed: {e}")
     finally:
