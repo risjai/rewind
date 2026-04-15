@@ -323,13 +323,27 @@ fn ensure_session(state: &AppState, claude_session_id: &str, cwd: Option<&str>, 
 
     tracing::info!("Creating hook session for {} (partial={})", &claude_session_id[..8.min(claude_session_id.len())], partial);
 
-    let dir_name = cwd
-        .and_then(|p| std::path::Path::new(p).file_name())
-        .and_then(|n| n.to_str())
-        .unwrap_or("claude-code");
-    // Append short session ID prefix to disambiguate multiple windows in the same repo
+    let display_name = if let Some(src) = hook_source.filter(|s| *s != "claude-code") {
+        // Find hook_source as a path segment anywhere in cwd, use everything after it
+        let suffix = cwd.and_then(|p| {
+            let parts: Vec<&str> = p.split('/').collect();
+            parts.iter().position(|seg| *seg == src).and_then(|i| {
+                let rest = parts[i + 1..].join("/");
+                if rest.is_empty() { None } else { Some(rest) }
+            })
+        });
+        match suffix {
+            Some(s) => format!("{}/{}", src, s),
+            None => src.to_string(),
+        }
+    } else {
+        cwd.and_then(|p| std::path::Path::new(p).file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("session")
+            .to_string()
+    };
     let short_id = &claude_session_id[..std::cmp::min(8, claude_session_id.len())];
-    let session_name = format!("{} ({})", dir_name, short_id);
+    let session_name = format!("{} ({})", display_name, short_id);
 
     let mut session = Session::new(&session_name);
     session.source = SessionSource::Hooks;

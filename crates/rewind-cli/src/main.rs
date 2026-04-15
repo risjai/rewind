@@ -194,6 +194,10 @@ enum Commands {
         /// Port for the web server
         #[arg(short, long, default_value_t = DEFAULT_WEB_PORT)]
         port: u16,
+
+        /// Host/IP to bind to (use 0.0.0.0 for container/K8s deployments)
+        #[arg(long, default_value = "127.0.0.1", env = "REWIND_BIND_HOST")]
+        host: std::net::IpAddr,
     },
 
     /// Evaluation system — datasets, evaluators, experiments, comparisons
@@ -703,7 +707,7 @@ async fn main() -> Result<()> {
             EvalAction::Show { experiment } => cmd_eval_show(experiment),
             EvalAction::Score { session, evaluator, timeline, compare_timelines, expected, json, force } => cmd_eval_score(session, evaluator, timeline, compare_timelines, expected, json, force),
         },
-        Commands::Web { port } => cmd_web(port).await,
+        Commands::Web { port, host } => cmd_web(port, host).await,
         Commands::Query { sql, tables } => cmd_query(sql, tables),
         Commands::Hooks { action } => match action {
             HooksAction::Install { port } => cmd_hooks_install(port).await,
@@ -771,10 +775,10 @@ async fn cmd_record(name: String, port: u16, upstream: String, replay: bool, web
     }
 }
 
-async fn cmd_web(port: u16) -> Result<()> {
+async fn cmd_web(port: u16, host: std::net::IpAddr) -> Result<()> {
     let store = Store::open_default()?;
     let web_server = WebServer::new_standalone(store);
-    let addr: SocketAddr = format!("127.0.0.1:{}", port).parse()?;
+    let addr = SocketAddr::new(host, port);
     web_server.run(addr).await
 }
 
