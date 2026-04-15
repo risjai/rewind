@@ -1,0 +1,90 @@
+# Shared Rewind server for the ids namespace.
+# All ray-agent replicas POST hook events here. One dashboard for all sessions.
+#
+# Build:  docker build -t <ecr-repo>/rewind-server:latest -f Dockerfile.rewind-server .
+# Apply:  kubectl apply -f use-cases/ray-agent/k8s/rewind-deployment.yaml
+# Access: kubectl port-forward svc/rewind -n ids 4800:4800
+#         open http://127.0.0.1:4800
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rewind
+  namespace: ids
+  labels:
+    app: rewind
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rewind
+  template:
+    metadata:
+      labels:
+        app: rewind
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 7447
+      containers:
+        - name: rewind
+          image: 871501607754.dkr.ecr.us-west-2.amazonaws.com/sfci/hawking/rewind-server:latest
+          ports:
+            - containerPort: 4800
+              name: http
+          volumeMounts:
+            - name: rewind-data
+              mountPath: /home/einstein/.rewind
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 4800
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 4800
+            initialDelaySeconds: 3
+            periodSeconds: 10
+      volumes:
+        - name: rewind-data
+          persistentVolumeClaim:
+            claimName: rewind-data-pvc
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rewind-data-pvc
+  namespace: ids
+  labels:
+    app: rewind
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rewind
+  namespace: ids
+  labels:
+    app: rewind
+spec:
+  selector:
+    app: rewind
+  ports:
+    - port: 4800
+      targetPort: 4800
+      name: http
+  type: ClusterIP

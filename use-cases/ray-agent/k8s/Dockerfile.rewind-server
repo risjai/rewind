@@ -1,0 +1,22 @@
+FROM docker.repo.local.sfdc.net/sfci/docker-images/sfdc_rhel9_python3.11:104
+
+ARG einstein_uid=7447
+RUN useradd --uid ${einstein_uid} --gid 0 -m -s /sbin/nologin einstein
+
+RUN mkdir -p /home/einstein/.rewind/bin
+WORKDIR /home/einstein
+
+RUN LIBRARIES_BASE_URL="https://rpm.repo.local.sfdc.net/artifactory/strata-blobs/hawking/byom/libraries/rewind" \
+    && FILE="rewind-v0.12.4-linux-x86_64.tar.gz" \
+    && SHA256_CHECKSUM="f4c9edd3a0819f1b49aaa361365f087e6b02a3c9698404774301a9de146e9c60" \
+    && curl -O ${LIBRARIES_BASE_URL}/${FILE} \
+    && echo "${SHA256_CHECKSUM} ${FILE}" | sha256sum --check \
+    && tar xzf ${FILE} \
+    && mv rewind /home/einstein/.rewind/bin/rewind \
+    && chmod +x /home/einstein/.rewind/bin/rewind \
+    && rm ${FILE}
+
+RUN chown -R ${einstein_uid} /home/einstein/.rewind
+
+USER ${einstein_uid}
+ENTRYPOINT ["/home/einstein/.rewind/bin/rewind", "web", "--host", "0.0.0.0"]
