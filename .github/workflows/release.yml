@@ -46,15 +46,19 @@ jobs:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             name: linux-x86_64
+            use_cross: false
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
             name: linux-aarch64
+            use_cross: true
           - target: x86_64-apple-darwin
             os: macos-latest
             name: darwin-x86_64
+            use_cross: false
           - target: aarch64-apple-darwin
             os: macos-latest
             name: darwin-aarch64
+            use_cross: false
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -74,23 +78,23 @@ jobs:
         working-directory: web
         run: npm ci && npm run build
 
-      - name: Install musl tools
-        if: contains(matrix.target, 'musl')
+      - name: Install musl tools (x86_64)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
         run: |
           sudo apt-get update
-          # musl-tools provides the x86_64 musl-gcc wrapper.
-          # gcc-aarch64-linux-gnu is a glibc-based cross-linker, but Rust
-          # statically links musl's libc — the GNU linker just needs to
-          # produce aarch64 ELF output. Do not remove it.
           sudo apt-get install -y musl-tools
-          if [[ "${{ matrix.target }}" == aarch64* ]]; then
-            sudo apt-get install -y gcc-aarch64-linux-gnu
-          fi
 
-      - name: Build
+      - name: Install cross
+        if: matrix.use_cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build with cargo
+        if: "!matrix.use_cross"
         run: cargo build --release --target ${{ matrix.target }}
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
+
+      - name: Build with cross
+        if: matrix.use_cross
+        run: cross build --release --target ${{ matrix.target }}
 
       - name: Package
         shell: bash
