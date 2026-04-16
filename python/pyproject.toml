@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rewind-agent"
-version = "0.14.3"
+version = "0.14.4"
 description = "Chrome DevTools for AI agents — record, inspect, fork, replay, diff."
 readme = "README.md"
 license = "MIT"
