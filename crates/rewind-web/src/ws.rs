@@ -77,6 +77,7 @@ struct StepEventData {
     tokens_in: u64,
     tokens_out: u64,
     error: Option<String>,
+    tool_name: Option<String>,
     response_preview: String,
     created_at: String,
 }
@@ -143,6 +144,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                         tokens_in: step.tokens_in,
                                         tokens_out: step.tokens_out,
                                         error: step.error.clone(),
+                                        tool_name: step.tool_name.clone(),
                                         response_preview: preview,
                                         created_at: step.created_at.to_rfc3339(),
                                     },

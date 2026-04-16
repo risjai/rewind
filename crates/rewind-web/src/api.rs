@@ -133,6 +133,7 @@ async fn get_session_steps(
             tokens_out: s.tokens_out,
             model: s.model.clone(),
             error: s.error.clone(),
+            tool_name: s.tool_name.clone(),
             response_preview,
         }
     }).collect();
@@ -156,6 +157,7 @@ struct StepResponse {
     tokens_out: u64,
     model: String,
     error: Option<String>,
+    tool_name: Option<String>,
     response_preview: String,
 }
 
@@ -221,6 +223,7 @@ async fn get_step_detail(
         tokens_out: step.tokens_out,
         model: step.model,
         error: step.error,
+        tool_name: step.tool_name,
         request_body,
         response_body,
         messages,
@@ -241,6 +244,7 @@ struct StepDetailResponse {
     tokens_out: u64,
     model: String,
     error: Option<String>,
+    tool_name: Option<String>,
     request_body: Option<serde_json::Value>,
     response_body: Option<serde_json::Value>,
     messages: Option<Vec<MessageView>>,
@@ -450,6 +454,7 @@ fn build_span_response(span: &rewind_store::Span, all_spans: &[rewind_store::Spa
                 tokens_out: s.tokens_out,
                 model: s.model.clone(),
                 error: s.error.clone(),
+                tool_name: s.tool_name.clone(),
                 response_preview,
             }
         }).collect();
