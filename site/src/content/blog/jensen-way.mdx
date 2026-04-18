@@ -9,7 +9,7 @@ draft: false
 
 Jensen Huang said this at the Hill & Valley Forum last year, explaining what makes Physical AI hard:
 
-> "The next wave requires us to understand things like the laws of physics — friction, inertia, cause and effect. The fact that I tip that thing over, it's going to fall. When I set the bottle down, it's not going to go through the table. All of these common sense physical reasoning abilities that children have, that our pets have — most AIs don't have."
+> "The next wave requires us to understand things like the laws of physics - friction, inertia, cause and effect. The fact that I tip that thing over, it's going to fall. When I set the bottle down, it's not going to go through the table. All of these common sense physical reasoning abilities that children have, that our pets have - most AIs don't have."
 
 He was talking about robots. I've been thinking about it for the last three months while watching product plans collapse for exactly the same reason.
 
@@ -32,7 +32,7 @@ Before evaluating against anything fancy, I started writing out the full chain f
 
 If I needed jargon or "if everything goes right" qualifiers, the link was weak. Every weak link turned out to be a place where the plan pretended physics didn't apply.
 
-That process — causal chain, toddler test, then structured evaluation — is what Jensen Way automates.
+That process - causal chain, toddler test, then structured evaluation - is what Jensen Way automates.
 
 ## Six laws of reality
 
@@ -49,11 +49,11 @@ After running this on ~30 real decisions, the weak links clustered into six recu
 
 Each law scores **Aligned**, **Fighting**, or **Broken**. The skill then computes an overall verdict:
 
-- **BUILD** — no Broken laws, ≤2 Fighting with named mitigations, friction budget positive
-- **PIVOT** — 1-2 Broken that dissolve if scope, approach, or timeline changes
-- **KILL** — 3+ Broken, OR Broken on Demand Gravity, OR friction budget deeply negative
+- **BUILD** - no Broken laws, ≤2 Fighting with named mitigations, friction budget positive
+- **PIVOT** - 1-2 Broken that dissolve if scope, approach, or timeline changes
+- **KILL** - 3+ Broken, OR Broken on Demand Gravity, OR friction budget deeply negative
 
-The key design choice: each law requires evidence. "I think users want this" doesn't count as Demand Gravity. You need search volume, waitlists, competitor traction, or people paying for bad alternatives. If you can't produce evidence, the law defaults to Fighting or worse — absence of evidence is not evidence of absence.
+The key design choice: each law requires evidence. "I think users want this" doesn't count as Demand Gravity. You need search volume, waitlists, competitor traction, or people paying for bad alternatives. If you can't produce evidence, the law defaults to Fighting or worse - absence of evidence is not evidence of absence.
 
 ## A worked example
 
@@ -68,8 +68,8 @@ Here's a real run. The question: should a small AI startup build their own vecto
 
 **Weak links the Toddler Test flags:**
 
-- 1 → 2: "cost drops below Pinecone" — *at what query volume? We're at 50k queries/month. Pinecone's free tier covers this.*
-- 2 → 3: "better gross margins" — *vector storage is currently 3% of our costs. LLM API calls are 82%. We're optimizing the wrong line.*
+- 1 → 2: "cost drops below Pinecone" - *at what query volume? We're at 50k queries/month. Pinecone's free tier covers this.*
+- 2 → 3: "better gross margins" - *vector storage is currently 3% of our costs. LLM API calls are 82%. We're optimizing the wrong line.*
 
 **Scorecard:**
 
@@ -83,7 +83,7 @@ Here's a real run. The question: should a small AI startup build their own vecto
 
 **Verdict: KILL.**
 
-Five of six laws are Broken. The plan fails the demand law alone (no one asked), which triggers KILL regardless of the others. This is a classic cost-optimization pitch masquerading as something it isn't — sunk-cost-of-ego dressed up as unit economics.
+Five of six laws are Broken. The plan fails the demand law alone (no one asked), which triggers KILL regardless of the others. This is a classic cost-optimization pitch masquerading as something it isn't - sunk-cost-of-ego dressed up as unit economics.
 
 The single biggest risk, stated plainly: *"We will spend two months building infrastructure nobody asked for, miss our Series A milestone because we stopped shipping user-facing features, and still not match Pinecone's correctness on our first release."*
 
@@ -91,7 +91,7 @@ That's the kind of output Jensen Way is meant to produce. Short, directly ground
 
 ## Installing it
 
-Jensen Way is a single Markdown file. It ships as an [Anthropic Agent Skill](https://github.com/agentoptics/jensen-way) but works with any AI coding assistant that reads context files — Claude Code, Cursor, Codex, Windsurf, Aider, Copilot, you name it.
+Jensen Way is a single Markdown file. It ships as an [Anthropic Agent Skill](https://github.com/agentoptics/jensen-way) but works with any AI coding assistant that reads context files - Claude Code, Cursor, Codex, Windsurf, Aider, Copilot, you name it.
 
 **Claude Code** (one-line install):
 
@@ -122,14 +122,6 @@ Then ask any assistant:
 Evaluate whether we should build [your idea]. Use the Jensen Way framework.
 ```
 
-## What I'd build next
+If you run Jensen Way on a real decision - build *or* kill - I'd love to see the writeup. Open an issue on the repo.
 
-The repo is [agentoptics/jensen-way](https://github.com/agentoptics/jensen-way), MIT licensed. A few directions worth exploring if others find this useful:
-
-- **Scorecard history** — track how your team's predictions age. How often did Pivot-grade decisions become Kill decisions six months later?
-- **Integration with [Rewind](/)** — when an agent fails, re-run the original spec through Jensen Way to see if the failure was in execution or in the plan
-- **Domain-specific law sets** — the six current laws are generic. Infra decisions probably want a "blast radius" law; consumer product decisions probably want a "retention gravity" law
-
-If you run Jensen Way on a real decision — build *or* kill — I'd love to see the writeup. Open an issue on the repo.
-
-Jensen was describing robots. The framing turned out to also describe product plans, which is maybe the point — the laws of physics don't care what you're building, only whether your plan obeys them.
+Jensen was describing robots. The framing turned out to also describe product plans, which is maybe the point - the laws of physics don't care what you're building, only whether your plan obeys them.
