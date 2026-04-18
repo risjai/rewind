@@ -1,13 +1,12 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
-  <rect width="32" height="32" rx="7" fill="#0B1020"/>
   <g transform="translate(16 16)">
-    <circle r="9.5" fill="none" stroke="#E6E8EE" stroke-width="0.8"/>
-    <path d="M0,-8 L7,-4 L4,0 Z" fill="#6366F1"/>
-    <path d="M7,-4 L7,4 L4,0 Z" fill="#818CF8"/>
-    <path d="M7,4 L0,8 L4,0 Z" fill="#4F46E5"/>
-    <path d="M0,8 L-7,4 L-4,0 Z" fill="#6366F1"/>
-    <path d="M-7,4 L-7,-4 L-4,0 Z" fill="#818CF8"/>
-    <path d="M-7,-4 L0,-8 L-4,0 Z" fill="#4F46E5"/>
-    <circle r="1.5" fill="#0B1020"/>
+    <circle r="14.5" fill="none" stroke="#E6E8EE" stroke-width="1.2"/>
+    <path d="M0,-12 L10.4,-6 L6,0 Z" fill="#6366F1"/>
+    <path d="M10.4,-6 L10.4,6 L6,0 Z" fill="#818CF8"/>
+    <path d="M10.4,6 L0,12 L6,0 Z" fill="#4F46E5"/>
+    <path d="M0,12 L-10.4,6 L-6,0 Z" fill="#6366F1"/>
+    <path d="M-10.4,6 L-10.4,-6 L-6,0 Z" fill="#818CF8"/>
+    <path d="M-10.4,-6 L0,-12 L-6,0 Z" fill="#4F46E5"/>
+    <circle r="2.5" fill="#0F0F0F"/>
   </g>
 </svg>
