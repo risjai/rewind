@@ -1,0 +1,135 @@
+---
+title: "I Turned Jensen Huang's Physical AI Framing Into a Claude Code Skill"
+description: "Most product plans fail for the same reason most AIs fail: they operate in a frictionless vacuum. Jensen Way is an AI coding skill that forces the causal chain, scores six laws of reality, and produces a Build / Pivot / Kill verdict backed by evidence. Works with Claude Code, Cursor, Codex, Windsurf, and any assistant that reads context files."
+date: 2026-04-18
+author: "Rishabh Jain"
+tags: ["jensen-way", "claude-code", "agent-skills", "product-decisions", "open-source"]
+draft: false
+---
+
+Jensen Huang said this at the Hill & Valley Forum last year, explaining what makes Physical AI hard:
+
+> "The next wave requires us to understand things like the laws of physics — friction, inertia, cause and effect. The fact that I tip that thing over, it's going to fall. When I set the bottle down, it's not going to go through the table. All of these common sense physical reasoning abilities that children have, that our pets have — most AIs don't have."
+
+He was talking about robots. I've been thinking about it for the last three months while watching product plans collapse for exactly the same reason.
+
+## Most product plans don't have physical reasoning either
+
+Here's what I kept seeing:
+
+- A four-person team planning to build a vector database because Pinecone is "too expensive," even though their storage is 3% of their bill
+- A docs startup promising real-time collaboration in one quarter, with no CRDT experience on staff
+- A spec that required two teams to integrate perfectly when those teams didn't talk to each other today
+- A migration plan that assumed users would switch because the new product was "better," ignoring every workflow they'd already built around the old one
+
+Every one of these plans reads fine on a slide. The causal chain breaks the moment you trace it aloud to a child. "And why will users switch?" "Because the new product is better." "Why would that make them switch?" "Because…"
+
+The chain breaks somewhere, and it's always the same place: the plan assumed a frictionless vacuum.
+
+## The Toddler Test
+
+Before evaluating against anything fancy, I started writing out the full chain from "we build it" to "this matters," one step at a time. Then I read each arrow (the `→ because` between steps) and asked: would a child accept that explanation?
+
+If I needed jargon or "if everything goes right" qualifiers, the link was weak. Every weak link turned out to be a place where the plan pretended physics didn't apply.
+
+That process — causal chain, toddler test, then structured evaluation — is what Jensen Way automates.
+
+## Six laws of reality
+
+After running this on ~30 real decisions, the weak links clustered into six recurring categories. I called them laws because they show up regardless of the specific product:
+
+| # | Law | The toddler version |
+|---|---|---|
+| 1 | **Gravity of demand** | "Do people actually want this, or do you just wish they did?" |
+| 2 | **Friction of adoption** | "Is this solving something that hurts, or just something slightly annoying?" |
+| 3 | **Competitive gravity** | "If someone bigger takes your toy, can you get it back?" |
+| 4 | **Hard constraints** | "What's the thing that absolutely cannot happen no matter how hard you try?" |
+| 5 | **Organizational inertia** | "Do the people who need to work together actually talk to each other?" |
+| 6 | **Entropy & economics** | "If you stop paying attention to this, does it break? Is it worth the effort?" |
+
+Each law scores **Aligned**, **Fighting**, or **Broken**. The skill then computes an overall verdict:
+
+- **BUILD** — no Broken laws, ≤2 Fighting with named mitigations, friction budget positive
+- **PIVOT** — 1-2 Broken that dissolve if scope, approach, or timeline changes
+- **KILL** — 3+ Broken, OR Broken on Demand Gravity, OR friction budget deeply negative
+
+The key design choice: each law requires evidence. "I think users want this" doesn't count as Demand Gravity. You need search volume, waitlists, competitor traction, or people paying for bad alternatives. If you can't produce evidence, the law defaults to Fighting or worse — absence of evidence is not evidence of absence.
+
+## A worked example
+
+Here's a real run. The question: should a small AI startup build their own vector database instead of using Pinecone?
+
+**Causal chain:**
+
+1. We build a custom vector DB → because off-the-shelf vendors are "too expensive at scale"
+2. Which causes our cost-per-query to drop below Pinecone's → because we control the storage layer
+3. Which leads to better gross margins → because inference costs dominate our P&L
+4. Which results in a healthier unit economics story for the Series A
+
+**Weak links the Toddler Test flags:**
+
+- 1 → 2: "cost drops below Pinecone" — *at what query volume? We're at 50k queries/month. Pinecone's free tier covers this.*
+- 2 → 3: "better gross margins" — *vector storage is currently 3% of our costs. LLM API calls are 82%. We're optimizing the wrong line.*
+
+**Scorecard:**
+
+| Law | Rating | Evidence |
+|---|---|---|
+| Demand Gravity | **Broken** | No customer has ever asked about our vector backend |
+| Competitive Gravity | **Broken** | Pinecone ($100M+ raised), Weaviate, Qdrant, pgvector. "We'll execute better" is velocity, not gravity |
+| Hard Constraints | **Broken** | ANN correctness + persistence + multi-tenancy is a multi-year problem. 2-month horizon is the table |
+| Org Inertia | **Broken** | Nobody on the team has built a database. "We'll learn" is force hallucination |
+| Entropy & Economics | **Broken** | Build: 8 person-months. Buy: $200/month. Payback is infinite at our scale |
+
+**Verdict: KILL.**
+
+Five of six laws are Broken. The plan fails the demand law alone (no one asked), which triggers KILL regardless of the others. This is a classic cost-optimization pitch masquerading as something it isn't — sunk-cost-of-ego dressed up as unit economics.
+
+The single biggest risk, stated plainly: *"We will spend two months building infrastructure nobody asked for, miss our Series A milestone because we stopped shipping user-facing features, and still not match Pinecone's correctness on our first release."*
+
+That's the kind of output Jensen Way is meant to produce. Short, directly grounded in arithmetic and named competitors, falsifiable. When the report gets long and hand-wavy, the physics are being hidden.
+
+## Installing it
+
+Jensen Way is a single Markdown file. It ships as an [Anthropic Agent Skill](https://github.com/agentoptics/jensen-way) but works with any AI coding assistant that reads context files — Claude Code, Cursor, Codex, Windsurf, Aider, Copilot, you name it.
+
+**Claude Code** (one-line install):
+
+```bash
+/plugin marketplace add agentoptics/jensen-way
+```
+
+**Cursor / Windsurf / any tool with a rules file:**
+
+```bash
+curl -o .cursorrules \
+  https://raw.githubusercontent.com/agentoptics/jensen-way/main/skills/jensen-way/SKILL.md
+```
+
+(For Windsurf, rename to `.windsurfrules`. For Codex, use `AGENTS.md`. Same content, different filename.)
+
+**Or just drop it into any project:**
+
+```bash
+mkdir -p .claude/skills/jensen-way
+curl -o .claude/skills/jensen-way/SKILL.md \
+  https://raw.githubusercontent.com/agentoptics/jensen-way/main/skills/jensen-way/SKILL.md
+```
+
+Then ask any assistant:
+
+```
+Evaluate whether we should build [your idea]. Use the Jensen Way framework.
+```
+
+## What I'd build next
+
+The repo is [agentoptics/jensen-way](https://github.com/agentoptics/jensen-way), MIT licensed. A few directions worth exploring if others find this useful:
+
+- **Scorecard history** — track how your team's predictions age. How often did Pivot-grade decisions become Kill decisions six months later?
+- **Integration with [Rewind](/)** — when an agent fails, re-run the original spec through Jensen Way to see if the failure was in execution or in the plan
+- **Domain-specific law sets** — the six current laws are generic. Infra decisions probably want a "blast radius" law; consumer product decisions probably want a "retention gravity" law
+
+If you run Jensen Way on a real decision — build *or* kill — I'd love to see the writeup. Open an issue on the repo.
+
+Jensen was describing robots. The framing turned out to also describe product plans, which is maybe the point — the laws of physics don't care what you're building, only whether your plan obeys them.
