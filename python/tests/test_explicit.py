@@ -1,12 +1,10 @@
 """Tests for the explicit recording API client."""
 
 import asyncio
-import contextvars
 import json
 import threading
 import unittest
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from unittest.mock import patch
 
 from rewind_agent.explicit import (
     ExplicitClient,
