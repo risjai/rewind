@@ -24,6 +24,7 @@ pub enum SessionSource {
     Direct,
     Hooks,
     OtelImport,
+    Api,
 }
 
 impl SessionSource {
@@ -33,6 +34,7 @@ impl SessionSource {
             SessionSource::Direct => "direct",
             SessionSource::Hooks => "hooks",
             SessionSource::OtelImport => "otel_import",
+            SessionSource::Api => "api",
         }
     }
 
@@ -42,6 +44,7 @@ impl SessionSource {
             "direct" => SessionSource::Direct,
             "hooks" => SessionSource::Hooks,
             "otel_import" => SessionSource::OtelImport,
+            "api" => SessionSource::Api,
             _ => SessionSource::Proxy,
         }
     }

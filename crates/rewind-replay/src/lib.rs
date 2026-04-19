@@ -101,7 +101,7 @@ impl<'a> ReplayEngine<'a> {
 
     /// Create a fork: new timeline branching from a specific step
     pub fn fork(&self, session_id: &str, source_timeline_id: &str, at_step: u32, label: &str) -> Result<Timeline> {
-        let steps = self.store.get_steps(source_timeline_id)?;
+        let steps = self.get_full_timeline_steps(source_timeline_id, session_id)?;
         let total = u32::try_from(steps.len()).unwrap_or(u32::MAX);
         if at_step == 0 || at_step > total {
             bail!("Invalid fork step {}. Session has {} steps (use 1-{}).", at_step, steps.len(), steps.len());

@@ -303,6 +303,29 @@ impl Store {
         let _ = self.conn.execute("ALTER TABLE steps ADD COLUMN tool_name TEXT", []);
         let _ = self.conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_steps_session_tool ON steps(session_id, tool_name)");
 
+        // v0.12 migrations: explicit recording API — replay contexts + step counters
+        self.conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS replay_contexts (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL REFERENCES sessions(id),
+                timeline_id TEXT NOT NULL REFERENCES timelines(id),
+                from_step INTEGER NOT NULL,
+                current_step INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                last_accessed_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_replay_contexts_session ON replay_contexts(session_id);
+
+            CREATE TABLE IF NOT EXISTS step_counters (
+                session_id TEXT NOT NULL,
+                timeline_id TEXT NOT NULL,
+                counter INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (session_id, timeline_id)
+            );
+            ",
+        )?;
+
         Ok(())
     }
 
@@ -497,6 +520,96 @@ impl Store {
         )?;
         let mut rows = stmt.query_map(params![step_id], Self::row_to_step)?;
         Ok(rows.next().transpose()?)
+    }
+
+    // ── Step Counters (Explicit API) ──────────────────────────
+
+    /// Atomically allocate the next step number for a session+timeline pair.
+    pub fn next_step_number(&self, session_id: &str, timeline_id: &str) -> Result<u32> {
+        self.conn.execute(
+            "INSERT INTO step_counters (session_id, timeline_id, counter) VALUES (?1, ?2, 1)
+             ON CONFLICT(session_id, timeline_id) DO UPDATE SET counter = counter + 1",
+            params![session_id, timeline_id],
+        )?;
+        let counter: u32 = self.conn.query_row(
+            "SELECT counter FROM step_counters WHERE session_id = ?1 AND timeline_id = ?2",
+            params![session_id, timeline_id],
+            |row| row.get(0),
+        )?;
+        Ok(counter)
+    }
+
+    /// Sync the step counter to a specific value (used when rehydrating from hooks).
+    pub fn sync_step_counter(&self, session_id: &str, timeline_id: &str, value: u32) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO step_counters (session_id, timeline_id, counter) VALUES (?1, ?2, ?3)
+             ON CONFLICT(session_id, timeline_id) DO UPDATE SET counter = MAX(counter, ?3)",
+            params![session_id, timeline_id, value],
+        )?;
+        Ok(())
+    }
+
+    // ── Replay Contexts (Explicit API) ──────────────────────
+
+    pub fn create_replay_context(
+        &self, id: &str, session_id: &str, timeline_id: &str, from_step: u32,
+    ) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT INTO replay_contexts (id, session_id, timeline_id, from_step, current_step, created_at, last_accessed_at)
+             VALUES (?1, ?2, ?3, ?4, 0, ?5, ?5)",
+            params![id, session_id, timeline_id, from_step, now],
+        )?;
+        Ok(())
+    }
+
+    /// Advance the replay context cursor and return the current step number.
+    pub fn advance_replay_context(&self, context_id: &str) -> Result<u32> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "UPDATE replay_contexts SET current_step = current_step + 1, last_accessed_at = ?1 WHERE id = ?2",
+            params![now, context_id],
+        )?;
+        let step: u32 = self.conn.query_row(
+            "SELECT current_step FROM replay_contexts WHERE id = ?1",
+            params![context_id],
+            |row| row.get(0),
+        )?;
+        Ok(step)
+    }
+
+    pub fn get_replay_context(&self, context_id: &str) -> Result<Option<(String, String, u32, u32)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id, timeline_id, from_step, current_step FROM replay_contexts WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![context_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, u32>(2)?, row.get::<_, u32>(3)?))
+        })?;
+        Ok(rows.next().transpose()?)
+    }
+
+    pub fn delete_replay_context(&self, context_id: &str) -> Result<bool> {
+        let affected = self.conn.execute(
+            "DELETE FROM replay_contexts WHERE id = ?1",
+            params![context_id],
+        )?;
+        Ok(affected > 0)
+    }
+
+    pub fn cleanup_expired_replay_contexts(&self, max_age_secs: i64) -> Result<usize> {
+        let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(max_age_secs)).to_rfc3339();
+        let affected = self.conn.execute(
+            "DELETE FROM replay_contexts WHERE last_accessed_at < ?1",
+            params![cutoff],
+        )?;
+        Ok(affected)
+    }
+
+    pub fn count_replay_contexts(&self) -> Result<u64> {
+        let count: u64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM replay_contexts", [], |row| row.get(0),
+        )?;
+        Ok(count)
     }
 
     // ── Instant Replay Cache ──────────────────────────────────

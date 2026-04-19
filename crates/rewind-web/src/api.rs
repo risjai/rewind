@@ -1,14 +1,16 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::StatusCode,
     response::Json,
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 use rewind_replay::ReplayEngine;
+use rewind_store::{Session, SessionSource, Step, StepStatus, StepType, Timeline};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
-use crate::AppState;
+use crate::{AppState, StoreEvent};
 
 pub fn routes(state: AppState) -> Router {
     Router::new()
@@ -28,6 +30,17 @@ pub fn routes(state: AppState) -> Router {
         .route("/sessions/{id}/spans", get(get_session_spans))
         .route("/threads", get(list_threads))
         .route("/threads/{id}", get(get_thread))
+        // Explicit Recording API (wire-format-agnostic)
+        .route("/sessions/start", post(start_session))
+        .route("/sessions/{id}/end", post(end_session))
+        .route("/sessions/{id}/llm-calls", post(record_llm_call))
+        .route("/sessions/{id}/llm-calls/replay-lookup", post(replay_lookup_llm))
+        .route("/sessions/{id}/tool-calls", post(record_tool_call))
+        .route("/sessions/{id}/tool-calls/replay-lookup", post(replay_lookup_tool))
+        .route("/sessions/{id}/fork", post(fork_session))
+        .route("/replay-contexts", post(create_replay_context))
+        .route("/replay-contexts/{id}", delete(delete_replay_context_handler))
+        .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10MB
         .with_state(state)
 }
 
@@ -83,6 +96,7 @@ struct SessionDetailResponse {
 #[derive(Deserialize)]
 struct StepsQuery {
     timeline: Option<String>,
+    include_blobs: Option<u8>,
 }
 
 async fn get_session_steps(
@@ -116,8 +130,18 @@ async fn get_session_steps(
         (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
     })?;
 
+    let with_blobs = query.include_blobs.unwrap_or(0) == 1;
+
     let responses: Vec<StepResponse> = steps.iter().map(|s| {
         let response_preview = extract_preview(&store, &s.response_blob);
+        let (req_body, resp_body) = if with_blobs {
+            (
+                blob_to_json(&store, &s.request_blob),
+                blob_to_json(&store, &s.response_blob),
+            )
+        } else {
+            (None, None)
+        };
         StepResponse {
             id: s.id.clone(),
             timeline_id: s.timeline_id.clone(),
@@ -135,6 +159,8 @@ async fn get_session_steps(
             error: s.error.clone(),
             tool_name: s.tool_name.clone(),
             response_preview,
+            request_body: req_body,
+            response_body: resp_body,
         }
     }).collect();
 
@@ -159,6 +185,10 @@ struct StepResponse {
     error: Option<String>,
     tool_name: Option<String>,
     response_preview: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_body: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_body: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -456,6 +486,8 @@ fn build_span_response(span: &rewind_store::Span, all_spans: &[rewind_store::Spa
                 error: s.error.clone(),
                 tool_name: s.tool_name.clone(),
                 response_preview,
+                request_body: None,
+                response_body: None,
             }
         }).collect();
 
@@ -568,6 +600,15 @@ pub fn extract_preview_from_store(store: &rewind_store::Store, blob_hash: &str) 
     extract_preview(store, blob_hash)
 }
 
+fn blob_to_json(store: &rewind_store::Store, blob_hash: &str) -> Option<serde_json::Value> {
+    if blob_hash.is_empty() {
+        return None;
+    }
+    store.blobs.get(blob_hash).ok()
+        .and_then(|data| String::from_utf8(data).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+}
+
 fn extract_preview(store: &rewind_store::Store, blob_hash: &str) -> String {
     if blob_hash.is_empty() {
         return String::new();
@@ -576,6 +617,7 @@ fn extract_preview(store: &rewind_store::Store, blob_hash: &str) -> String {
         .and_then(|data| String::from_utf8(data).ok())
         .and_then(|json_str| {
             let val: serde_json::Value = serde_json::from_str(&json_str).ok()?;
+            // OpenAI format
             if let Some(content) = val.pointer("/choices/0/message/content").and_then(|c| c.as_str()) {
                 return Some(content.replace('\n', " ").chars().take(200).collect());
             }
@@ -585,10 +627,26 @@ fn extract_preview(store: &rewind_store::Store, blob_hash: &str) -> String {
                     .collect();
                 return Some(format!("tool_calls: [{}]", names.join(", ")));
             }
+            // Anthropic format
             if let Some(content) = val.get("content").and_then(|c| c.as_array())
                 && let Some(text) = content.first().and_then(|b| b.get("text")).and_then(|t| t.as_str()) {
                     return Some(text.replace('\n', " ").chars().take(200).collect());
                 }
+            // LLM Gateway format (generations[0].content)
+            if let Some(content) = val.pointer("/generations/0/content").and_then(|c| c.as_str()) {
+                return Some(content.replace('\n', " ").chars().take(200).collect());
+            }
+            if let Some(invocations) = val.pointer("/generations/0/tool_invocations").and_then(|c| c.as_array()) {
+                let names: Vec<&str> = invocations.iter()
+                    .filter_map(|c| c.get("name").and_then(|n| n.as_str()))
+                    .collect();
+                return Some(format!("tool_invocations: [{}]", names.join(", ")));
+            }
+            // Generic: any top-level "content" string
+            if let Some(content) = val.get("content").and_then(|c| c.as_str()) {
+                return Some(content.replace('\n', " ").chars().take(200).collect());
+            }
+            // Last resort: raw JSON truncated
             Some(json_str.chars().take(200).collect())
         })
         .unwrap_or_default()
@@ -731,4 +789,465 @@ async fn get_session_savings(
     cumulative.cost_saved_usd = (cumulative.cost_saved_usd * 100.0).round() / 100.0;
 
     Ok(Json(cumulative))
+}
+
+// ══════════════════════════════════════════════════════════
+// Explicit Recording API (wire-format-agnostic)
+// ══════════════════════════════════════════════════════════
+
+#[derive(Deserialize)]
+#[allow(dead_code)]
+struct StartSessionRequest {
+    name: String,
+    source: Option<String>,
+    thread_id: Option<String>,
+    metadata: Option<serde_json::Value>,
+}
+
+#[derive(Serialize)]
+struct StartSessionResponse {
+    session_id: String,
+    root_timeline_id: String,
+}
+
+async fn start_session(
+    State(state): State<AppState>,
+    Json(body): Json<StartSessionRequest>,
+) -> Result<(StatusCode, Json<StartSessionResponse>), (StatusCode, String)> {
+    let mut session = Session::new(&body.name);
+    session.source = SessionSource::Api;
+    session.thread_id = body.thread_id;
+    if let Some(meta) = body.metadata {
+        session.metadata = meta;
+    }
+
+    let timeline = Timeline::new_root(&session.id);
+    let session_id = session.id.clone();
+    let timeline_id = timeline.id.clone();
+
+    {
+        let store = state.store.lock().map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("Lock error: {e}"))
+        })?;
+        store.create_session(&session).map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
+        })?;
+        store.create_timeline(&timeline).map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
+        })?;
+    }
+
+    let _ = state.event_tx.send(StoreEvent::SessionUpdated {
+        session_id: session_id.clone(),
+        status: "recording".to_string(),
+        total_steps: 0,
+        total_tokens: 0,
+    });
+
+    Ok((StatusCode::CREATED, Json(StartSessionResponse {
+        session_id,
+        root_timeline_id: timeline_id,
+    })))
+}
+
+#[derive(Deserialize)]
+#[allow(dead_code)]
+struct EndSessionRequest {
+    status: String,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct EndSessionResponse {
+    session_id: String,
+}
+
+async fn end_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<EndSessionRequest>,
+) -> Result<Json<EndSessionResponse>, (StatusCode, String)> {
+    let store = state.store.lock().map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Lock error: {e}"))
+    })?;
+    let session = resolve_session(&store, &id)
+        .map_err(|e| (StatusCode::NOT_FOUND, format!("{e}")))?;
+
+    let status = match body.status.as_str() {
+        "errored" | "failed" => rewind_store::SessionStatus::Failed,
+        _ => rewind_store::SessionStatus::Completed,
+    };
+    store.update_session_status(&session.id, status).map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
+    })?;
+
+    let _ = state.event_tx.send(StoreEvent::SessionUpdated {
+        session_id: session.id.clone(),
+        status: body.status,
+        total_steps: session.total_steps,
+        total_tokens: session.total_tokens,
+    });
+
+    Ok(Json(EndSessionResponse { session_id: session.id }))
+}
+
+#[derive(Deserialize)]
+struct RecordLlmCallRequest {
+    timeline_id: Option<String>,
+    client_step_id: Option<String>,
+    request_body: serde_json::Value,
+    response_body: serde_json::Value,
+    model: String,
+    duration_ms: u64,
+    tokens_in: Option<u64>,
+    tokens_out: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct RecordStepResponse {
+    step_number: u32,
+}
+
+async fn record_llm_call(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<RecordLlmCallRequest>,
+) -> Result<(StatusCode, Json<RecordStepResponse>), (StatusCode, String)> {
+    let store = state.store.lock().map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Lock error: {e}"))
+    })?;
+
+    let session = resolve_session(&store, &id)
+        .map_err(|e| (StatusCode::NOT_FOUND, format!("{e}")))?;
+
+    let timeline_id = match body.timeline_id {
+        Some(ref tid) => tid.clone(),
+        None => store.get_root_timeline(&session.id)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+            .map(|t| t.id)
+            .ok_or_else(|| (StatusCode::NOT_FOUND, "No root timeline".to_string()))?,
+    };
+
+    let step_number = store.next_step_number(&session.id, &timeline_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Counter error: {e}")))?;
+
+    let request_blob = store.blobs.put(&serde_json::to_vec(&body.request_body).unwrap_or_default())
+        .map_err(|e| (StatusCode::INSUFFICIENT_STORAGE, format!("Blob error: {e}")))?;
+    let response_blob = store.blobs.put(&serde_json::to_vec(&body.response_body).unwrap_or_default())
+        .map_err(|e| (StatusCode::INSUFFICIENT_STORAGE, format!("Blob error: {e}")))?;
+
+    let mut step = Step::new_llm_call(&timeline_id, &session.id, step_number, &body.model);
+    step.status = StepStatus::Success;
+    step.duration_ms = body.duration_ms;
+    step.tokens_in = body.tokens_in.unwrap_or(0);
+    step.tokens_out = body.tokens_out.unwrap_or(0);
+    step.request_blob = request_blob;
+    step.response_blob = response_blob;
+    if let Some(ref cid) = body.client_step_id {
+        step.id = cid.clone();
+    }
+
+    match store.create_step(&step) {
+        Ok(()) => {}
+        Err(e) if e.to_string().contains("UNIQUE constraint") => {
+            return Ok((StatusCode::OK, Json(RecordStepResponse { step_number })));
+        }
+        Err(e) => {
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")));
+        }
+    }
+
+    let total_tokens = step.tokens_in + step.tokens_out;
+    let _ = store.update_session_stats(&session.id, step_number, total_tokens);
+
+    let _ = state.event_tx.send(StoreEvent::StepCreated {
+        session_id: session.id,
+        step: Box::new(step),
+    });
+
+    Ok((StatusCode::CREATED, Json(RecordStepResponse { step_number })))
+}
+
+#[derive(Deserialize)]
+struct RecordToolCallRequest {
+    timeline_id: Option<String>,
+    client_step_id: Option<String>,
+    tool_name: String,
+    request_body: serde_json::Value,
+    response_body: serde_json::Value,
+    duration_ms: u64,
+    error: Option<String>,
+}
+
+async fn record_tool_call(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<RecordToolCallRequest>,
+) -> Result<(StatusCode, Json<RecordStepResponse>), (StatusCode, String)> {
+    let store = state.store.lock().map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Lock error: {e}"))
+    })?;
+
+    let session = resolve_session(&store, &id)
+        .map_err(|e| (StatusCode::NOT_FOUND, format!("{e}")))?;
+
+    let timeline_id = match body.timeline_id {
+        Some(ref tid) => tid.clone(),
+        None => store.get_root_timeline(&session.id)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+            .map(|t| t.id)
+            .ok_or_else(|| (StatusCode::NOT_FOUND, "No root timeline".to_string()))?,
+    };
+
+    let step_number = store.next_step_number(&session.id, &timeline_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Counter error: {e}")))?;
+
+    let request_blob = store.blobs.put(&serde_json::to_vec(&body.request_body).unwrap_or_default())
+        .map_err(|e| (StatusCode::INSUFFICIENT_STORAGE, format!("Blob error: {e}")))?;
+    let response_blob = store.blobs.put(&serde_json::to_vec(&body.response_body).unwrap_or_default())
+        .map_err(|e| (StatusCode::INSUFFICIENT_STORAGE, format!("Blob error: {e}")))?;
+
+    let mut step = Step::new_llm_call(&timeline_id, &session.id, step_number, "");
+    step.step_type = StepType::ToolCall;
+    step.status = if body.error.is_some() { StepStatus::Error } else { StepStatus::Success };
+    step.duration_ms = body.duration_ms;
+    step.request_blob = request_blob;
+    step.response_blob = response_blob;
+    step.tool_name = Some(body.tool_name);
+    step.error = body.error;
+    if let Some(ref cid) = body.client_step_id {
+        step.id = cid.clone();
+    }
+
+    match store.create_step(&step) {
+        Ok(()) => {}
+        Err(e) if e.to_string().contains("UNIQUE constraint") => {
+            return Ok((StatusCode::OK, Json(RecordStepResponse { step_number })));
+        }
+        Err(e) => {
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")));
+        }
+    }
+
+    let _ = store.update_session_stats(&session.id, step_number, 0);
+
+    let _ = state.event_tx.send(StoreEvent::StepCreated {
+        session_id: session.id,
+        step: Box::new(step),
+    });
+
+    Ok((StatusCode::CREATED, Json(RecordStepResponse { step_number })))
+}
+
+#[derive(Deserialize)]
+#[allow(dead_code)]
+struct ReplayLookupRequest {
+    replay_context_id: String,
+    request_body: Option<serde_json::Value>,
+    tool_name: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ReplayLookupResponse {
+    hit: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_body: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    step_number: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    active_timeline_id: Option<String>,
+}
+
+async fn replay_lookup_llm(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<ReplayLookupRequest>,
+) -> Result<Json<ReplayLookupResponse>, (StatusCode, String)> {
+    do_replay_lookup(&state, &id, &body, StepType::LlmCall).await
+}
+
+async fn replay_lookup_tool(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<ReplayLookupRequest>,
+) -> Result<Json<ReplayLookupResponse>, (StatusCode, String)> {
+    do_replay_lookup(&state, &id, &body, StepType::ToolCall).await
+}
+
+async fn do_replay_lookup(
+    state: &AppState,
+    session_ref: &str,
+    body: &ReplayLookupRequest,
+    expected_type: StepType,
+) -> Result<Json<ReplayLookupResponse>, (StatusCode, String)> {
+    let store = state.store.lock().map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Lock error: {e}"))
+    })?;
+
+    let ctx = store.get_replay_context(&body.replay_context_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Replay context not found".to_string()))?;
+
+    let (ctx_session_id, ctx_timeline_id, from_step, _current_step) = ctx;
+
+    let session = resolve_session(&store, session_ref)
+        .map_err(|e| (StatusCode::NOT_FOUND, format!("{e}")))?;
+
+    if session.id != ctx_session_id {
+        return Err((StatusCode::BAD_REQUEST, "Replay context belongs to a different session".to_string()));
+    }
+
+    let ordinal = store.advance_replay_context(&body.replay_context_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let target_step = from_step + ordinal;
+
+    let engine = ReplayEngine::new(&store);
+    let steps = engine.get_full_timeline_steps(&ctx_timeline_id, &session.id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let cached_step = steps.iter().find(|s| s.step_number == target_step && s.step_type == expected_type);
+
+    match cached_step {
+        Some(step) if !step.response_blob.is_empty() => {
+            let resp_data = store.blobs.get(&step.response_blob).unwrap_or_default();
+            let resp_json = serde_json::from_slice(&resp_data).unwrap_or(serde_json::Value::Null);
+
+            Ok(Json(ReplayLookupResponse {
+                hit: true,
+                response_body: Some(resp_json),
+                model: Some(step.model.clone()),
+                step_number: Some(step.step_number),
+                active_timeline_id: Some(ctx_timeline_id),
+            }))
+        }
+        _ => Ok(Json(ReplayLookupResponse {
+            hit: false,
+            response_body: None,
+            model: None,
+            step_number: None,
+            active_timeline_id: Some(ctx_timeline_id),
+        })),
+    }
+}
+
+#[derive(Deserialize)]
+struct ForkRequest {
+    at_step: u32,
+    label: String,
+    timeline_id: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ForkResponse {
+    fork_timeline_id: String,
+}
+
+async fn fork_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<ForkRequest>,
+) -> Result<(StatusCode, Json<ForkResponse>), (StatusCode, String)> {
+    let store = state.store.lock().map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Lock error: {e}"))
+    })?;
+
+    let session = resolve_session(&store, &id)
+        .map_err(|e| (StatusCode::NOT_FOUND, format!("{e}")))?;
+
+    let timelines = store.get_timelines(&session.id).map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
+    })?;
+
+    let source_timeline_id = match body.timeline_id {
+        Some(ref tid) => resolve_timeline_ref(&timelines, tid)
+            .map_err(|e| (StatusCode::NOT_FOUND, format!("{e}")))?,
+        None => timelines.iter()
+            .find(|t| t.parent_timeline_id.is_none())
+            .map(|t| t.id.clone())
+            .ok_or_else(|| (StatusCode::NOT_FOUND, "No root timeline".to_string()))?,
+    };
+
+    let engine = ReplayEngine::new(&store);
+    let fork = engine.fork(&session.id, &source_timeline_id, body.at_step, &body.label)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("{e}")))?;
+
+    Ok((StatusCode::CREATED, Json(ForkResponse {
+        fork_timeline_id: fork.id,
+    })))
+}
+
+const MAX_REPLAY_CONTEXTS: u64 = 100;
+
+#[derive(Deserialize)]
+struct CreateReplayContextRequest {
+    session_id: String,
+    from_step: u32,
+    fork_timeline_id: String,
+}
+
+#[derive(Serialize)]
+struct CreateReplayContextResponse {
+    replay_context_id: String,
+    parent_steps_count: u32,
+    fork_at_step: u32,
+}
+
+async fn create_replay_context(
+    State(state): State<AppState>,
+    Json(body): Json<CreateReplayContextRequest>,
+) -> Result<(StatusCode, Json<CreateReplayContextResponse>), (StatusCode, String)> {
+    let store = state.store.lock().map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Lock error: {e}"))
+    })?;
+
+    let count = store.count_replay_contexts().map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
+    })?;
+    if count >= MAX_REPLAY_CONTEXTS {
+        return Err((StatusCode::TOO_MANY_REQUESTS, format!(
+            "Too many active replay contexts ({count}/{MAX_REPLAY_CONTEXTS}). Delete unused ones first."
+        )));
+    }
+
+    let session = resolve_session(&store, &body.session_id)
+        .map_err(|e| (StatusCode::NOT_FOUND, format!("{e}")))?;
+
+    let engine = ReplayEngine::new(&store);
+    let steps = engine.get_full_timeline_steps(&body.fork_timeline_id, &session.id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let parent_steps_count = steps.len() as u32;
+
+    let ctx_id = Uuid::new_v4().to_string();
+    store.create_replay_context(&ctx_id, &session.id, &body.fork_timeline_id, body.from_step)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    Ok((StatusCode::CREATED, Json(CreateReplayContextResponse {
+        replay_context_id: ctx_id,
+        parent_steps_count,
+        fork_at_step: body.from_step,
+    })))
+}
+
+#[derive(Serialize)]
+struct DeleteReplayContextResponse {
+    released: bool,
+}
+
+async fn delete_replay_context_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<DeleteReplayContextResponse>, (StatusCode, String)> {
+    let store = state.store.lock().map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Lock error: {e}"))
+    })?;
+
+    let released = store.delete_replay_context(&id).map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
+    })?;
+
+    Ok(Json(DeleteReplayContextResponse { released }))
 }
