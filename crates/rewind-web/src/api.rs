@@ -796,7 +796,6 @@ async fn get_session_savings(
 // ══════════════════════════════════════════════════════════
 
 #[derive(Deserialize)]
-#[allow(dead_code)]
 struct StartSessionRequest {
     name: String,
     source: Option<String>,
@@ -819,6 +818,9 @@ async fn start_session(
     session.thread_id = body.thread_id;
     if let Some(meta) = body.metadata {
         session.metadata = meta;
+    }
+    if let Some(ref src) = body.source {
+        session.metadata["source_label"] = serde_json::json!(src);
     }
 
     let timeline = Timeline::new_root(&session.id);
@@ -851,9 +853,9 @@ async fn start_session(
 }
 
 #[derive(Deserialize)]
-#[allow(dead_code)]
 struct EndSessionRequest {
     status: String,
+    #[allow(dead_code)]
     error: Option<String>,
 }
 
@@ -920,6 +922,12 @@ async fn record_llm_call(
     let session = resolve_session(&store, &id)
         .map_err(|e| (StatusCode::NOT_FOUND, format!("{e}")))?;
 
+    if session.status != rewind_store::SessionStatus::Recording {
+        return Err((StatusCode::CONFLICT, format!(
+            "Session is '{}', not recording", session.status.as_str()
+        )));
+    }
+
     let timeline_id = match body.timeline_id {
         Some(ref tid) => tid.clone(),
         None => store.get_root_timeline(&session.id)
@@ -927,6 +935,12 @@ async fn record_llm_call(
             .map(|t| t.id)
             .ok_or_else(|| (StatusCode::NOT_FOUND, "No root timeline".to_string()))?,
     };
+
+    if let Some(ref cid) = body.client_step_id
+        && let Ok(Some(existing)) = store.get_step(cid)
+    {
+        return Ok((StatusCode::OK, Json(RecordStepResponse { step_number: existing.step_number })));
+    }
 
     let step_number = store.next_step_number(&session.id, &timeline_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Counter error: {e}")))?;
@@ -947,15 +961,9 @@ async fn record_llm_call(
         step.id = cid.clone();
     }
 
-    match store.create_step(&step) {
-        Ok(()) => {}
-        Err(e) if e.to_string().contains("UNIQUE constraint") => {
-            return Ok((StatusCode::OK, Json(RecordStepResponse { step_number })));
-        }
-        Err(e) => {
-            return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")));
-        }
-    }
+    store.create_step(&step).map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
+    })?;
 
     let total_tokens = step.tokens_in + step.tokens_out;
     let _ = store.update_session_stats(&session.id, step_number, total_tokens);
@@ -991,6 +999,12 @@ async fn record_tool_call(
     let session = resolve_session(&store, &id)
         .map_err(|e| (StatusCode::NOT_FOUND, format!("{e}")))?;
 
+    if session.status != rewind_store::SessionStatus::Recording {
+        return Err((StatusCode::CONFLICT, format!(
+            "Session is '{}', not recording", session.status.as_str()
+        )));
+    }
+
     let timeline_id = match body.timeline_id {
         Some(ref tid) => tid.clone(),
         None => store.get_root_timeline(&session.id)
@@ -998,6 +1012,12 @@ async fn record_tool_call(
             .map(|t| t.id)
             .ok_or_else(|| (StatusCode::NOT_FOUND, "No root timeline".to_string()))?,
     };
+
+    if let Some(ref cid) = body.client_step_id
+        && let Ok(Some(existing)) = store.get_step(cid)
+    {
+        return Ok((StatusCode::OK, Json(RecordStepResponse { step_number: existing.step_number })));
+    }
 
     let step_number = store.next_step_number(&session.id, &timeline_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Counter error: {e}")))?;
@@ -1019,15 +1039,9 @@ async fn record_tool_call(
         step.id = cid.clone();
     }
 
-    match store.create_step(&step) {
-        Ok(()) => {}
-        Err(e) if e.to_string().contains("UNIQUE constraint") => {
-            return Ok((StatusCode::OK, Json(RecordStepResponse { step_number })));
-        }
-        Err(e) => {
-            return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")));
-        }
-    }
+    store.create_step(&step).map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
+    })?;
 
     let _ = store.update_session_stats(&session.id, step_number, 0);
 
@@ -1040,10 +1054,11 @@ async fn record_tool_call(
 }
 
 #[derive(Deserialize)]
-#[allow(dead_code)]
 struct ReplayLookupRequest {
     replay_context_id: String,
+    #[allow(dead_code)]
     request_body: Option<serde_json::Value>,
+    #[allow(dead_code)]
     tool_name: Option<String>,
 }
 
@@ -1104,14 +1119,22 @@ async fn do_replay_lookup(
 
     let target_step = from_step + ordinal;
 
-    let engine = ReplayEngine::new(&store);
-    let steps = engine.get_full_timeline_steps(&ctx_timeline_id, &session.id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
-    let cached_step = steps.iter().find(|s| s.step_number == target_step && s.step_type == expected_type);
+    // O(1) lookup via idx_steps_timeline index instead of fetching all steps.
+    // For forked timelines, check the fork timeline first, then fall back to parent.
+    let cached_step = store.get_step_by_number(&ctx_timeline_id, target_step)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+        .or_else(|| {
+            // Check parent timeline for inherited steps (fork scenario)
+            store.get_timelines(&session.id).ok()
+                .and_then(|timelines| timelines.iter()
+                    .find(|t| t.id == ctx_timeline_id)
+                    .and_then(|t| t.parent_timeline_id.clone()))
+                .and_then(|parent_id| store.get_step_by_number(&parent_id, target_step).ok().flatten())
+        })
+        .filter(|s| s.step_type == expected_type);
 
     match cached_step {
-        Some(step) if !step.response_blob.is_empty() => {
+        Some(ref step) if !step.response_blob.is_empty() => {
             let resp_data = store.blobs.get(&step.response_blob).unwrap_or_default();
             let resp_json = serde_json::from_slice(&resp_data).unwrap_or(serde_json::Value::Null);
 

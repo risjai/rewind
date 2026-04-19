@@ -547,3 +547,424 @@ async fn test_llm_gateway_format_preview() {
     let preview = steps_arr[0]["response_preview"].as_str().unwrap();
     assert!(preview.contains("Mulesoft cluster is healthy"), "LLM Gateway format should produce a useful preview, got: {preview}");
 }
+
+// ── Status Guard ───────────────────────────────────────────
+
+#[tokio::test]
+async fn test_record_on_ended_session_rejected() {
+    let (app, _store, _tmp) = setup();
+
+    let (_, start) = post_json(&app, "/api/sessions/start", json!({"name": "test"})).await;
+    let sid = start["session_id"].as_str().unwrap();
+
+    post_json(&app, &format!("/api/sessions/{sid}/end"), json!({"status": "completed"})).await;
+
+    let (status, _) = post_json(&app, &format!("/api/sessions/{sid}/llm-calls"), json!({
+        "request_body": {},
+        "response_body": {},
+        "model": "gpt-4o",
+        "duration_ms": 100
+    })).await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "recording on ended session should be rejected");
+}
+
+#[tokio::test]
+async fn test_record_tool_on_ended_session_rejected() {
+    let (app, _store, _tmp) = setup();
+
+    let (_, start) = post_json(&app, "/api/sessions/start", json!({"name": "test"})).await;
+    let sid = start["session_id"].as_str().unwrap();
+
+    post_json(&app, &format!("/api/sessions/{sid}/end"), json!({"status": "completed"})).await;
+
+    let (status, _) = post_json(&app, &format!("/api/sessions/{sid}/tool-calls"), json!({
+        "tool_name": "test",
+        "request_body": {},
+        "response_body": {},
+        "duration_ms": 100
+    })).await;
+
+    assert_eq!(status, StatusCode::CONFLICT);
+}
+
+// ── Idempotency (corrected) ────────────────────────────────
+
+#[tokio::test]
+async fn test_idempotent_returns_original_step_number() {
+    let (app, _store, _tmp) = setup();
+
+    let (_, start) = post_json(&app, "/api/sessions/start", json!({"name": "test"})).await;
+    let sid = start["session_id"].as_str().unwrap();
+
+    let step_id = uuid::Uuid::new_v4().to_string();
+
+    let (s1, b1) = post_json(&app, &format!("/api/sessions/{sid}/llm-calls"), json!({
+        "client_step_id": step_id,
+        "request_body": {},
+        "response_body": {"content": "hello"},
+        "model": "gpt-4o",
+        "duration_ms": 100
+    })).await;
+    assert_eq!(s1, StatusCode::CREATED);
+    assert_eq!(b1["step_number"].as_u64().unwrap(), 1);
+
+    // Record another step to advance the counter
+    post_json(&app, &format!("/api/sessions/{sid}/llm-calls"), json!({
+        "request_body": {},
+        "response_body": {},
+        "model": "gpt-4o",
+        "duration_ms": 50
+    })).await;
+
+    // Retry the original -- should return step_number=1 (original), not 3
+    let (s2, b2) = post_json(&app, &format!("/api/sessions/{sid}/llm-calls"), json!({
+        "client_step_id": step_id,
+        "request_body": {},
+        "response_body": {"content": "hello"},
+        "model": "gpt-4o",
+        "duration_ms": 100
+    })).await;
+    assert_eq!(s2, StatusCode::OK);
+    assert_eq!(b2["step_number"].as_u64().unwrap(), 1,
+        "idempotent retry must return the ORIGINAL step_number, not a new one");
+
+    // Verify no counter gap: next step should be 3, not 4
+    let (_, b3) = post_json(&app, &format!("/api/sessions/{sid}/llm-calls"), json!({
+        "request_body": {},
+        "response_body": {},
+        "model": "gpt-4o",
+        "duration_ms": 50
+    })).await;
+    assert_eq!(b3["step_number"].as_u64().unwrap(), 3, "no counter gap from idempotent retry");
+}
+
+// ── Interleaved Replay ─────────────────────────────────────
+
+#[tokio::test]
+async fn test_interleaved_llm_and_tool_replay() {
+    let (app, _store, _tmp) = setup();
+
+    let (_, start) = post_json(&app, "/api/sessions/start", json!({"name": "test"})).await;
+    let sid = start["session_id"].as_str().unwrap();
+    let tid = start["root_timeline_id"].as_str().unwrap();
+
+    // Record: LlmCall, ToolCall, LlmCall (typical ReAct pattern)
+    post_json(&app, &format!("/api/sessions/{sid}/llm-calls"), json!({
+        "request_body": {"messages": [{"role": "user", "content": "hi"}]},
+        "response_body": {"content": "Let me check", "tool_calls": ["get_pods"]},
+        "model": "gpt-4o",
+        "duration_ms": 500
+    })).await;
+
+    post_json(&app, &format!("/api/sessions/{sid}/tool-calls"), json!({
+        "tool_name": "get_pods",
+        "request_body": {"cluster": "mulesoft"},
+        "response_body": {"pods": [{"name": "head-0"}]},
+        "duration_ms": 200
+    })).await;
+
+    post_json(&app, &format!("/api/sessions/{sid}/llm-calls"), json!({
+        "request_body": {"messages": []},
+        "response_body": {"content": "Cluster is healthy"},
+        "model": "gpt-4o",
+        "duration_ms": 400
+    })).await;
+
+    // Create replay context from step 0
+    let (_, ctx) = post_json(&app, "/api/replay-contexts", json!({
+        "session_id": sid,
+        "from_step": 0,
+        "fork_timeline_id": tid
+    })).await;
+    let ctx_id = ctx["replay_context_id"].as_str().unwrap();
+
+    // Interleaved replay: llm, tool, llm -- must match in order
+    let (_, r1) = post_json(&app, &format!("/api/sessions/{sid}/llm-calls/replay-lookup"), json!({
+        "replay_context_id": ctx_id
+    })).await;
+    assert_eq!(r1["hit"].as_bool().unwrap(), true, "step 1 should be LlmCall hit");
+    assert!(r1["response_body"]["content"].as_str().unwrap().contains("Let me check"));
+
+    let (_, r2) = post_json(&app, &format!("/api/sessions/{sid}/tool-calls/replay-lookup"), json!({
+        "replay_context_id": ctx_id
+    })).await;
+    assert_eq!(r2["hit"].as_bool().unwrap(), true, "step 2 should be ToolCall hit");
+
+    let (_, r3) = post_json(&app, &format!("/api/sessions/{sid}/llm-calls/replay-lookup"), json!({
+        "replay_context_id": ctx_id
+    })).await;
+    assert_eq!(r3["hit"].as_bool().unwrap(), true, "step 3 should be LlmCall hit");
+    assert!(r3["response_body"]["content"].as_str().unwrap().contains("Cluster is healthy"));
+
+    // Step 4 doesn't exist
+    let (_, r4) = post_json(&app, &format!("/api/sessions/{sid}/llm-calls/replay-lookup"), json!({
+        "replay_context_id": ctx_id
+    })).await;
+    assert_eq!(r4["hit"].as_bool().unwrap(), false, "step 4 should miss");
+}
+
+// ── Source Label ────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_source_label_stored_in_metadata() {
+    let (app, store, _tmp) = setup();
+
+    let (_, start) = post_json(&app, "/api/sessions/start", json!({
+        "name": "ray-agent-test",
+        "source": "ray-agent"
+    })).await;
+    let sid = start["session_id"].as_str().unwrap();
+
+    let s = store.lock().unwrap();
+    let session = s.get_session(sid).unwrap().unwrap();
+    assert_eq!(session.source, rewind_store::SessionSource::Api);
+    assert_eq!(session.metadata["source_label"].as_str().unwrap(), "ray-agent");
+}
+
+// ── Edge Cases ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_record_llm_on_nonexistent_session() {
+    let (app, _store, _tmp) = setup();
+
+    let (status, _) = post_json(&app, "/api/sessions/nonexistent-id/llm-calls", json!({
+        "request_body": {},
+        "response_body": {},
+        "model": "gpt-4o",
+        "duration_ms": 100
+    })).await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_record_tool_on_nonexistent_session() {
+    let (app, _store, _tmp) = setup();
+
+    let (status, _) = post_json(&app, "/api/sessions/nonexistent-id/tool-calls", json!({
+        "tool_name": "test",
+        "request_body": {},
+        "response_body": {},
+        "duration_ms": 100
+    })).await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_record_with_explicit_timeline_id() {
+    let (app, _store, _tmp) = setup();
+
+    let (_, start) = post_json(&app, "/api/sessions/start", json!({"name": "test"})).await;
+    let sid = start["session_id"].as_str().unwrap();
+    let tid = start["root_timeline_id"].as_str().unwrap();
+
+    let (status, body) = post_json(&app, &format!("/api/sessions/{sid}/llm-calls"), json!({
+        "timeline_id": tid,
+        "request_body": {},
+        "response_body": {"content": "explicit timeline"},
+        "model": "gpt-4o",
+        "duration_ms": 100
+    })).await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["step_number"].as_u64().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn test_fork_at_step_zero_rejected() {
+    let (app, _store, _tmp) = setup();
+
+    let (_, start) = post_json(&app, "/api/sessions/start", json!({"name": "test"})).await;
+    let sid = start["session_id"].as_str().unwrap();
+
+    post_json(&app, &format!("/api/sessions/{sid}/llm-calls"), json!({
+        "request_body": {},
+        "response_body": {},
+        "model": "gpt-4o",
+        "duration_ms": 100
+    })).await;
+
+    let (status, _) = post_json(&app, &format!("/api/sessions/{sid}/fork"), json!({
+        "at_step": 0,
+        "label": "bad"
+    })).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "fork at step 0 should be rejected");
+}
+
+#[tokio::test]
+async fn test_replay_context_nonexistent_session() {
+    let (app, _store, _tmp) = setup();
+
+    let (status, _) = post_json(&app, "/api/replay-contexts", json!({
+        "session_id": "nonexistent",
+        "from_step": 0,
+        "fork_timeline_id": "nonexistent-tl"
+    })).await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_replay_lookup_wrong_session() {
+    let (app, _store, _tmp) = setup();
+
+    let (_, s1) = post_json(&app, "/api/sessions/start", json!({"name": "session-1"})).await;
+    let sid1 = s1["session_id"].as_str().unwrap();
+    let tid1 = s1["root_timeline_id"].as_str().unwrap();
+
+    let (_, s2) = post_json(&app, "/api/sessions/start", json!({"name": "session-2"})).await;
+    let sid2 = s2["session_id"].as_str().unwrap();
+
+    post_json(&app, &format!("/api/sessions/{sid1}/llm-calls"), json!({
+        "request_body": {}, "response_body": {}, "model": "gpt-4o", "duration_ms": 100
+    })).await;
+
+    let (_, ctx) = post_json(&app, "/api/replay-contexts", json!({
+        "session_id": sid1,
+        "from_step": 0,
+        "fork_timeline_id": tid1
+    })).await;
+    let ctx_id = ctx["replay_context_id"].as_str().unwrap();
+
+    let (status, _) = post_json(&app, &format!("/api/sessions/{sid2}/llm-calls/replay-lookup"), json!({
+        "replay_context_id": ctx_id
+    })).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "context belongs to session-1, not session-2");
+}
+
+#[tokio::test]
+async fn test_replay_lookup_nonexistent_context() {
+    let (app, _store, _tmp) = setup();
+
+    let (_, start) = post_json(&app, "/api/sessions/start", json!({"name": "test"})).await;
+    let sid = start["session_id"].as_str().unwrap();
+
+    let (status, _) = post_json(&app, &format!("/api/sessions/{sid}/llm-calls/replay-lookup"), json!({
+        "replay_context_id": "nonexistent-ctx"
+    })).await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_delete_nonexistent_replay_context() {
+    let (app, _store, _tmp) = setup();
+
+    let (status, body) = delete_json(&app, "/api/replay-contexts/nonexistent-id").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["released"].as_bool().unwrap(), false, "should report not found");
+}
+
+#[tokio::test]
+async fn test_end_session_errored_status() {
+    let (app, store, _tmp) = setup();
+
+    let (_, start) = post_json(&app, "/api/sessions/start", json!({"name": "test"})).await;
+    let sid = start["session_id"].as_str().unwrap();
+
+    post_json(&app, &format!("/api/sessions/{sid}/end"), json!({"status": "errored"})).await;
+
+    let s = store.lock().unwrap();
+    let session = s.get_session(sid).unwrap().unwrap();
+    assert_eq!(session.status, SessionStatus::Failed);
+}
+
+#[tokio::test]
+async fn test_end_session_failed_status() {
+    let (app, store, _tmp) = setup();
+
+    let (_, start) = post_json(&app, "/api/sessions/start", json!({"name": "test"})).await;
+    let sid = start["session_id"].as_str().unwrap();
+
+    post_json(&app, &format!("/api/sessions/{sid}/end"), json!({"status": "failed"})).await;
+
+    let s = store.lock().unwrap();
+    let session = s.get_session(sid).unwrap().unwrap();
+    assert_eq!(session.status, SessionStatus::Failed);
+}
+
+#[tokio::test]
+async fn test_end_session_unknown_status_maps_to_completed() {
+    let (app, store, _tmp) = setup();
+
+    let (_, start) = post_json(&app, "/api/sessions/start", json!({"name": "test"})).await;
+    let sid = start["session_id"].as_str().unwrap();
+
+    let (status, _) = post_json(&app, &format!("/api/sessions/{sid}/end"), json!({
+        "status": "banana"
+    })).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let s = store.lock().unwrap();
+    let session = s.get_session(sid).unwrap().unwrap();
+    assert_eq!(session.status, SessionStatus::Completed, "unknown status should map to Completed");
+}
+
+#[tokio::test]
+async fn test_tool_idempotency_with_client_step_id() {
+    let (app, _store, _tmp) = setup();
+
+    let (_, start) = post_json(&app, "/api/sessions/start", json!({"name": "test"})).await;
+    let sid = start["session_id"].as_str().unwrap();
+
+    let step_id = uuid::Uuid::new_v4().to_string();
+
+    let (s1, b1) = post_json(&app, &format!("/api/sessions/{sid}/tool-calls"), json!({
+        "client_step_id": step_id,
+        "tool_name": "get_pods",
+        "request_body": {"cluster": "x"},
+        "response_body": {"pods": []},
+        "duration_ms": 100
+    })).await;
+    assert_eq!(s1, StatusCode::CREATED);
+    assert_eq!(b1["step_number"].as_u64().unwrap(), 1);
+
+    let (s2, b2) = post_json(&app, &format!("/api/sessions/{sid}/tool-calls"), json!({
+        "client_step_id": step_id,
+        "tool_name": "get_pods",
+        "request_body": {"cluster": "x"},
+        "response_body": {"pods": []},
+        "duration_ms": 100
+    })).await;
+    assert_eq!(s2, StatusCode::OK, "duplicate tool call should return 200");
+    assert_eq!(b2["step_number"].as_u64().unwrap(), 1, "should return original step_number");
+}
+
+#[tokio::test]
+async fn test_start_session_with_metadata_preserved() {
+    let (app, store, _tmp) = setup();
+
+    let (_, start) = post_json(&app, "/api/sessions/start", json!({
+        "name": "test",
+        "metadata": {"question": "how is mulesoft?", "cluster": "dev1"}
+    })).await;
+    let sid = start["session_id"].as_str().unwrap();
+
+    let s = store.lock().unwrap();
+    let session = s.get_session(sid).unwrap().unwrap();
+    assert_eq!(session.metadata["question"].as_str().unwrap(), "how is mulesoft?");
+    assert_eq!(session.metadata["cluster"].as_str().unwrap(), "dev1");
+}
+
+#[tokio::test]
+async fn test_source_label_with_metadata_both_preserved() {
+    let (app, store, _tmp) = setup();
+
+    let (_, start) = post_json(&app, "/api/sessions/start", json!({
+        "name": "test",
+        "source": "ray-agent",
+        "metadata": {"env": "dev1"}
+    })).await;
+    let sid = start["session_id"].as_str().unwrap();
+
+    let s = store.lock().unwrap();
+    let session = s.get_session(sid).unwrap().unwrap();
+    assert_eq!(session.metadata["env"].as_str().unwrap(), "dev1");
+    assert_eq!(session.metadata["source_label"].as_str().unwrap(), "ray-agent",
+        "source_label should be added on top of provided metadata");
+}

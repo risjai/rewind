@@ -184,11 +184,26 @@ impl WebServer {
         });
 
         // Periodic stale session cleanup (every 5 minutes)
-        let cleanup_state = drain_state;
+        let cleanup_state = drain_state.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(300)).await;
                 Self::cleanup_stale_sessions(&cleanup_state);
+            }
+        });
+
+        // Periodic replay context TTL cleanup (every 10 minutes, 1h TTL)
+        let ctx_cleanup_state = drain_state;
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+                if let Ok(store) = ctx_cleanup_state.store.lock() {
+                    match store.cleanup_expired_replay_contexts(3600) {
+                        Ok(n) if n > 0 => tracing::info!("Cleaned up {n} expired replay contexts"),
+                        Err(e) => tracing::error!("Replay context cleanup failed: {e}"),
+                        _ => {}
+                    }
+                }
             }
         });
 

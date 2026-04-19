@@ -522,8 +522,21 @@ impl Store {
         Ok(rows.next().transpose()?)
     }
 
+    pub fn get_step_by_number(&self, timeline_id: &str, step_number: u32) -> Result<Option<Step>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, timeline_id, session_id, step_number, step_type, status, created_at, duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error, span_id, tool_name
+             FROM steps WHERE timeline_id = ?1 AND step_number = ?2",
+        )?;
+        let mut rows = stmt.query_map(params![timeline_id, step_number], Self::row_to_step)?;
+        Ok(rows.next().transpose()?)
+    }
+
     // ── Step Counters (Explicit API) ──────────────────────────
 
+    // SAFETY: next_step_number uses separate INSERT + SELECT statements.
+    // This is safe because Store is always accessed through Arc<Mutex<Store>>,
+    // and callers hold the MutexGuard for the entire handler scope.
+    // If locking changes to RwLock, use INSERT ... RETURNING counter instead.
     /// Atomically allocate the next step number for a session+timeline pair.
     pub fn next_step_number(&self, session_id: &str, timeline_id: &str) -> Result<u32> {
         self.conn.execute(
