@@ -78,7 +78,7 @@ export function buildLanes(
   steps: StepResponse[],
   session: Session,
 ): Lane[] {
-  const isHookSession = session.source === 'hooks' || session.source === 'api'
+  const useStepTypeGrouping = spans.length === 0 && steps.length > 0
 
   if (spans.length > 0) {
     const agentEntries = flattenAgentSpans(spans, false)
@@ -116,7 +116,7 @@ export function buildLanes(
 
   if (steps.length === 0) return []
 
-  if (isHookSession) {
+  if (useStepTypeGrouping) {
     const groups: Record<string, StepResponse[]> = {}
     const order: string[] = []
 
