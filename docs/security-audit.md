@@ -248,6 +248,7 @@ The `name` value comes from `sqlite_master` so it's trusted here, but the patter
 
 ### HIGH-03: Sensitive Data Stored Unencrypted at Rest
 
+**Status:** ✅ **Partially fixed in PR #137** — data directory (`~/.rewind/`) now chmod 0700, DB file chmod 0600, blob store dir chmod 0700 on every open. Owner validation rejects dirs owned by other users. Python SDK mirrors the same. Data is still unencrypted (SQLCipher is a future follow-up) but filesystem ACLs now prevent unauthorized reads.
 **Severity:** High
 **Affected component:** `crates/rewind-store/src/blobs.rs`, `crates/rewind-store/src/db.rs`
 **OWASP:** A02:2021 Cryptographic Failures
@@ -636,6 +637,7 @@ This misses: `private_key`, `client_secret`, `aws_secret_access_key`, `bearer`, 
 
 ### LOW-07: `REWIND_DATA` Environment Variable Allows Data Directory Hijack
 
+**Status:** ✅ **Fixed in PR #137** — `Store::open()` now validates that the data directory is owned by the current user (`geteuid` on unix). Directories owned by other users are rejected with a clear error. Group/world-writable directories are auto-tightened to 0700 with a warning. Python SDK logs a warning on uid mismatch.
 **Severity:** Low
 **Affected component:** `crates/rewind-store/src/db.rs:1696` (`dirs_path()`)
 
@@ -751,7 +753,7 @@ Reordered per peer review — fail-closed auth first, then SSRF, then redaction,
 | **1** | Fail closed on non-loopback bind without `--auth-token`. Generate default token on first run. Apply to HTTP + WebSocket + OTLP ingest routes. | CRITICAL-02, MEDIUM-09 (WS) | Medium | ✅ Shipped (PR #133) |
 | **2** | Deny private/link-local/loopback in `export/otel` endpoint resolver | CRITICAL-01 | Small | ✅ Shipped (PR #134) |
 | **3+4** | Blob redaction (request + response), hop-by-hop header denylist, `query_raw` lockdown, `pragma_table_info()` | HIGH-01, HIGH-02, HIGH-06, MEDIUM-06, MEDIUM-08 | Medium | ✅ Shipped (PR #135) |
-| **5** | `chmod 0700 ~/.rewind/` and `0600` on files in `Store::open()`; add owner check on `REWIND_DATA` path | HIGH-03, LOW-07 | Small | ⏳ Planned |
+| **5** | `chmod 0700 ~/.rewind/` and `0600` on files in `Store::open()`; add owner check on `REWIND_DATA` path | HIGH-03, LOW-07 | Small | ✅ Shipped (PR #137) |
 
 ### Next Tier (P2 — ship after the above)
 

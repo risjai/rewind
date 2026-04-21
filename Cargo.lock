@@ -1953,6 +1953,7 @@ version = "0.12.10"
 dependencies = [
  "anyhow",
  "chrono",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",

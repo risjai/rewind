@@ -9,11 +9,46 @@ Zero external dependencies — uses only Python stdlib (sqlite3, hashlib, json).
 
 import hashlib
 import json
+import logging
 import os
 import sqlite3
+import stat
 import threading
 import uuid
 from datetime import datetime, timezone
+
+_log = logging.getLogger("rewind")
+
+
+def _harden_dir(path: str) -> None:
+    """Set directory permissions to 0700 (owner-only). No-op on non-unix."""
+    try:
+        os.chmod(path, stat.S_IRWXU)  # 0700
+    except OSError:
+        pass
+
+
+def _harden_file(path: str) -> None:
+    """Set file permissions to 0600 (owner read/write). No-op on non-unix."""
+    try:
+        if os.path.exists(path):
+            os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)  # 0600
+    except OSError:
+        pass
+
+
+def _validate_owner(path: str) -> None:
+    """Warn if the data directory is owned by a different user."""
+    try:
+        dir_stat = os.stat(path)
+        if dir_stat.st_uid != os.geteuid():
+            _log.warning(
+                "Data directory %s is owned by uid %d but current user is uid %d. "
+                "This may indicate a REWIND_DATA hijack.",
+                path, dir_stat.st_uid, os.geteuid(),
+            )
+    except (OSError, AttributeError):
+        pass  # non-unix or permission error
 
 
 # ── Blob Store ────────────────────────────────────────────────
@@ -24,6 +59,7 @@ class BlobStore:
     def __init__(self, root: str):
         self._root = root
         os.makedirs(root, exist_ok=True)
+        _harden_dir(root)
 
     def put(self, data: bytes) -> str:
         """Store data and return its SHA-256 hex hash."""
@@ -292,9 +328,12 @@ class Store:
         if root is None:
             root = os.environ.get("REWIND_DATA") or os.path.join(os.path.expanduser("~"), ".rewind")
         os.makedirs(root, exist_ok=True)
+        _harden_dir(root)
+        _validate_owner(root)
 
         db_path = os.path.join(root, "rewind.db")
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        _harden_file(db_path)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.execute("PRAGMA busy_timeout=5000")
