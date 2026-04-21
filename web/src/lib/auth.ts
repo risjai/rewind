@@ -16,27 +16,52 @@
 
 const KEY = 'rewind_auth_token'
 
-export function getToken(): string | undefined {
+// In-memory fallback for environments without `localStorage` (Safari private
+// mode, jsdom, embedded webviews). Kept in sync with localStorage when both
+// are available.
+let memoryToken: string | undefined
+
+function storage(): Storage | undefined {
   try {
-    return window.localStorage.getItem(KEY) ?? undefined
+    return typeof window !== 'undefined' ? window.localStorage : undefined
   } catch {
     return undefined
   }
 }
 
+export function getToken(): string | undefined {
+  const s = storage()
+  if (s) {
+    try {
+      return s.getItem(KEY) ?? memoryToken
+    } catch {
+      // fall through
+    }
+  }
+  return memoryToken
+}
+
 export function setToken(token: string): void {
-  try {
-    window.localStorage.setItem(KEY, token)
-  } catch {
-    // Private browsing / storage disabled — silently skip.
+  memoryToken = token
+  const s = storage()
+  if (s) {
+    try {
+      s.setItem(KEY, token)
+    } catch {
+      // Quota exceeded / private mode — memory fallback still holds it.
+    }
   }
 }
 
 export function clearToken(): void {
-  try {
-    window.localStorage.removeItem(KEY)
-  } catch {
-    // no-op
+  memoryToken = undefined
+  const s = storage()
+  if (s) {
+    try {
+      s.removeItem(KEY)
+    } catch {
+      // no-op
+    }
   }
 }
 
