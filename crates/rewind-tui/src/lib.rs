@@ -19,14 +19,16 @@ pub struct TuiApp {
     timeline_id: String,
     steps: Vec<Step>,
     selected_step: usize,
-    scroll_offset: u16,
+    request_scroll: u16,
+    response_scroll: u16,
     panel: Panel,
 }
 
 #[derive(PartialEq)]
 enum Panel {
     Timeline,
-    Detail,
+    Request,
+    Response,
 }
 
 impl TuiApp {
@@ -40,7 +42,8 @@ impl TuiApp {
             timeline_id: timeline_id.to_string(),
             steps,
             selected_step: 0,
-            scroll_offset: 0,
+            request_scroll: 0,
+            response_scroll: 0,
             panel: Panel::Timeline,
         })
     }
@@ -59,40 +62,52 @@ impl TuiApp {
                 }
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => break,
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        if self.panel == Panel::Timeline {
+                    KeyCode::Up | KeyCode::Char('k') => match self.panel {
+                        Panel::Timeline => {
                             if self.selected_step > 0 {
                                 self.selected_step -= 1;
-                                self.scroll_offset = 0;
+                                self.request_scroll = 0;
+                                self.response_scroll = 0;
                             }
-                        } else {
-                            self.scroll_offset = self.scroll_offset.saturating_sub(3);
                         }
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        if self.panel == Panel::Timeline {
+                        Panel::Request => {
+                            self.request_scroll = self.request_scroll.saturating_sub(3);
+                        }
+                        Panel::Response => {
+                            self.response_scroll = self.response_scroll.saturating_sub(3);
+                        }
+                    },
+                    KeyCode::Down | KeyCode::Char('j') => match self.panel {
+                        Panel::Timeline => {
                             if self.selected_step < self.steps.len().saturating_sub(1) {
                                 self.selected_step += 1;
-                                self.scroll_offset = 0;
+                                self.request_scroll = 0;
+                                self.response_scroll = 0;
                             }
-                        } else {
-                            self.scroll_offset += 3;
                         }
-                    }
+                        Panel::Request => {
+                            self.request_scroll += 3;
+                        }
+                        Panel::Response => {
+                            self.response_scroll += 3;
+                        }
+                    },
                     KeyCode::Tab => {
-                        self.panel = if self.panel == Panel::Timeline {
-                            Panel::Detail
-                        } else {
-                            Panel::Timeline
+                        self.panel = match self.panel {
+                            Panel::Timeline => Panel::Request,
+                            Panel::Request => Panel::Response,
+                            Panel::Response => Panel::Timeline,
                         };
                     }
                     KeyCode::Home => {
                         self.selected_step = 0;
-                        self.scroll_offset = 0;
+                        self.request_scroll = 0;
+                        self.response_scroll = 0;
                     }
                     KeyCode::End => {
                         self.selected_step = self.steps.len().saturating_sub(1);
-                        self.scroll_offset = 0;
+                        self.request_scroll = 0;
+                        self.response_scroll = 0;
                     }
                     _ => {}
                 }
@@ -170,7 +185,7 @@ impl TuiApp {
 
     fn draw_timeline_panel(&self, frame: &mut Frame, area: Rect) {
         let border_style = if self.panel == Panel::Timeline {
-            Style::default().fg(Color::Cyan)
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::DarkGray)
         };
@@ -235,15 +250,9 @@ impl TuiApp {
     }
 
     fn draw_detail_panel(&self, frame: &mut Frame, area: Rect) {
-        let border_style = if self.panel == Panel::Detail {
-            Style::default().fg(Color::Cyan)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        };
-
         if self.steps.is_empty() {
             let empty = Paragraph::new("No steps recorded yet.")
-                .block(Block::default().title(" Detail ").borders(Borders::ALL).border_style(border_style));
+                .block(Block::default().title(" Detail ").borders(Borders::ALL).border_style(Style::default().fg(Color::DarkGray)));
             frame.render_widget(empty, area);
             return;
         }
@@ -314,30 +323,43 @@ impl TuiApp {
 
     fn draw_request_panel(&self, frame: &mut Frame, area: Rect, step: &Step) {
         let content = self.format_blob_for_display(&step.request_blob, true);
+        let focused = self.panel == Panel::Request;
+        let border_style = if focused {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
 
         let para = Paragraph::new(content)
             .block(
                 Block::default()
                     .title(Span::styled(" Request / Context Window ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)))
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::DarkGray)),
+                    .border_style(border_style),
             )
             .wrap(Wrap { trim: false })
-            .scroll((self.scroll_offset, 0));
+            .scroll((self.request_scroll, 0));
         frame.render_widget(para, area);
     }
 
     fn draw_response_panel(&self, frame: &mut Frame, area: Rect, step: &Step) {
         let content = self.format_blob_for_display(&step.response_blob, false);
+        let focused = self.panel == Panel::Response;
+        let border_style = if focused {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
 
         let para = Paragraph::new(content)
             .block(
                 Block::default()
                     .title(Span::styled(" Response ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)))
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::DarkGray)),
+                    .border_style(border_style),
             )
-            .wrap(Wrap { trim: false });
+            .wrap(Wrap { trim: false })
+            .scroll((self.response_scroll, 0));
         frame.render_widget(para, area);
     }
 
