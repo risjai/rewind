@@ -6,11 +6,44 @@ import type {
   ExperimentResultDetail, ExperimentComparisonView,
   SpanResponse,
 } from '@/types/api'
+import { getToken, promptForToken, clearToken } from '@/lib/auth'
 
 const BASE = '/api'
 
+function authHeaders(): HeadersInit {
+  const token = getToken()
+  return token ? { Authorization: `Bearer ${token}` } : {}
+}
+
+/**
+ * Send a request with the stored token. On 401, prompt the user for a token
+ * once and retry. If the retry still returns 401, the prompt token was also
+ * wrong — clear it and surface the error.
+ */
+async function request(path: string, init: RequestInit = {}): Promise<Response> {
+  const base = {
+    ...init,
+    headers: {
+      ...(init.headers || {}),
+      ...authHeaders(),
+    },
+  }
+  let res = await fetch(`${BASE}${path}`, base)
+  if (res.status !== 401) return res
+
+  // Re-prompt and retry once.
+  const tok = promptForToken()
+  if (!tok) return res
+  res = await fetch(`${BASE}${path}`, {
+    ...init,
+    headers: { ...(init.headers || {}), Authorization: `Bearer ${tok}` },
+  })
+  if (res.status === 401) clearToken()
+  return res
+}
+
 async function get<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`)
+  const res = await request(path)
   if (!res.ok) {
     const text = await res.text()
     throw new Error(`API error ${res.status}: ${text}`)
@@ -19,7 +52,7 @@ async function get<T>(path: string): Promise<T> {
 }
 
 async function post<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await request(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useCallback, useState } from 'react'
 import type { WsServerMessage, StepResponse } from '@/types/api'
+import { getToken } from '@/lib/auth'
 
 interface UseWebSocketOptions {
   sessionId: string | null
@@ -16,7 +17,12 @@ export function useWebSocket({ sessionId, onStep, onSessionUpdate }: UseWebSocke
     if (wsRef.current?.readyState === WebSocket.OPEN) return
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const ws = new WebSocket(`${protocol}//${window.location.host}/api/ws`)
+    // Browsers can't set Authorization on WebSocket upgrades — the server
+    // accepts ?token= as a fallback scoped to /api/ws only. See
+    // crates/rewind-web/src/auth.rs::extract_token.
+    const token = getToken()
+    const qs = token ? `?token=${encodeURIComponent(token)}` : ''
+    const ws = new WebSocket(`${protocol}//${window.location.host}/api/ws${qs}`)
 
     ws.onopen = () => {
       setConnected(true)

@@ -47,9 +47,14 @@ pub fn resolve_or_generate_token(
     resolve_with_env(cli_override, std::env::var("REWIND_AUTH_TOKEN").ok(), data_dir)
 }
 
+// TODO(security): add `rewind auth rotate` command that deletes
+// ~/.rewind/auth_token and forces regeneration on next non-loopback start.
+// Currently tokens are long-lived static credentials with no expiry or audit.
+// Track in follow-up to audit MEDIUM-10 (to be filed).
+
 /// Test-injectable variant: takes the env value as an explicit argument rather
 /// than reading `std::env`. Production code should prefer `resolve_or_generate_token`.
-pub fn resolve_with_env(
+pub(crate) fn resolve_with_env(
     cli_override: Option<String>,
     env_value: Option<String>,
     data_dir: &Path,
@@ -70,55 +75,83 @@ pub fn resolve_with_env(
         // Empty file — fall through to regenerate.
     }
 
-    // Generate and persist.
     std::fs::create_dir_all(data_dir)?;
     let token = generate_token();
-    std::fs::write(&path, &token)?;
+
+    // Atomic create + chmod: avoid the umask window where `fs::write` creates
+    // the file at 0644 before a later `set_permissions` tightens it.
+    // If another process won the race, re-read instead of overwriting.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(&path, perms)?;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            Ok(mut f) => {
+                f.write_all(token.as_bytes())?;
+                Ok((token, TokenSource::Generated(path)))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Concurrent writer won — read their token.
+                let tok = std::fs::read_to_string(&path)?.trim().to_string();
+                Ok((tok, TokenSource::ExistingFile(path)))
+            }
+            Err(e) => Err(e.into()),
+        }
     }
     #[cfg(not(unix))]
     {
-        tracing::warn!(
-            "Auth token file created at {} — rely on OS ACLs for access control (non-unix)",
-            path.display()
-        );
+        // Non-unix: best-effort atomic create. OS ACLs provide access control.
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut f) => {
+                use std::io::Write;
+                f.write_all(token.as_bytes())?;
+                tracing::warn!(
+                    "Auth token file created at {} — rely on OS ACLs for access control (non-unix)",
+                    path.display()
+                );
+                Ok((token, TokenSource::Generated(path)))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let tok = std::fs::read_to_string(&path)?.trim().to_string();
+                Ok((tok, TokenSource::ExistingFile(path)))
+            }
+            Err(e) => Err(e.into()),
+        }
     }
-    Ok((token, TokenSource::Generated(path)))
 }
 
 fn generate_token() -> String {
     let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 /// Middleware that enforces Bearer-token auth when `AppState::auth_token` is `Some`.
 ///
 /// No-op when the token is `None` (preserving the loopback-unauthenticated default).
-pub async fn auth_middleware<B>(
+///
+/// WebSocket upgrade requests also accept `?token=<token>` as a query-param
+/// fallback (the browser `WebSocket` constructor cannot set headers). Only
+/// honored for `GET /api/ws` — all other routes require the `Authorization` header.
+pub async fn auth_middleware(
     State(state): State<AppState>,
-    req: Request<B>,
+    req: Request<axum::body::Body>,
     next: Next,
-) -> Response
-where
-    B: axum::body::HttpBody<Data = axum::body::Bytes> + Send + 'static,
-    B::Error: std::error::Error + Send + Sync + 'static,
-{
+) -> Response {
     let Some(ref expected) = state.auth_token else {
-        // Auth disabled — pass through.
-        return next.run(transmute_body(req)).await;
+        return next.run(req).await;
     };
 
-    let presented = req
-        .headers()
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .map(|s| s.trim());
+    let presented = extract_token(&req);
 
     let ok = match presented {
         Some(tok) => {
@@ -131,7 +164,7 @@ where
     };
 
     if ok {
-        next.run(transmute_body(req)).await
+        next.run(req).await
     } else {
         (
             StatusCode::UNAUTHORIZED,
@@ -142,16 +175,72 @@ where
     }
 }
 
-/// `Next` expects `Request<Body>`; the incoming generic `Request<B>` needs to be
-/// normalized. We rebuild with `axum::body::Body` to satisfy the middleware
-/// signature used by `from_fn_with_state`.
-fn transmute_body<B>(req: Request<B>) -> Request<axum::body::Body>
-where
-    B: axum::body::HttpBody<Data = axum::body::Bytes> + Send + 'static,
-    B::Error: std::error::Error + Send + Sync + 'static,
-{
-    let (parts, body) = req.into_parts();
-    Request::from_parts(parts, axum::body::Body::new(body))
+/// Extract the presented bearer token from either the `Authorization` header
+/// or, for the WebSocket upgrade path only, the `token` query parameter.
+fn extract_token(req: &Request<axum::body::Body>) -> Option<String> {
+    // 1. Authorization: Bearer <token> (preferred, works for HTTP and WS-with-headers)
+    if let Some(tok) = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(tok.to_string());
+    }
+
+    // 2. ?token=<token> — ONLY on /api/ws because browsers can't send headers
+    //    on a WebSocket upgrade. Accepting this on other routes would expose
+    //    the token in server logs, Referer headers, and browser history.
+    if req.uri().path() == "/api/ws"
+        && let Some(q) = req.uri().query()
+    {
+        for pair in q.split('&') {
+            if let Some(v) = pair.strip_prefix("token=") {
+                let decoded = percent_decode(v);
+                if !decoded.is_empty() {
+                    return Some(decoded);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Minimal percent-decoder for query-param token values. Handles `%XX` and `+`.
+fn percent_decode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                let hi = (bytes[i + 1] as char).to_digit(16);
+                let lo = (bytes[i + 2] as char).to_digit(16);
+                match (hi, lo) {
+                    (Some(h), Some(l)) => {
+                        out.push(((h << 4) | l) as u8 as char);
+                        i += 3;
+                    }
+                    _ => {
+                        out.push(bytes[i] as char);
+                        i += 1;
+                    }
+                }
+            }
+            b => {
+                out.push(b as char);
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -226,4 +315,27 @@ mod tests {
         let meta = std::fs::metadata(dir.path().join("auth_token")).unwrap();
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
     }
+
+    #[test]
+    fn concurrent_token_creation_reads_winner() {
+        // Simulate a race: the second caller sees the file already created by
+        // a concurrent caller and reads its token instead of overwriting.
+        let dir = tempfile::tempdir().unwrap();
+        let (first_tok, first_src) = resolve_with_env(None, None, dir.path()).unwrap();
+        assert!(matches!(first_src, TokenSource::Generated(_)));
+
+        // Second call: file now exists → should read, not regenerate.
+        let (second_tok, second_src) = resolve_with_env(None, None, dir.path()).unwrap();
+        assert_eq!(first_tok, second_tok, "second caller must get the same token");
+        assert!(
+            matches!(second_src, TokenSource::ExistingFile(_)),
+            "expected ExistingFile on second call, got {second_src:?}"
+        );
+    }
+
+    // Note: we can't easily exercise the internal AlreadyExists race branch
+    // (where `path.exists()` returns false but `create_new` then returns
+    // AlreadyExists because another writer won in between) from a single-
+    // threaded unit test. The branch is defended by the if-exists-read-first
+    // early return tested above, plus code review on the OpenOptions block.
 }
