@@ -615,10 +615,11 @@ async fn handle_streaming_response(
             s.blobs.put(&redacted).unwrap_or_default()
         };
 
-        // Also store raw SSE for forensics
+        // Also store raw SSE for forensics (redacted — same pipeline as synthetic)
         {
+            let redacted_raw = redact::redact_secrets(&accumulated_raw);
             let s = store.lock().unwrap();
-            let _ = s.blobs.put(&accumulated_raw); // available via hash if needed
+            let _ = s.blobs.put(&redacted_raw);
         }
 
         let mut step = Step::new_llm_call(&timeline_id, &session_id, step_number, &model_clone);

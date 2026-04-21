@@ -1633,12 +1633,9 @@ impl Store {
 
     /// Execute a read-only SQL query and return column names + rows as strings.
     /// Rejects any statement that is not a SELECT (prevents mutations).
-    /// Execute a read-only SQL query. Only SELECT and WITH are allowed —
-    /// PRAGMA and EXPLAIN were removed because many PRAGMAs mutate state
-    /// (journal_mode, foreign_keys, writable_schema) and EXPLAIN can leak
-    /// internal query plan details. See docs/security-audit.md §HIGH-02.
-    ///
-    /// Use `pragma_table_info()` for schema introspection.
+    /// Execute a read-only SQL query. Only SELECT and WITH are allowed.
+    /// Rejects mutations even when disguised as CTEs (`WITH x AS (...) DELETE`).
+    /// See docs/security-audit.md §HIGH-02.
     pub fn query_raw(&self, sql: &str) -> Result<QueryResult> {
         let trimmed = sql.trim_start();
         let first_word = trimmed.split_whitespace().next().unwrap_or("");
@@ -1653,6 +1650,12 @@ impl Store {
         }
 
         let mut stmt = self.conn.prepare(sql)?;
+
+        // Defense-in-depth: SQLite's own read-only classifier catches
+        // `WITH x AS (...) DELETE/UPDATE/INSERT` which passes the first-word check.
+        if !stmt.readonly() {
+            anyhow::bail!("Query is not read-only (detected mutation via CTE or subquery)");
+        }
         let col_count = stmt.column_count();
         let columns: Vec<String> = (0..col_count)
             .map(|i| stmt.column_name(i).unwrap_or("?").to_string())

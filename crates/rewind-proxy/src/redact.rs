@@ -5,7 +5,7 @@
 //! Redaction is applied **before** writing to the blob store so that secrets
 //! never reach disk. The redacted form is `[REDACTED]`.
 
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 use regex::Regex;
 
 const REPLACEMENT: &str = "[REDACTED]";
@@ -32,9 +32,9 @@ pub const HOP_BY_HOP_HEADERS: &[&str] = &[
     "expect",
 ];
 
-/// Returns true if `header_name` (lowercase) is a hop-by-hop header.
+/// Returns true if `header_name` is a hop-by-hop header (case-insensitive).
 pub fn is_hop_by_hop(header_name: &str) -> bool {
-    HOP_BY_HOP_HEADERS.contains(&header_name)
+    HOP_BY_HOP_HEADERS.contains(&header_name.to_ascii_lowercase().as_str())
 }
 
 /// Redact known secret patterns from a byte blob (JSON or raw text).
@@ -50,19 +50,31 @@ pub fn is_hop_by_hop(header_name: &str) -> bool {
 /// Defense-in-depth: the proxy already requires auth (PR #133) and the blob
 /// store uses restrictive file permissions (PR #5 planned).
 pub fn redact_secrets(data: &[u8]) -> Vec<u8> {
-    static RE: Lazy<Regex> = Lazy::new(|| {
+    static RE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(concat!(
             r"sk-[a-zA-Z0-9]{20,}",            // OpenAI
             r"|AKIA[0-9A-Z]{16}",               // AWS access key ID
             r"|Bearer [a-zA-Z0-9_\-.]{10,}",    // Bearer token
-            r"|[0-9a-f]{40,}",                   // long hex token (SHA-1+)
+            // Dropped the generic `[0-9a-f]{40,}` pattern — it over-redacted
+            // git SHAs, blob store hashes, content-hashes, and request IDs.
+            // The three named patterns above cover the actual threat.
         ))
         .unwrap()
     });
 
     let text = match std::str::from_utf8(data) {
         Ok(s) => s,
-        Err(_) => return data.to_vec(), // binary blob, skip
+        Err(_) => {
+            // Binary/compressed body — regex can't operate on non-UTF-8.
+            // This can happen when the upstream sends Content-Encoding: gzip
+            // and reqwest doesn't decompress (gzip feature not enabled).
+            // Log so it doesn't fail silently.
+            tracing::debug!(
+                len = data.len(),
+                "Skipping secret redaction on non-UTF-8 blob (compressed or binary)"
+            );
+            return data.to_vec();
+        }
     };
 
     RE.replace_all(text, REPLACEMENT).into_owned().into_bytes()
@@ -75,7 +87,7 @@ pub fn redact_secrets(data: &[u8]) -> Vec<u8> {
 /// This handles the case where request bodies echo headers (some LLM SDKs
 /// include auth in the body rather than headers).
 pub fn redact_request_body(data: &[u8]) -> Vec<u8> {
-    static KEY_RE: Lazy<Regex> = Lazy::new(|| {
+    static KEY_RE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(
             r#"(?i)"(api[_-]?key|api[_-]?secret|authorization|x-api-key|secret|password|token|access[_-]?token|refresh[_-]?token|private[_-]?key|client[_-]?secret|aws[_-]?secret[_-]?access[_-]?key|bearer|credentials)"\s*:\s*"[^"]*""#,
         )
@@ -84,7 +96,13 @@ pub fn redact_request_body(data: &[u8]) -> Vec<u8> {
 
     let text = match std::str::from_utf8(data) {
         Ok(s) => s,
-        Err(_) => return data.to_vec(),
+        Err(_) => {
+            tracing::debug!(
+                len = data.len(),
+                "Skipping request body redaction on non-UTF-8 blob"
+            );
+            return data.to_vec();
+        }
     };
 
     KEY_RE
