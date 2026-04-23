@@ -49,10 +49,12 @@ impl Store {
             })?;
 
         // Tighten DB file to 0600 (owner read/write only).
+        // WAL/SHM files (-wal, -shm) are created by SQLite at its default umask;
+        // the parent dir's 0700 is the intended defense for those.
         #[cfg(unix)]
         if db_path.exists() {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o600));
+            std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o600))?;
         }
 
         let blobs = BlobStore::new(&blobs_path)?;

@@ -24,8 +24,8 @@ def _harden_dir(path: str) -> None:
     """Set directory permissions to 0700 (owner-only). No-op on non-unix."""
     try:
         os.chmod(path, stat.S_IRWXU)  # 0700
-    except OSError:
-        pass
+    except OSError as e:
+        _log.debug("chmod 0700 %s failed: %s", path, e)
 
 
 def _harden_file(path: str) -> None:
@@ -33,8 +33,8 @@ def _harden_file(path: str) -> None:
     try:
         if os.path.exists(path):
             os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)  # 0600
-    except OSError:
-        pass
+    except OSError as e:
+        _log.debug("chmod 0600 %s failed: %s", path, e)
 
 
 def _validate_owner(path: str) -> None:
@@ -47,8 +47,10 @@ def _validate_owner(path: str) -> None:
                 "This may indicate a REWIND_DATA hijack.",
                 path, dir_stat.st_uid, os.geteuid(),
             )
-    except (OSError, AttributeError):
-        pass  # non-unix or permission error
+    except AttributeError:
+        pass  # non-unix (no os.geteuid)
+    except OSError as e:
+        _log.debug("owner check on %s failed: %s", path, e)
 
 
 # ── Blob Store ────────────────────────────────────────────────
