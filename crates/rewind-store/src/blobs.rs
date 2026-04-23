@@ -1,6 +1,10 @@
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 use std::fs;
+#[cfg(unix)]
+use std::fs::OpenOptions;
+#[cfg(unix)]
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Content-addressed blob store (like git objects).
@@ -12,6 +16,11 @@ pub struct BlobStore {
 impl BlobStore {
     pub fn new(root: &Path) -> Result<Self> {
         fs::create_dir_all(root)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(root, fs::Permissions::from_mode(0o700));
+        }
         Ok(BlobStore {
             root: root.to_path_buf(),
         })
@@ -26,6 +35,17 @@ impl BlobStore {
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)?;
             }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                let mut f = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&path)?;
+                f.write_all(data)?;
+            }
+            #[cfg(not(unix))]
             fs::write(&path, data)?;
         }
 

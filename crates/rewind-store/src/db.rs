@@ -15,6 +15,20 @@ impl Store {
     pub fn open(root: &Path) -> Result<Self> {
         std::fs::create_dir_all(root)?;
 
+        // Harden directory and file permissions. See docs/security-audit.md §HIGH-03.
+        // ~/.rewind/ contains full LLM conversations that may include API keys, PII,
+        // and proprietary code — restrict to owner-only access.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir_perms = std::fs::Permissions::from_mode(0o700);
+            std::fs::set_permissions(root, dir_perms)?;
+
+            // Validate directory ownership: refuse to use a data dir owned by
+            // another user (guards against REWIND_DATA hijack — see LOW-07).
+            validate_owner(root)?;
+        }
+
         let db_path = root.join("rewind.db");
         let blobs_path = root.join("objects");
 
@@ -33,6 +47,15 @@ impl Store {
                     path = db_path.display(), e = e
                 )
             })?;
+
+        // Tighten DB file to 0600 (owner read/write only).
+        // WAL/SHM files (-wal, -shm) are created by SQLite at its default umask;
+        // the parent dir's 0700 is the intended defense for those.
+        #[cfg(unix)]
+        if db_path.exists() {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o600))?;
+        }
 
         let blobs = BlobStore::new(&blobs_path)?;
 
@@ -1738,6 +1761,38 @@ impl Store {
 pub struct QueryResult {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<String>>,
+}
+
+/// Validate that the data directory is owned by the current user and not
+/// world- or group-writable. Guards against `REWIND_DATA` hijack (see
+/// docs/security-audit.md §LOW-07).
+#[cfg(unix)]
+fn validate_owner(path: &Path) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let meta = std::fs::metadata(path)?;
+    let dir_uid = meta.uid();
+    let my_uid = unsafe { libc::geteuid() };
+    if dir_uid != my_uid {
+        anyhow::bail!(
+            "Data directory {} is owned by uid {} but current user is uid {}. \
+             Refusing to use a directory owned by another user (SSRF/hijack risk). \
+             Delete the directory or fix ownership.",
+            path.display(),
+            dir_uid,
+            my_uid,
+        );
+    }
+    let mode = meta.mode();
+    if mode & 0o022 != 0 {
+        tracing::warn!(
+            path = %path.display(),
+            mode = format!("{:o}", mode & 0o777),
+            "Data directory is group- or world-writable — tightening to 0700"
+        );
+        let perms = std::fs::Permissions::from_mode(0o700);
+        std::fs::set_permissions(path, perms)?;
+    }
+    Ok(())
 }
 
 /// Resolve the Rewind data directory, honoring `REWIND_DATA` then `$HOME/.rewind`.
