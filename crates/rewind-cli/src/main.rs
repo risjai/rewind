@@ -15,6 +15,10 @@ use std::net::{SocketAddr, TcpStream};
 
 const DEFAULT_WEB_PORT: u16 = 4800;
 
+// Single source of truth so the clap default and the warn-skip logic in
+// `warn_if_label_overridden` stay in sync.
+const DEFAULT_REPLAY_LABEL: &str = "replayed";
+
 #[derive(Parser)]
 #[command(
     name = "rewind",
@@ -108,9 +112,15 @@ enum Commands {
         #[arg(short, long, default_value = "8443")]
         port: u16,
 
-        /// Label for the forked timeline
-        #[arg(short, long, default_value = "replayed")]
+        /// Label for the forked timeline. Ignored when --fork-id is provided.
+        #[arg(short, long, default_value = DEFAULT_REPLAY_LABEL)]
         label: String,
+
+        /// Reuse an existing fork instead of creating a new one. Set by MCP /
+        /// web UI flows that pre-create a fork so the streaming replay lands
+        /// on the timeline the user is watching. See issue #140.
+        #[arg(long)]
+        fork_id: Option<String>,
     },
 
     /// Fork a timeline at a specific step
@@ -679,7 +689,7 @@ async fn main() -> Result<()> {
         Commands::Show { session, flat } => cmd_show(session, flat),
         Commands::Threads => cmd_threads(),
         Commands::Thread { thread_id } => cmd_thread(thread_id),
-        Commands::Replay { session, from, upstream, port, label } => cmd_replay(session, from, upstream, port, label).await,
+        Commands::Replay { session, from, upstream, port, label, fork_id } => cmd_replay(session, from, upstream, port, label, fork_id).await,
         Commands::Fork { session, at, label } => cmd_fork(session, at, label),
         Commands::Diff { session, left, right } => cmd_diff(session, left, right),
         Commands::Snapshot { directory, label } => cmd_snapshot(directory, label),
@@ -854,7 +864,7 @@ fn resolve_web_auth_token(
     Ok(Some(token))
 }
 
-async fn cmd_replay(session_ref: String, from_step: u32, upstream: String, port: u16, label: String) -> Result<()> {
+async fn cmd_replay(session_ref: String, from_step: u32, upstream: String, port: u16, label: String, fork_id: Option<String>) -> Result<()> {
     let store = Store::open_default()?;
     let session = resolve_session(&store, &session_ref)?;
     let timeline = store.get_root_timeline(&session.id)?
@@ -871,8 +881,20 @@ async fn cmd_replay(session_ref: String, from_step: u32, upstream: String, port:
         );
     }
 
-    // Create a forked timeline
-    let fork = engine.fork(&session.id, &timeline.id, from_step, &label)?;
+    // Reuse an existing fork when the caller pre-created one (issue #140 —
+    // MCP / web UI both create a fork before handing the user this command;
+    // without --fork-id we'd silently create a second fork and the user's UI
+    // would end up watching the empty first one).
+    let fork = if let Some(id) = fork_id {
+        let timelines = store.get_timelines(&session.id)?;
+        let existing = resolve_existing_fork(&timelines, &id, &session.id, from_step)?;
+        if let Some(msg) = label_override_warning(&label, &existing.label) {
+            eprintln!("{} {}", "warning:".yellow(), msg);
+        }
+        existing
+    } else {
+        engine.fork(&session.id, &timeline.id, from_step, &label)?
+    };
 
     // Start proxy in fork-and-execute mode
     let proxy = ProxyServer::new_fork_execute(
@@ -903,6 +925,66 @@ async fn cmd_replay(session_ref: String, from_step: u32, upstream: String, port:
 
     let addr: SocketAddr = format!("127.0.0.1:{}", port).parse()?;
     proxy.run(addr).await
+}
+
+/// Truncate an id for display in error messages without panicking on
+/// non-ASCII input. Byte-slicing (`&s[..8]`) would panic at a char boundary
+/// if the id ever contains multi-byte codepoints.
+fn short_id(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
+/// Find a pre-created fork by id and verify it was forked at the expected step.
+///
+/// Extracted from `cmd_replay` so it can be unit-tested without spinning up a
+/// `Store`. Returns an error with a user-friendly message for the four cases
+/// that matter (issue #140): id missing, cross-session id, fork point
+/// mismatch, or caller pointing at the root timeline.
+fn resolve_existing_fork(
+    timelines: &[Timeline],
+    fork_id: &str,
+    expected_session_id: &str,
+    expected_from_step: u32,
+) -> Result<Timeline> {
+    let existing = timelines.iter()
+        .find(|t| t.id == fork_id)
+        .with_context(|| format!(
+            "--fork-id {} not found in this session's timelines",
+            short_id(fork_id),
+        ))?;
+    // Defensive — the caller pre-filters by session, so this is belt-and-
+    // suspenders against a future refactor that passes an unfiltered list.
+    if existing.session_id != expected_session_id {
+        bail!(
+            "--fork-id {} belongs to a different session and cannot be replayed here.",
+            short_id(fork_id),
+        );
+    }
+    if existing.fork_at_step != Some(expected_from_step) {
+        bail!(
+            "--fork-id {} was forked at step {:?}, but --from is {}. \
+             The fork point must match the existing fork.",
+            short_id(fork_id), existing.fork_at_step, expected_from_step,
+        );
+    }
+    Ok(existing.clone())
+}
+
+/// Returns a warning message when the user passes a non-default `--label`
+/// while reusing an existing fork. The fork's label was decided at creation;
+/// we can't change it here, so the user's override would be silently dropped
+/// without this nudge. `None` means "no warning needed".
+///
+/// Returning the string (rather than printing directly) keeps the helper
+/// pure so tests can assert the warning fires on the right inputs.
+fn label_override_warning(user_label: &str, existing_label: &str) -> Option<String> {
+    if user_label.is_empty() || user_label == DEFAULT_REPLAY_LABEL || user_label == existing_label {
+        return None;
+    }
+    Some(format!(
+        "--label '{}' ignored — reusing existing fork labelled '{}'.",
+        user_label, existing_label,
+    ))
 }
 
 fn cmd_sessions() -> Result<()> {
@@ -4269,3 +4351,95 @@ fn cmd_import_from_langfuse(args: LangfuseImportArgs) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+mod replay_fork_id_tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn make_timeline(id: &str, session_id: &str, parent: Option<&str>, fork_at: Option<u32>, label: &str) -> Timeline {
+        Timeline {
+            id: id.to_string(),
+            session_id: session_id.to_string(),
+            parent_timeline_id: parent.map(|s| s.to_string()),
+            fork_at_step: fork_at,
+            created_at: Utc::now(),
+            label: label.to_string(),
+        }
+    }
+
+    #[test]
+    fn resolves_an_existing_fork_when_ids_and_from_step_match() {
+        let timelines = vec![
+            make_timeline("root", "s-1", None, None, "main"),
+            make_timeline("fork-a", "s-1", Some("root"), Some(3), "replay-from-3"),
+        ];
+        let fork = resolve_existing_fork(&timelines, "fork-a", "s-1", 3).unwrap();
+        assert_eq!(fork.id, "fork-a");
+        assert_eq!(fork.fork_at_step, Some(3));
+    }
+
+    #[test]
+    fn errors_when_fork_id_does_not_exist_in_session() {
+        let timelines = vec![make_timeline("root", "s-1", None, None, "main")];
+        let err = resolve_existing_fork(&timelines, "nonexistent", "s-1", 3).unwrap_err();
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("not found"), "expected not-found error, got: {msg}");
+    }
+
+    #[test]
+    fn errors_when_fork_at_step_does_not_match_from_step() {
+        let timelines = vec![
+            make_timeline("root", "s-1", None, None, "main"),
+            make_timeline("fork-a", "s-1", Some("root"), Some(5), "replay-from-5"),
+        ];
+        let err = resolve_existing_fork(&timelines, "fork-a", "s-1", 3).unwrap_err();
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("fork point must match"), "got: {msg}");
+    }
+
+    #[test]
+    fn errors_when_fork_at_step_is_none_root_timeline() {
+        let timelines = vec![make_timeline("root", "s-1", None, None, "main")];
+        let err = resolve_existing_fork(&timelines, "root", "s-1", 3).unwrap_err();
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("fork point must match"), "got: {msg}");
+    }
+
+    #[test]
+    fn errors_when_fork_belongs_to_a_different_session() {
+        // Belt-and-suspenders: if a future refactor passes an unfiltered
+        // timeline list, we still reject cross-session ids loudly.
+        let timelines = vec![
+            make_timeline("fork-other", "other-session", Some("root"), Some(3), "replay-from-3"),
+        ];
+        let err = resolve_existing_fork(&timelines, "fork-other", "s-1", 3).unwrap_err();
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("different session"), "got: {msg}");
+    }
+
+    #[test]
+    fn short_id_does_not_panic_on_multibyte_input() {
+        // 8 bytes of UTF-8 span fewer than 8 chars; naive byte-slicing (&s[..8])
+        // would panic at a char boundary.
+        let weird = "π_🦀_fork_id";
+        let truncated = short_id(weird);
+        assert!(truncated.chars().count() <= 8);
+        assert!(weird.starts_with(&truncated));
+    }
+
+    #[test]
+    fn label_override_warning_skips_empty_default_and_matching_labels() {
+        assert_eq!(label_override_warning("", "replay-from-3"), None);
+        assert_eq!(label_override_warning(DEFAULT_REPLAY_LABEL, "replay-from-3"), None);
+        assert_eq!(label_override_warning("replay-from-3", "replay-from-3"), None);
+    }
+
+    #[test]
+    fn label_override_warning_fires_on_user_override() {
+        let msg = label_override_warning("custom", "replay-from-3")
+            .expect("expected a warning for user override");
+        assert!(msg.contains("'custom'"));
+        assert!(msg.contains("'replay-from-3'"));
+        assert!(msg.contains("ignored"));
+    }
+}

@@ -69,8 +69,9 @@ describe('ReplaySetupModal', () => {
     await waitFor(() => expect(forkMock).toHaveBeenCalled())
 
     // Instructions panel renders the CLI command, uses an 8-char session-id prefix
-    // (matches MCP tool format), includes the step number and label.
-    const cmdElement = await screen.findByText(/rewind replay abcdef12 --from 4 --label replay-from-4/)
+    // (matches MCP tool format), includes the step number and the pre-created
+    // fork id (--fork-id) so the CLI reuses it instead of double-forking (issue #140).
+    const cmdElement = await screen.findByText(/rewind replay abcdef12 --from 4 --fork-id tl-replay-1/)
     expect(cmdElement).toBeInTheDocument()
 
     // Cached-steps explainer is present (matches MCP's `message` format).
@@ -102,7 +103,7 @@ describe('ReplaySetupModal', () => {
     fireEvent.click(copyBtn)
 
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(
-      'rewind replay deadbeef --from 2 --label replay-from-2',
+      'rewind replay deadbeef --from 2 --fork-id tl-replay-2',
     ))
   })
 
