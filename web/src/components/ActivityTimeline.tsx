@@ -1,6 +1,6 @@
 import { useMemo, useRef, useCallback, useReducer, useEffect, useState } from 'react'
 import { cn, formatDuration, formatTokens } from '@/lib/utils'
-import { Brain, Wrench, ClipboardList, MessageSquare, Radio } from 'lucide-react'
+import { Brain, Wrench, ClipboardList, MessageSquare, Radio, GitBranch, Play } from 'lucide-react'
 import type { SpanResponse, StepResponse, Session } from '@/types/api'
 
 // --- Lane building logic (exported for testing) ---
@@ -284,6 +284,8 @@ interface ActivityTimelineProps {
   onSelectStep: (id: string | null) => void
   isLive?: boolean
   isCursor?: boolean
+  onFork?: (step: StepResponse) => void
+  onReplay?: (step: StepResponse) => void
 }
 
 const LANE_HEIGHT = 36
@@ -297,6 +299,8 @@ export function ActivityTimeline({
   onSelectStep,
   isLive,
   isCursor,
+  onFork,
+  onReplay,
 }: ActivityTimelineProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const laneAreaRef = useRef<HTMLDivElement>(null)
@@ -621,43 +625,74 @@ export function ActivityTimeline({
                     const isError = step.status === 'error'
 
                     return (
-                      <button
+                      <div
                         key={step.id}
-                        onClick={() => handleBarClick(step.id)}
-                        aria-label={`Step ${step.step_number}: ${step.tool_name || step.step_type_label}`}
-                        title={[
-                          step.tool_name || step.step_type_label,
-                          step.model,
-                          formatDuration(step.duration_ms),
-                          step.tokens_in + step.tokens_out > 0
-                            ? `${formatTokens(step.tokens_in + step.tokens_out)} tok`
-                            : null,
-                          step.error ? `Error: ${step.error}` : null,
-                        ].filter(Boolean).join(' · ')}
-                        className={cn(
-                          'absolute top-1 bottom-1 rounded-sm transition-colors',
-                          'flex items-center gap-0.5 overflow-hidden px-0.5',
-                          isSelected
-                            ? 'ring-2 ring-cyan-400 brightness-125 z-20'
-                            : 'hover:brightness-110 z-10',
-                          isError ? 'ring-1 ring-red-500/60' : '',
-                          lane.color,
-                          isError ? 'opacity-80' : 'opacity-70',
-                          isSelected && 'opacity-100',
-                        )}
+                        className="group absolute top-1 bottom-1"
                         style={{
                           left: `${viewLeft}%`,
                           width: `${viewWidth}%`,
                           minWidth: 4,
                         }}
                       >
-                        {viewWidth > 3 && <StepTypeIcon type={step.step_type} />}
-                        {viewWidth > 8 && (
-                          <span className="text-[9px] text-white/80 truncate">
-                            {step.tool_name || step.step_type_label}
-                          </span>
+                        <button
+                          onClick={() => handleBarClick(step.id)}
+                          aria-label={`Step ${step.step_number}: ${step.tool_name || step.step_type_label}`}
+                          title={[
+                            step.tool_name || step.step_type_label,
+                            step.model,
+                            formatDuration(step.duration_ms),
+                            step.tokens_in + step.tokens_out > 0
+                              ? `${formatTokens(step.tokens_in + step.tokens_out)} tok`
+                              : null,
+                            step.error ? `Error: ${step.error}` : null,
+                          ].filter(Boolean).join(' · ')}
+                          className={cn(
+                            'absolute inset-0 rounded-sm transition-colors',
+                            'flex items-center gap-0.5 overflow-hidden px-0.5',
+                            isSelected
+                              ? 'ring-2 ring-cyan-400 brightness-125 z-20'
+                              : 'hover:brightness-110 z-10',
+                            isError ? 'ring-1 ring-red-500/60' : '',
+                            lane.color,
+                            isError ? 'opacity-80' : 'opacity-70',
+                            isSelected && 'opacity-100',
+                          )}
+                        >
+                          {viewWidth > 3 && <StepTypeIcon type={step.step_type} />}
+                          {viewWidth > 8 && (
+                            <span className="text-[9px] text-white/80 truncate">
+                              {step.tool_name || step.step_type_label}
+                            </span>
+                          )}
+                        </button>
+                        {(onFork || onReplay) && (
+                          // Overlay sits INSIDE the bar wrapper (within lane bounds) so it
+                          // isn't clipped by `overflow-hidden` on the bar-area and swim-lane
+                          // containers. `group-focus-within` reveals it for keyboard users.
+                          <div className="hidden group-hover:flex group-focus-within:flex absolute top-0 right-0 z-30 gap-0.5">
+                            {onFork && (
+                              <button
+                                onClick={() => onFork(step)}
+                                aria-label={`Fork from step ${step.step_number}`}
+                                title={`Fork from step ${step.step_number}`}
+                                className="flex items-center gap-0.5 px-1 py-0.5 rounded text-[9px] bg-amber-950/95 text-amber-300 border border-amber-800/60 hover:bg-amber-900/95 focus:outline-none focus:ring-1 focus:ring-amber-500 transition-colors"
+                              >
+                                <GitBranch size={9} />
+                              </button>
+                            )}
+                            {onReplay && (
+                              <button
+                                onClick={() => onReplay(step)}
+                                aria-label={`Set up replay from step ${step.step_number}`}
+                                title={`Set up replay from step ${step.step_number}`}
+                                className="flex items-center gap-0.5 px-1 py-0.5 rounded text-[9px] bg-cyan-950/95 text-cyan-300 border border-cyan-800/60 hover:bg-cyan-900/95 focus:outline-none focus:ring-1 focus:ring-cyan-500 transition-colors"
+                              >
+                                <Play size={9} />
+                              </button>
+                            )}
+                          </div>
                         )}
-                      </button>
+                      </div>
                     )
                   })}
                 </div>

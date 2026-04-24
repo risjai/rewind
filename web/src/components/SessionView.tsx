@@ -20,6 +20,7 @@ export function SessionView({ sessionId }: { sessionId: string }) {
   const [autoFollow, setAutoFollow] = useState(true)
   const [exportOpen, setExportOpen] = useState(false)
   const [forkAtStep, setForkAtStep] = useState<number | null>(null)
+  const [modalState, setModalState] = useState<{ mode: 'fork' | 'replay'; step: number } | null>(null)
   const [viewMode, setViewMode] = useState<'timeline' | 'list'>('timeline')
 
   const { data: detail, isLoading: detailLoading } = useQuery({
@@ -191,6 +192,8 @@ export function SessionView({ sessionId }: { sessionId: string }) {
                 onSelectStep={selectStep}
                 isLive={isLive}
                 isCursor={isCursor}
+                onFork={(step) => setModalState({ mode: 'fork', step: step.step_number })}
+                onReplay={(step) => setModalState({ mode: 'replay', step: step.step_number })}
               />
             )}
           </div>
@@ -245,7 +248,7 @@ export function SessionView({ sessionId }: { sessionId: string }) {
         timelines={detail?.timelines ?? []}
       />
 
-      {/* Fork Modal (Phase 1: fork only) */}
+      {/* Fork Modal (list view StepTimeline trigger) */}
       <ForkReplayModal
         isOpen={forkAtStep !== null}
         onClose={() => setForkAtStep(null)}
@@ -253,6 +256,16 @@ export function SessionView({ sessionId }: { sessionId: string }) {
         sessionId={sessionId}
         timelineId={timelineId}
         atStep={forkAtStep}
+      />
+
+      {/* Fork/Replay Modal (timeline view ActivityTimeline trigger) */}
+      <ForkReplayModal
+        isOpen={modalState !== null}
+        onClose={() => setModalState(null)}
+        mode={modalState?.mode ?? 'fork'}
+        sessionId={sessionId}
+        timelineId={timelineId}
+        atStep={modalState?.step ?? null}
       />
     </div>
   )

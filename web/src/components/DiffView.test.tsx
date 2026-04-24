@@ -1,7 +1,20 @@
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import type { TimelineDiff, StepDiffEntry } from '@/types/api'
+import type { TimelineDiff, StepDiffEntry, Timeline } from '@/types/api'
+import { pickDefaultDiffPair } from './DiffView'
+
+function makeTimeline(overrides: Partial<Timeline> = {}): Timeline {
+  return {
+    id: 'tl',
+    session_id: 's-1',
+    parent_timeline_id: null,
+    fork_at_step: null,
+    created_at: '2026-04-14T10:00:00Z',
+    label: 'main',
+    ...overrides,
+  }
+}
 
 // We test the DiffTimeline sub-component indirectly by importing DiffView
 // and providing mock data. Since DiffView uses react-query, we need a provider.
@@ -79,6 +92,43 @@ describe('DiffTimeline data model', () => {
     for (const type of ['Same', 'Modified', 'LeftOnly', 'RightOnly']) {
       expect(DIFF_COLORS[type]).toBeDefined()
     }
+  })
+})
+
+describe('pickDefaultDiffPair (Phase 3 auto-pick)', () => {
+  const root = makeTimeline({ id: 'root', label: 'main' })
+  const fork1 = makeTimeline({ id: 'fork1', parent_timeline_id: 'root', fork_at_step: 3, label: 'fork-at-3' })
+  const fork2 = makeTimeline({ id: 'fork2', parent_timeline_id: 'root', fork_at_step: 5, label: 'fork-at-5' })
+
+  it('returns null when fewer than two timelines exist', () => {
+    expect(pickDefaultDiffPair([], null)).toBeNull()
+    expect(pickDefaultDiffPair([root], null)).toBeNull()
+  })
+
+  it('picks active-fork vs its parent when a fork is selected', () => {
+    const picked = pickDefaultDiffPair([root, fork1, fork2], 'fork2')
+    expect(picked).toEqual({ leftId: 'root', rightId: 'fork2' })
+  })
+
+  it('falls back to root vs first fork when selected timeline is the root', () => {
+    const picked = pickDefaultDiffPair([root, fork1, fork2], 'root')
+    expect(picked).toEqual({ leftId: 'root', rightId: 'fork1' })
+  })
+
+  it('falls back to root vs first fork when nothing is selected', () => {
+    const picked = pickDefaultDiffPair([root, fork1, fork2], null)
+    expect(picked).toEqual({ leftId: 'root', rightId: 'fork1' })
+  })
+
+  it('returns null when only roots exist (no fork to diff)', () => {
+    const other = makeTimeline({ id: 'other', label: 'other' })
+    expect(pickDefaultDiffPair([root, other], null)).toBeNull()
+  })
+
+  it('handles forks of forks — picks active against its immediate parent', () => {
+    const forkOfFork = makeTimeline({ id: 'fof', parent_timeline_id: 'fork1', fork_at_step: 7, label: 'fork-of-fork' })
+    const picked = pickDefaultDiffPair([root, fork1, forkOfFork], 'fof')
+    expect(picked).toEqual({ leftId: 'fork1', rightId: 'fof' })
   })
 })
 

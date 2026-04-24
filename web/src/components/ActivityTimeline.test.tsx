@@ -609,3 +609,86 @@ describe('buildLanes does not mutate input arrays', () => {
     expect(steps[1].id).toBe(original[1].id)
   })
 })
+
+describe('ActivityTimeline fork/replay bar affordance (Phase 3)', () => {
+  const steps: StepResponse[] = [
+    makeStep({ id: 'a', step_number: 1, created_at: '2026-04-14T10:00:00Z', duration_ms: 1000 }),
+    makeStep({ id: 'b', step_number: 2, created_at: '2026-04-14T10:00:01Z', duration_ms: 2000 }),
+  ]
+  const spanWithSteps = makeSpan({ id: 'agent-1', name: 'main-agent', steps })
+  const session = makeSession()
+
+  it('does not render fork/replay icons when callbacks are not provided', () => {
+    render(
+      <ActivityTimeline spans={[spanWithSteps]} steps={steps} session={session} selectedStepId={null} onSelectStep={() => {}} />
+    )
+    expect(screen.queryByRole('button', { name: /fork from step/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /set up replay from step/i })).toBeNull()
+  })
+
+  it('renders aria-labelled fork + replay buttons when callbacks are provided', () => {
+    render(
+      <ActivityTimeline
+        spans={[spanWithSteps]}
+        steps={steps}
+        session={session}
+        selectedStepId={null}
+        onSelectStep={() => {}}
+        onFork={() => {}}
+        onReplay={() => {}}
+      />
+    )
+    // Each bar gets both buttons — two bars = two fork + two replay.
+    expect(screen.getAllByRole('button', { name: /fork from step 1/i })).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: /fork from step 2/i })).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: /set up replay from step 1/i })).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: /set up replay from step 2/i })).toHaveLength(1)
+  })
+
+  it('invokes onFork with the correct step without triggering onSelectStep', () => {
+    const onFork = vi.fn()
+    const onReplay = vi.fn()
+    const onSelectStep = vi.fn()
+    render(
+      <ActivityTimeline
+        spans={[spanWithSteps]}
+        steps={steps}
+        session={session}
+        selectedStepId={null}
+        onSelectStep={onSelectStep}
+        onFork={onFork}
+        onReplay={onReplay}
+      />
+    )
+    const forkBtn = screen.getByRole('button', { name: /fork from step 2/i })
+    fireEvent.click(forkBtn)
+    expect(onFork).toHaveBeenCalledTimes(1)
+    expect(onFork).toHaveBeenCalledWith(expect.objectContaining({ id: 'b', step_number: 2 }))
+    // Siblings don't bubble clicks to the bar button, so selection shouldn't fire.
+    expect(onSelectStep).not.toHaveBeenCalled()
+    expect(onReplay).not.toHaveBeenCalled()
+  })
+
+  it('invokes onReplay with the correct step without triggering onSelectStep', () => {
+    const onFork = vi.fn()
+    const onReplay = vi.fn()
+    const onSelectStep = vi.fn()
+    render(
+      <ActivityTimeline
+        spans={[spanWithSteps]}
+        steps={steps}
+        session={session}
+        selectedStepId={null}
+        onSelectStep={onSelectStep}
+        onFork={onFork}
+        onReplay={onReplay}
+      />
+    )
+    const replayBtn = screen.getByRole('button', { name: /set up replay from step 1/i })
+    fireEvent.click(replayBtn)
+    expect(onReplay).toHaveBeenCalledTimes(1)
+    expect(onReplay).toHaveBeenCalledWith(expect.objectContaining({ id: 'a', step_number: 1 }))
+    expect(onSelectStep).not.toHaveBeenCalled()
+    expect(onFork).not.toHaveBeenCalled()
+  })
+})
