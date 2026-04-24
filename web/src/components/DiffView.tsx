@@ -13,9 +13,15 @@ import type { Timeline, TimelineDiff, StepDiffEntry } from '@/types/api'
 export function parseDiffHash(hash: string): { leftId: string; rightId: string } | null {
   const parts = hash.replace(/^#\/?/, '').split('/')
   if (parts[0] !== 'diff') return null
-  const leftId = parts[2]
-  const rightId = parts[3]
-  return leftId && rightId ? { leftId, rightId } : null
+  const leftRaw = parts[2]
+  const rightRaw = parts[3]
+  if (!leftRaw || !rightRaw) return null
+  // Mirror TimelineSelector's encodeURIComponent on write.
+  try {
+    return { leftId: decodeURIComponent(leftRaw), rightId: decodeURIComponent(rightRaw) }
+  } catch {
+    return null
+  }
 }
 
 export function DiffView({ sessionId }: { sessionId: string }) {
@@ -37,6 +43,11 @@ export function DiffView({ sessionId }: { sessionId: string }) {
     enabled: canDiff,
   })
 
+  // Reads the hash once on mount (guarded by `!leftId`). We intentionally do
+  // NOT register a `hashchange` listener — App.tsx unmounts DiffView when the
+  // user navigates away, so each arrival gets a fresh mount and re-reads the
+  // hash. If a future routing change keeps DiffView mounted across view
+  // transitions, add a `hashchange` listener here to react to URL updates.
   useEffect(() => {
     if (timelines.length >= 2 && !leftId) {
       // URL hash takes precedence — lets TimelineSelector pre-select

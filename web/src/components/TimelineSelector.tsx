@@ -17,10 +17,18 @@ export function TimelineSelector({ timelines }: TimelineSelectorProps) {
   // Opens the diff view with `left=parent, right=active` pre-selected via
   // URL hash, so the resulting URL is bookmarkable/shareable. The hash is
   // the source of truth; DiffView reads it on mount. (See plan line 139.)
+  //
+  // Uses `history.replaceState` rather than `window.location.hash = …` so
+  // clicking the Diff button doesn't add an entry to browser history. Without
+  // this, every click would push a new back-stack entry and Back would bounce
+  // the user through hash-only states instead of back to the session view.
   const openDiffAgainstParent = () => {
     if (!activeTimeline?.parent_timeline_id) return
     const sessionId = activeTimeline.session_id
-    window.location.hash = `#/diff/${sessionId}/${activeTimeline.parent_timeline_id}/${activeTimeline.id}`
+    // UUIDs are URL-safe today, but encodeURIComponent guards against a
+    // future backend change that uses richer label formats for timeline IDs.
+    const hash = `#/diff/${encodeURIComponent(sessionId)}/${encodeURIComponent(activeTimeline.parent_timeline_id)}/${encodeURIComponent(activeTimeline.id)}`
+    window.history.replaceState(null, '', hash)
     setView('diff')
   }
 

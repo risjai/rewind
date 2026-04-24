@@ -108,6 +108,20 @@ describe('parseDiffHash (Phase 3 URL-hash routing)', () => {
     expect(parseDiffHash('#diff/s-1/a/b')).toEqual({ leftId: 'a', rightId: 'b' })
     expect(parseDiffHash('#/diff/s-1/a/b')).toEqual({ leftId: 'a', rightId: 'b' })
   })
+
+  it('decodes URL-encoded timeline IDs (round-trips with TimelineSelector)', () => {
+    const rawId = 'my/fork with space'
+    const encoded = encodeURIComponent(rawId)
+    expect(parseDiffHash(`#/diff/s-1/root/${encoded}`)).toEqual({
+      leftId: 'root',
+      rightId: rawId,
+    })
+  })
+
+  it('returns null when decoding fails on malformed encoding', () => {
+    // `%E0%A4%A` is a truncated UTF-8 sequence that decodeURIComponent throws on.
+    expect(parseDiffHash('#/diff/s-1/root/%E0%A4%A')).toBeNull()
+  })
 })
 
 describe('DiffTimeline divergence marker', () => {

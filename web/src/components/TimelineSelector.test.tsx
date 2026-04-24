@@ -50,6 +50,32 @@ describe('TimelineSelector — Diff against parent button (Phase 3)', () => {
     expect(window.location.hash).toBe('#/diff/s-1/root/fork')
   })
 
+  it('uses history.replaceState so clicking Diff does not add a back-stack entry', () => {
+    useStore.setState({ selectedTimelineId: 'fork' })
+    render(<TimelineSelector timelines={[root, fork]} />)
+    const before = window.history.length
+    fireEvent.click(screen.getByRole('button', { name: /diff against parent/i }))
+    // replaceState does not grow history; pushState would bump this by 1.
+    expect(window.history.length).toBe(before)
+  })
+
+  it('URL-encodes timeline IDs in the hash (defensive for future non-UUID IDs)', () => {
+    const weirdId = 'my/fork with space'
+    const weirdFork = makeTimeline({
+      id: weirdId,
+      parent_timeline_id: 'root',
+      fork_at_step: 1,
+      label: 'weird',
+    })
+    useStore.setState({ selectedTimelineId: weirdId })
+    render(<TimelineSelector timelines={[root, weirdFork]} />)
+    fireEvent.click(screen.getByRole('button', { name: /diff against parent/i }))
+    // jsdom round-trips hash with encoded segments preserved.
+    expect(window.location.hash).toBe(
+      `#/diff/s-1/root/${encodeURIComponent(weirdId)}`,
+    )
+  })
+
   it('clicking a timeline pill updates the store selection', () => {
     render(<TimelineSelector timelines={[root, fork]} />)
     fireEvent.click(screen.getByText('fork-at-3'))
