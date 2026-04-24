@@ -4,7 +4,8 @@ import { cn, formatDuration, formatTokens } from '@/lib/utils'
 import { useState } from 'react'
 import { MessageSquare, FileJson, FileOutput, AlertTriangle, GitBranch, Play } from 'lucide-react'
 import { JsonTree } from './JsonTree'
-import { ForkReplayModal } from './ForkReplayModal'
+import { ForkModal } from './ForkModal'
+import { ReplaySetupModal } from './ReplaySetupModal'
 
 type Tab = 'context' | 'request' | 'response'
 type ModalMode = 'fork' | 'replay' | null
@@ -86,14 +87,24 @@ export function StepDetailPanel({ stepId }: { stepId: string }) {
         {activeTab === 'response' && <JsonView data={step.response_body} label="Response" />}
       </div>
 
-      <ForkReplayModal
-        isOpen={modalMode !== null}
-        onClose={() => setModalMode(null)}
-        mode={modalMode ?? 'fork'}
-        sessionId={step.session_id}
-        timelineId={step.timeline_id}
-        atStep={step.step_number}
-      />
+      {modalMode === 'fork' && (
+        <ForkModal
+          isOpen
+          onClose={() => setModalMode(null)}
+          sessionId={step.session_id}
+          timelineId={step.timeline_id}
+          atStep={step.step_number}
+        />
+      )}
+      {modalMode === 'replay' && (
+        <ReplaySetupModal
+          isOpen
+          onClose={() => setModalMode(null)}
+          sessionId={step.session_id}
+          timelineId={step.timeline_id}
+          atStep={step.step_number}
+        />
+      )}
     </div>
   )
 }

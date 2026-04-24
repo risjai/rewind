@@ -1,61 +1,47 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { useQueryClient } from '@tanstack/react-query'
-import { api } from '@/lib/api'
 import { useStore } from '@/hooks/use-store'
 import { cn } from '@/lib/utils'
 import { X, GitBranch, AlertCircle, Loader2, Play, Copy, CheckCircle2 } from 'lucide-react'
+import { useForkMutation, LABEL_REGEX, LABEL_HINT } from '@/hooks/use-fork-mutation'
 
-type Mode = 'fork' | 'replay'
-type Status = 'idle' | 'submitting' | 'error'
 type Phase = 'input' | 'instructions'
 
 interface Props {
   isOpen: boolean
   onClose: () => void
-  mode: Mode
   sessionId: string
   timelineId?: string
   atStep: number | null
 }
 
-// Labels appear in shell commands we hand to the user to paste into their
-// terminal. Restrict to a conservative charset so the rendered command can't
-// be hijacked by shell metacharacters (`;`, backticks, `$()`, spaces, etc.)
-// even if the React-escaped <code> display is safe. Matches the CLI's own
-// tolerance for filesystem-safe identifiers.
-const LABEL_REGEX = /^[A-Za-z0-9._-]+$/
-const LABEL_HINT = 'Use letters, numbers, dot, dash, underscore only.'
-
-export function ForkReplayModal({ isOpen, onClose, mode, sessionId, timelineId, atStep }: Props) {
-  const queryClient = useQueryClient()
+// Set up a replay: create a fork server-side, then show the CLI command the
+// user runs in their terminal. The proxy is external — the web UI just helps
+// the user produce the right command. See `plans/fork-replay-web-ui.md`.
+export function ReplaySetupModal({ isOpen, onClose, sessionId, timelineId, atStep }: Props) {
   const selectTimeline = useStore((s) => s.selectTimeline)
-  const defaultLabel = atStep == null ? '' : (mode === 'fork' ? `fork-at-${atStep}` : `replay-from-${atStep}`)
+  const defaultLabel = atStep == null ? '' : `replay-from-${atStep}`
   const [label, setLabel] = useState(defaultLabel)
-  const [status, setStatus] = useState<Status>('idle')
   const [phase, setPhase] = useState<Phase>('input')
-  const [error, setError] = useState('')
-  const [forkedTimelineId, setForkedTimelineId] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const doneBtnRef = useRef<HTMLButtonElement | null>(null)
+  const { status, error, forkedTimelineId, submit, reset } = useForkMutation()
 
   useEffect(() => {
     if (isOpen && atStep != null) {
       setLabel(defaultLabel)
-      setStatus('idle')
       setPhase('input')
-      setError('')
-      setForkedTimelineId(null)
       setCopied(false)
+      reset()
       if (copiedTimerRef.current) {
         clearTimeout(copiedTimerRef.current)
         copiedTimerRef.current = null
       }
     }
-  }, [isOpen, atStep, mode, defaultLabel])
+  }, [isOpen, atStep, defaultLabel, reset])
 
   // Clear any pending Copied-flag timer on unmount so we never call setState
-  // on a disposed component. See santa-review Important-1.
+  // on a disposed component.
   useEffect(() => {
     return () => {
       if (copiedTimerRef.current) {
@@ -74,13 +60,13 @@ export function ForkReplayModal({ isOpen, onClose, mode, sessionId, timelineId, 
   }, [phase])
 
   const close = useCallback(() => {
-    // For replay mode: if a fork was created, navigate to it on close so the
-    // user can watch their replay land. Fork mode already does this in handleSubmit.
-    if (mode === 'replay' && forkedTimelineId) {
+    // If a fork was created, navigate to it on close so the user can watch
+    // their replay land on the fork timeline.
+    if (forkedTimelineId) {
       selectTimeline(forkedTimelineId)
     }
     onClose()
-  }, [mode, forkedTimelineId, selectTimeline, onClose])
+  }, [forkedTimelineId, selectTimeline, onClose])
 
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
@@ -96,32 +82,12 @@ export function ForkReplayModal({ isOpen, onClose, mode, sessionId, timelineId, 
   const labelIsValid = LABEL_REGEX.test(effectiveLabel)
   const shortSessionId = sessionId.slice(0, 8)
   const replayCommand = `rewind replay ${shortSessionId} --from ${atStep} --label ${effectiveLabel}`
+  const submitDisabled = status === 'submitting' || !labelIsValid
 
   const handleSubmit = async () => {
-    if (!labelIsValid || status === 'submitting') return
-    setStatus('submitting')
-    setError('')
-    try {
-      const res = await api.forkSession(sessionId, {
-        at_step: atStep,
-        label: effectiveLabel,
-        timeline_id: timelineId,
-      })
-      await queryClient.invalidateQueries({ queryKey: ['session', sessionId] })
-      await queryClient.invalidateQueries({ queryKey: ['timelines', sessionId] })
-      setForkedTimelineId(res.fork_timeline_id)
-      setStatus('idle')
-      if (mode === 'fork') {
-        selectTimeline(res.fork_timeline_id)
-        onClose()
-      } else {
-        setPhase('instructions')
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Fork failed'
-      setError(msg)
-      setStatus('error')
-    }
+    if (!labelIsValid) return
+    const forkId = await submit({ sessionId, atStep, label: effectiveLabel, timelineId })
+    if (forkId) setPhase('instructions')
   }
 
   const handleCopy = async () => {
@@ -138,12 +104,6 @@ export function ForkReplayModal({ isOpen, onClose, mode, sessionId, timelineId, 
     }
   }
 
-  const title = mode === 'fork' ? 'Fork from step' : 'Set up replay from step'
-  const PrimaryIcon = mode === 'fork' ? GitBranch : Play
-  const primaryLabel = mode === 'fork' ? 'Create fork' : 'Set up replay'
-  const primaryLabelPending = mode === 'fork' ? 'Forking…' : 'Creating fork…'
-  const submitDisabled = status === 'submitting' || !labelIsValid
-
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div
@@ -153,13 +113,13 @@ export function ForkReplayModal({ isOpen, onClose, mode, sessionId, timelineId, 
       <div
         role="dialog"
         aria-modal="true"
-        aria-label={title}
+        aria-label="Set up replay from step"
         className="relative bg-neutral-900 border border-neutral-700 rounded-xl shadow-2xl w-full max-w-md mx-4"
       >
         <div className="flex items-center justify-between px-5 py-4 border-b border-neutral-800">
           <div className="flex items-center gap-2">
             <GitBranch size={16} className="text-amber-400" />
-            <h3 className="text-sm font-semibold text-neutral-200">{title} #{atStep}</h3>
+            <h3 className="text-sm font-semibold text-neutral-200">Set up replay from step #{atStep}</h3>
           </div>
           <button
             onClick={close}
@@ -171,7 +131,7 @@ export function ForkReplayModal({ isOpen, onClose, mode, sessionId, timelineId, 
         </div>
 
         {phase === 'input' ? (
-          <>
+          <form onSubmit={(e) => { e.preventDefault(); handleSubmit() }}>
             <div className="px-5 py-4 space-y-4">
               <div>
                 <label className="block text-xs font-medium text-neutral-400 mb-1.5">Label</label>
@@ -182,7 +142,7 @@ export function ForkReplayModal({ isOpen, onClose, mode, sessionId, timelineId, 
                   placeholder={defaultLabel}
                   autoFocus
                   aria-invalid={!labelIsValid}
-                  aria-describedby="fork-replay-label-hint"
+                  aria-describedby="replay-label-hint"
                   className={cn(
                     'w-full bg-neutral-800 border rounded-lg px-3 py-1.5 text-xs text-neutral-200 placeholder:text-neutral-500 focus:outline-none focus:ring-1',
                     labelIsValid
@@ -191,14 +151,12 @@ export function ForkReplayModal({ isOpen, onClose, mode, sessionId, timelineId, 
                   )}
                 />
                 <p
-                  id="fork-replay-label-hint"
+                  id="replay-label-hint"
                   className={cn('text-[11px] mt-1.5', labelIsValid ? 'text-neutral-500' : 'text-red-400')}
                 >
                   {!labelIsValid
                     ? LABEL_HINT
-                    : mode === 'fork'
-                      ? `Creates a new timeline that inherits steps 1–${atStep} from this session.`
-                      : `Creates a fork at step ${atStep}, then shows you the CLI command to start the replay proxy.`}
+                    : `Creates a fork at step ${atStep}, then shows you the CLI command to start the replay proxy.`}
                 </p>
               </div>
 
@@ -212,6 +170,7 @@ export function ForkReplayModal({ isOpen, onClose, mode, sessionId, timelineId, 
 
             <div className="flex justify-end gap-2 px-5 py-3 border-t border-neutral-800">
               <button
+                type="button"
                 onClick={close}
                 disabled={status === 'submitting'}
                 className="px-3 py-1.5 rounded-lg text-xs text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200 transition-colors disabled:opacity-50"
@@ -219,7 +178,7 @@ export function ForkReplayModal({ isOpen, onClose, mode, sessionId, timelineId, 
                 Cancel
               </button>
               <button
-                onClick={handleSubmit}
+                type="submit"
                 disabled={submitDisabled}
                 className={cn(
                   'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors',
@@ -229,13 +188,13 @@ export function ForkReplayModal({ isOpen, onClose, mode, sessionId, timelineId, 
                 )}
               >
                 {status === 'submitting' ? (
-                  <><Loader2 size={12} className="animate-spin" /> {primaryLabelPending}</>
+                  <><Loader2 size={12} className="animate-spin" /> Creating fork…</>
                 ) : (
-                  <><PrimaryIcon size={12} /> {primaryLabel}</>
+                  <><Play size={12} /> Set up replay</>
                 )}
               </button>
             </div>
-          </>
+          </form>
         ) : (
           <>
             <div className="px-5 py-4 space-y-4">

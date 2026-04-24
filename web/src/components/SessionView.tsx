@@ -10,7 +10,8 @@ import { formatTokens, formatDuration, cn } from '@/lib/utils'
 import { Radio, Clock, Layers, Zap, GitBranch, Bot, Plug, Upload, BarChart3, List } from 'lucide-react'
 import { useCallback, useState } from 'react'
 import { ExportOtelModal } from './ExportOtelModal'
-import { ForkReplayModal } from './ForkReplayModal'
+import { ForkModal } from './ForkModal'
+import { ReplaySetupModal } from './ReplaySetupModal'
 import { ActivityTimeline } from './ActivityTimeline'
 import type { StepResponse } from '@/types/api'
 
@@ -19,7 +20,6 @@ export function SessionView({ sessionId }: { sessionId: string }) {
   const queryClient = useQueryClient()
   const [autoFollow, setAutoFollow] = useState(true)
   const [exportOpen, setExportOpen] = useState(false)
-  const [forkAtStep, setForkAtStep] = useState<number | null>(null)
   const [modalState, setModalState] = useState<{ mode: 'fork' | 'replay'; step: number } | null>(null)
   const [viewMode, setViewMode] = useState<'timeline' | 'list'>('timeline')
 
@@ -224,7 +224,7 @@ export function SessionView({ sessionId }: { sessionId: string }) {
                 selectedStepId={selectedStepId}
                 onSelectStep={selectStep}
                 autoFollow={autoFollow && isLive}
-                onFork={(step) => setForkAtStep(step.step_number)}
+                onFork={(step) => setModalState({ mode: 'fork', step: step.step_number })}
               />
             )}
           </div>
@@ -248,25 +248,25 @@ export function SessionView({ sessionId }: { sessionId: string }) {
         timelines={detail?.timelines ?? []}
       />
 
-      {/* Fork Modal (list view StepTimeline trigger) */}
-      <ForkReplayModal
-        isOpen={forkAtStep !== null}
-        onClose={() => setForkAtStep(null)}
-        mode="fork"
-        sessionId={sessionId}
-        timelineId={timelineId}
-        atStep={forkAtStep}
-      />
-
-      {/* Fork/Replay Modal (timeline view ActivityTimeline trigger) */}
-      <ForkReplayModal
-        isOpen={modalState !== null}
-        onClose={() => setModalState(null)}
-        mode={modalState?.mode ?? 'fork'}
-        sessionId={sessionId}
-        timelineId={timelineId}
-        atStep={modalState?.step ?? null}
-      />
+      {/* Single modal state feeds both triggers (list-view StepTimeline + timeline-view ActivityTimeline). */}
+      {modalState?.mode === 'fork' && (
+        <ForkModal
+          isOpen
+          onClose={() => setModalState(null)}
+          sessionId={sessionId}
+          timelineId={timelineId}
+          atStep={modalState.step}
+        />
+      )}
+      {modalState?.mode === 'replay' && (
+        <ReplaySetupModal
+          isOpen
+          onClose={() => setModalState(null)}
+          sessionId={sessionId}
+          timelineId={timelineId}
+          atStep={modalState.step}
+        />
+      )}
     </div>
   )
 }

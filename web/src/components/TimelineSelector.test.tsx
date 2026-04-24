@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 import { TimelineSelector } from './TimelineSelector'
 import { useStore } from '@/hooks/use-store'
@@ -18,6 +18,11 @@ function makeTimeline(overrides: Partial<Timeline> = {}): Timeline {
 
 beforeEach(() => {
   useStore.setState({ selectedTimelineId: null, view: 'sessions' })
+  window.location.hash = ''
+})
+
+afterEach(() => {
+  window.location.hash = ''
 })
 
 describe('TimelineSelector — Diff against parent button (Phase 3)', () => {
@@ -36,11 +41,13 @@ describe('TimelineSelector — Diff against parent button (Phase 3)', () => {
     expect(screen.getByRole('button', { name: /diff against parent/i })).toBeInTheDocument()
   })
 
-  it('switches view to "diff" when the Diff button is clicked', () => {
+  it('sets URL hash to #/diff/{session}/{parent}/{active} and switches view', () => {
     useStore.setState({ selectedTimelineId: 'fork' })
     render(<TimelineSelector timelines={[root, fork]} />)
     fireEvent.click(screen.getByRole('button', { name: /diff against parent/i }))
     expect(useStore.getState().view).toBe('diff')
+    // Hash is the source of truth for left/right — shareable/bookmarkable.
+    expect(window.location.hash).toBe('#/diff/s-1/root/fork')
   })
 
   it('clicking a timeline pill updates the store selection', () => {

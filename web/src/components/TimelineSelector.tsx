@@ -14,6 +14,16 @@ export function TimelineSelector({ timelines }: TimelineSelectorProps) {
   const activeTimeline = timelines.find(t => t.id === activeId)
   const hasParent = !!activeTimeline?.parent_timeline_id
 
+  // Opens the diff view with `left=parent, right=active` pre-selected via
+  // URL hash, so the resulting URL is bookmarkable/shareable. The hash is
+  // the source of truth; DiffView reads it on mount. (See plan line 139.)
+  const openDiffAgainstParent = () => {
+    if (!activeTimeline?.parent_timeline_id) return
+    const sessionId = activeTimeline.session_id
+    window.location.hash = `#/diff/${sessionId}/${activeTimeline.parent_timeline_id}/${activeTimeline.id}`
+    setView('diff')
+  }
+
   return (
     <div className="flex items-center gap-2 px-4 py-2 border-b border-neutral-800 bg-neutral-950/50">
       <GitBranch size={14} className="text-neutral-500 shrink-0" />
@@ -45,7 +55,7 @@ export function TimelineSelector({ timelines }: TimelineSelectorProps) {
       </div>
       {hasParent && (
         <button
-          onClick={() => setView('diff')}
+          onClick={openDiffAgainstParent}
           className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] text-amber-400 hover:text-amber-300 border border-amber-900/50 hover:border-amber-700 bg-amber-950/20 hover:bg-amber-950/40 transition-colors shrink-0"
           title="Diff this fork against its parent timeline"
         >
