@@ -39,6 +39,19 @@ describe('ForkReplayModal', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
+  it('does not render when atStep is null, even if isOpen is true', () => {
+    wrap(
+      <ForkReplayModal
+        isOpen={true}
+        onClose={() => {}}
+        mode="fork"
+        sessionId="s1"
+        atStep={null}
+      />,
+    )
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
   it('defaults label to fork-at-{N} and shows the step number', () => {
     wrap(
       <ForkReplayModal

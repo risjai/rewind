@@ -252,7 +252,7 @@ export function SessionView({ sessionId }: { sessionId: string }) {
         mode="fork"
         sessionId={sessionId}
         timelineId={timelineId}
-        atStep={forkAtStep ?? 0}
+        atStep={forkAtStep}
       />
     </div>
   )

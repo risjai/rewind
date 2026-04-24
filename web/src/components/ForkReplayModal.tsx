@@ -14,24 +14,24 @@ interface Props {
   mode: Mode
   sessionId: string
   timelineId?: string
-  atStep: number
+  atStep: number | null
 }
 
 export function ForkReplayModal({ isOpen, onClose, mode, sessionId, timelineId, atStep }: Props) {
   const queryClient = useQueryClient()
   const selectTimeline = useStore((s) => s.selectTimeline)
-  const defaultLabel = mode === 'fork' ? `fork-at-${atStep}` : `replay-from-${atStep}`
+  const defaultLabel = atStep == null ? '' : (mode === 'fork' ? `fork-at-${atStep}` : `replay-from-${atStep}`)
   const [label, setLabel] = useState(defaultLabel)
   const [status, setStatus] = useState<Status>('idle')
   const [error, setError] = useState('')
 
   useEffect(() => {
-    if (isOpen) {
+    if (isOpen && atStep != null) {
       setLabel(defaultLabel)
       setStatus('idle')
       setError('')
     }
-  }, [isOpen, defaultLabel])
+  }, [isOpen, atStep, defaultLabel])
 
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
@@ -41,7 +41,7 @@ export function ForkReplayModal({ isOpen, onClose, mode, sessionId, timelineId, 
     return () => document.removeEventListener('keydown', handleKey)
   }, [isOpen, onClose, status])
 
-  if (!isOpen) return null
+  if (!isOpen || atStep == null) return null
 
   const handleSubmit = async () => {
     setStatus('submitting')
