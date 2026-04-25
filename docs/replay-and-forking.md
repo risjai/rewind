@@ -42,6 +42,22 @@ with rewind_agent.replay("latest", from_step=4):
     # Step 5+: live LLM calls, recorded to new forked timeline
 ```
 
+### From the Web UI
+
+Click any step in the session view, then **Set up replay…** in the step detail. The UI creates a fork server-side and shows you the exact shell command to start the replay proxy:
+
+```
+rewind replay <session-prefix> --from 4 --fork-id <new-fork-id>
+```
+
+<p align="center">
+  <img src="../assets/web-replay-setup-instructions.png" alt="Replay setup instructions panel showing the shell command with Copy button" width="720" />
+</p>
+
+The `--fork-id` flag pins the CLI to the fork the UI just created, so live steps stream back into the fork timeline you're watching in the browser — no "double-fork" where the CLI silently creates its own fork and the UI ends up showing you an empty one.
+
+See [web-ui.md](web-ui.md#fork--replay) for the full browser workflow including fork-from-bar, diff-against-parent, and fork-delete.
+
 ### Diff after replay
 
 After the replay, diff the original against the replayed timeline:
@@ -63,6 +79,8 @@ rewind fork <session-id> --at 3
 # Compare two timelines
 rewind diff <session-id> main fixed
 ```
+
+From the web UI, click **Fork from here** in the step detail panel or hover a bar on the Activity Timeline. To delete a fork, hover its pill in the TimelineSelector and click the trash icon. The delete is hard (no undo) and is refused when invariants would be violated — forks with children, forks referenced by baselines, forks with active replay contexts, and the root timeline are all protected. See [web-ui.md](web-ui.md#fork--replay).
 
 ### Timeline diff
 

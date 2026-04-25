@@ -10,7 +10,7 @@ Rewind is a time-travel debugger for AI agents -- a single binary with zero depe
 | `rewind sessions` | List all recorded sessions |
 | `rewind show <id\|latest>` | Print a session's step-by-step trace |
 | `rewind inspect <id\|latest>` | Open the interactive TUI |
-| `rewind replay <id> --from <step>` | Replay from a fork point -- cached steps instant, live from fork onward |
+| `rewind replay <id> --from <step> [--fork-id <id>]` | Replay from a fork point -- cached steps instant, live from fork onward. `--fork-id` reuses an existing fork (set by MCP / web UI to avoid double-forking) |
 | `rewind fork <id> --at <step>` | Create a timeline branch at a specific step |
 | `rewind diff <id> <left> <right>` | Compare two timelines side by side |
 | `rewind snapshot [dir] --label <name>` | Capture workspace state as a checkpoint |

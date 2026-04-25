@@ -73,7 +73,7 @@ Replace `/absolute/path/to/rewind-mcp` with the output of `which rewind-mcp`.
 | `get_step_detail` | Full request/response content from blob store |
 | `diff_timelines` | Compare two timelines side by side |
 | `fork_timeline` | Create a fork at a specific step |
-| `replay_session` | Set up fork-and-execute replay with cached/live step split |
+| `replay_session` | Set up fork-and-execute replay with cached/live step split. Returns a `rewind replay … --fork-id <id>` command that reuses the fork the tool just created, so live steps land on the timeline the UI is watching (no double-fork). Requires `rewind` CLI ≥ 0.12.16. |
 | `list_snapshots` | List workspace snapshots |
 | `cache_stats` | Instant Replay cache statistics |
 | `create_baseline` | Create a regression baseline from a session |

@@ -178,7 +178,7 @@ rewind hooks install
 rewind web
 ```
 
-Activity timeline with swim lanes, context window viewer, visual diff, regression baselines — all in the browser. Works with Claude Code sessions, Cursor, or any agent recorded via the SDK.
+Activity timeline with swim lanes, context window viewer, visual diff, regression baselines — all in the browser. Plus in-browser **fork/replay/diff/delete**: branch any timeline from a step, copy a `rewind replay --fork-id …` command, diff a fork against its parent in one click, or hard-delete a fork with invariant checks. Works with Claude Code sessions, Cursor, or any agent recorded via the SDK. See [docs/web-ui.md](docs/web-ui.md#fork--replay).
 
 ### Evaluate before shipping - catch regressions in CI
 
