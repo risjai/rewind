@@ -82,6 +82,26 @@ async fn delete_json(app: &Router, path: &str) -> (StatusCode, serde_json::Value
     (status, json)
 }
 
+/// Like `delete_json`, but returns the raw body as a UTF-8 string. Handlers
+/// that map errors via `(StatusCode, String)` send plain text; `delete_json`
+/// can't parse that as JSON, so use this when you need to inspect the
+/// error message body.
+async fn delete_raw(app: &Router, path: &str) -> (StatusCode, String) {
+    let resp = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(path)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8_lossy(&bytes).to_string())
+}
+
 // ── Session Lifecycle ──────────────────────────────────────
 
 #[tokio::test]
@@ -342,6 +362,98 @@ async fn test_fork_of_fork() {
     assert_eq!(status, StatusCode::CREATED);
     assert!(fork2["fork_timeline_id"].is_string());
     assert_ne!(fork2["fork_timeline_id"].as_str().unwrap(), fork1_id);
+}
+
+// ── Delete Timeline (#143) ──────────────────────────────────
+
+#[tokio::test]
+async fn test_delete_fork_happy_path() {
+    let (app, _store, _tmp) = setup();
+
+    let (_, start) = post_json(&app, "/api/sessions/start", json!({"name": "test"})).await;
+    let sid = start["session_id"].as_str().unwrap();
+
+    for _ in 0..3 {
+        post_json(&app, &format!("/api/sessions/{sid}/llm-calls"), json!({
+            "request_body": {},
+            "response_body": {},
+            "model": "gpt-4o",
+            "duration_ms": 100
+        })).await;
+    }
+
+    let (_, fork) = post_json(&app, &format!("/api/sessions/{sid}/fork"), json!({
+        "at_step": 2,
+        "label": "throwaway"
+    })).await;
+    let fork_id = fork["fork_timeline_id"].as_str().unwrap();
+
+    let (status, body) = delete_json(&app, &format!("/api/sessions/{sid}/timelines/{fork_id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["deleted"], true);
+
+    // Verify the fork is gone from the timelines listing.
+    let (_, timelines) = get_json(&app, &format!("/api/sessions/{sid}/timelines")).await;
+    let remaining: Vec<&str> = timelines.as_array().unwrap()
+        .iter()
+        .map(|t| t["id"].as_str().unwrap())
+        .collect();
+    assert!(!remaining.contains(&fork_id));
+}
+
+#[tokio::test]
+async fn test_delete_root_timeline_returns_409() {
+    let (app, _store, _tmp) = setup();
+
+    let (_, start) = post_json(&app, "/api/sessions/start", json!({"name": "test"})).await;
+    let sid = start["session_id"].as_str().unwrap();
+    let root_id = start["root_timeline_id"].as_str().unwrap();
+
+    let (status, msg) = delete_raw(&app, &format!("/api/sessions/{sid}/timelines/{root_id}")).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(msg.contains("root"), "got: {msg}");
+}
+
+#[tokio::test]
+async fn test_delete_fork_with_children_returns_409() {
+    let (app, _store, _tmp) = setup();
+
+    let (_, start) = post_json(&app, "/api/sessions/start", json!({"name": "test"})).await;
+    let sid = start["session_id"].as_str().unwrap();
+
+    for _ in 0..3 {
+        post_json(&app, &format!("/api/sessions/{sid}/llm-calls"), json!({
+            "request_body": {}, "response_body": {}, "model": "gpt-4o", "duration_ms": 100,
+        })).await;
+    }
+
+    let (_, parent) = post_json(&app, &format!("/api/sessions/{sid}/fork"), json!({
+        "at_step": 2, "label": "parent-fork"
+    })).await;
+    let parent_id = parent["fork_timeline_id"].as_str().unwrap();
+
+    // Seed the parent fork with a step so the child fork is valid.
+    post_json(&app, &format!("/api/sessions/{sid}/llm-calls"), json!({
+        "request_body": {}, "response_body": {}, "model": "gpt-4o", "duration_ms": 100,
+    })).await;
+    post_json(&app, &format!("/api/sessions/{sid}/fork"), json!({
+        "at_step": 1, "label": "child-fork", "timeline_id": parent_id
+    })).await;
+
+    let (status, msg) = delete_raw(&app, &format!("/api/sessions/{sid}/timelines/{parent_id}")).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(msg.contains("child fork"), "got: {msg}");
+}
+
+#[tokio::test]
+async fn test_delete_unknown_timeline_returns_404() {
+    let (app, _store, _tmp) = setup();
+
+    let (_, start) = post_json(&app, "/api/sessions/start", json!({"name": "test"})).await;
+    let sid = start["session_id"].as_str().unwrap();
+
+    let (status, _) = delete_json(&app, &format!("/api/sessions/{sid}/timelines/does-not-exist")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 // ── Replay Context ─────────────────────────────────────────

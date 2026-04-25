@@ -38,6 +38,7 @@ pub fn routes(state: AppState) -> Router {
         .route("/sessions/{id}/tool-calls", post(record_tool_call))
         .route("/sessions/{id}/tool-calls/replay-lookup", post(replay_lookup_tool))
         .route("/sessions/{id}/fork", post(fork_session))
+        .route("/sessions/{session_id}/timelines/{timeline_id}", delete(delete_timeline_handler))
         .route("/replay-contexts", post(create_replay_context))
         .route("/replay-contexts/{id}", delete(delete_replay_context_handler))
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10MB
@@ -1284,4 +1285,49 @@ async fn delete_replay_context_handler(
     })?;
 
     Ok(Json(DeleteReplayContextResponse { released }))
+}
+
+#[derive(Serialize)]
+struct DeleteTimelineResponse {
+    deleted: bool,
+}
+
+/// DELETE /api/sessions/{session_id}/timelines/{timeline_id}
+///
+/// Hard-deletes a fork timeline plus its steps, spans, replay contexts, and
+/// scores. See issue #143. The engine enforces invariants up-front:
+///   * 404 when the timeline isn't in the given session
+///   * 409 when deleting would violate an invariant (root / has children /
+///     baselined) — the response body describes which invariant
+async fn delete_timeline_handler(
+    State(state): State<AppState>,
+    Path((session_id, timeline_id)): Path<(String, String)>,
+) -> Result<Json<DeleteTimelineResponse>, (StatusCode, String)> {
+    let store = state.store.lock().map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Lock error: {e}"))
+    })?;
+
+    // Resolve the session ref (accepts full id, prefix, or "latest").
+    let session = resolve_session(&store, &session_id)
+        .map_err(|e| (StatusCode::NOT_FOUND, format!("{e}")))?;
+
+    let engine = ReplayEngine::new(&store);
+    engine.delete_fork(&session.id, &timeline_id).map_err(|e| {
+        let msg = format!("{e}");
+        // The engine uses specific phrases for each invariant so we can map
+        // them to appropriate HTTP semantics without introducing an error enum.
+        let status = if msg.contains("not found") {
+            StatusCode::NOT_FOUND
+        } else if msg.contains("root timeline")
+            || msg.contains("child fork")
+            || msg.contains("baseline")
+        {
+            StatusCode::CONFLICT
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        (status, msg)
+    })?;
+
+    Ok(Json(DeleteTimelineResponse { deleted: true }))
 }

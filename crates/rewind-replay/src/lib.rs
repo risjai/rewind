@@ -1,6 +1,12 @@
 use anyhow::{bail, Context, Result};
 use rewind_store::{Span, Step, Store, Timeline};
 
+/// Truncate an id to 8 chars for error messages — char-boundary safe (no
+/// panic on multi-byte input).
+fn short(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
 /// Diff result between two timelines
 #[derive(Debug, serde::Serialize)]
 pub struct TimelineDiff {
@@ -119,6 +125,66 @@ impl<'a> ReplayEngine<'a> {
         Ok(fork)
     }
 
+    /// Delete a fork and every step/span/replay-context/score that belongs
+    /// to it. Enforces these invariants up front and refuses the delete
+    /// rather than silently destroying data (issue #143):
+    ///
+    /// * The timeline must exist and belong to the given session.
+    /// * It must not be the root (`parent_timeline_id` is `None`).
+    /// * It must have no child forks — users must delete descendants first.
+    /// * No baseline may reference it as `source_timeline_id` — deleting a
+    ///   baselined fork would silently invalidate saved regression tests.
+    pub fn delete_fork(&self, session_id: &str, timeline_id: &str) -> Result<()> {
+        let timelines = self.store.get_timelines(session_id)?;
+
+        let target = timelines.iter()
+            .find(|t| t.id == timeline_id)
+            .with_context(|| format!(
+                "Timeline {} not found in session {}",
+                short(timeline_id), short(session_id),
+            ))?;
+
+        if target.parent_timeline_id.is_none() {
+            bail!("Cannot delete the root timeline of a session.");
+        }
+
+        let children: Vec<&Timeline> = timelines.iter()
+            .filter(|t| t.parent_timeline_id.as_deref() == Some(timeline_id))
+            .collect();
+        if !children.is_empty() {
+            let labels: Vec<String> = children.iter().map(|t| format!("'{}'", t.label)).collect();
+            bail!(
+                "Cannot delete fork '{}' while it has {} child fork(s): {}. Delete the children first.",
+                target.label, children.len(), labels.join(", "),
+            );
+        }
+
+        let baseline_refs = self.store.count_baselines_referencing_timeline(timeline_id)?;
+        if baseline_refs > 0 {
+            bail!(
+                "Cannot delete fork '{}' — {} baseline(s) reference it. Delete the baselines first \
+                 or pick a different fork.",
+                target.label, baseline_refs,
+            );
+        }
+
+        let deleted = self.store.delete_timeline(timeline_id)?;
+        if !deleted {
+            // Another caller raced us — the existence check above passed but
+            // the row is now gone. Surface the mismatch rather than silently
+            // returning Ok.
+            bail!("Timeline {} was concurrently removed.", short(timeline_id));
+        }
+
+        tracing::info!(
+            fork_id = %timeline_id,
+            session_id = %session_id,
+            "Deleted fork: {}",
+            target.label,
+        );
+        Ok(())
+    }
+
     /// Diff two timelines step by step
     pub fn diff_timelines(&self, session_id: &str, left_timeline_id: &str, right_timeline_id: &str) -> Result<TimelineDiff> {
         let left_steps = self.get_full_timeline_steps(left_timeline_id, session_id)?;
@@ -223,7 +289,7 @@ impl<'a> ReplayEngine<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rewind_store::{Session, Step, Timeline};
+    use rewind_store::{Baseline, Session, Step, Timeline};
     use tempfile::TempDir;
 
     fn setup() -> (TempDir, Store) {
@@ -270,5 +336,82 @@ mod tests {
         let engine = ReplayEngine::new(&store);
         let fork = engine.fork(&sid, &tid, 2, "valid-fork");
         assert!(fork.is_ok());
+    }
+
+    // ── delete_fork tests (#143) ─────────────────────────────────
+
+    #[test]
+    fn delete_fork_removes_a_childless_fork_and_its_steps() {
+        let (_tmp, store) = setup();
+        let (sid, tid) = seed_session_with_steps(&store, 3);
+        let engine = ReplayEngine::new(&store);
+        let fork = engine.fork(&sid, &tid, 2, "throwaway").unwrap();
+        // Add a step on the fork so we can assert the cascade.
+        let fork_step = Step::new_llm_call(&fork.id, &sid, 3, "gpt-4o");
+        store.create_step(&fork_step).unwrap();
+
+        engine.delete_fork(&sid, &fork.id).unwrap();
+
+        let timelines = store.get_timelines(&sid).unwrap();
+        assert!(timelines.iter().all(|t| t.id != fork.id), "fork row should be gone");
+        let remaining_steps = store.get_steps(&fork.id).unwrap();
+        assert!(remaining_steps.is_empty(), "fork's steps should be gone");
+    }
+
+    #[test]
+    fn delete_fork_refuses_to_delete_the_root_timeline() {
+        let (_tmp, store) = setup();
+        let (sid, tid) = seed_session_with_steps(&store, 3);
+        let engine = ReplayEngine::new(&store);
+        let err = engine.delete_fork(&sid, &tid).unwrap_err();
+        assert!(err.to_string().contains("root timeline"), "got: {}", err);
+    }
+
+    #[test]
+    fn delete_fork_refuses_when_children_exist() {
+        let (_tmp, store) = setup();
+        let (sid, root) = seed_session_with_steps(&store, 3);
+        let engine = ReplayEngine::new(&store);
+        let parent_fork = engine.fork(&sid, &root, 2, "parent-fork").unwrap();
+        // Seed a step on the parent fork so the child fork is valid.
+        let step = Step::new_llm_call(&parent_fork.id, &sid, 3, "gpt-4o");
+        store.create_step(&step).unwrap();
+        let _child = engine.fork(&sid, &parent_fork.id, 2, "child-fork").unwrap();
+
+        let err = engine.delete_fork(&sid, &parent_fork.id).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("child fork"), "got: {msg}");
+        assert!(msg.contains("'child-fork'"), "should list the blocking children: {msg}");
+
+        // Parent still present.
+        let timelines = store.get_timelines(&sid).unwrap();
+        assert!(timelines.iter().any(|t| t.id == parent_fork.id));
+    }
+
+    #[test]
+    fn delete_fork_refuses_when_a_baseline_references_the_fork() {
+        let (_tmp, store) = setup();
+        let (sid, root) = seed_session_with_steps(&store, 3);
+        let engine = ReplayEngine::new(&store);
+        let fork = engine.fork(&sid, &root, 2, "baselined").unwrap();
+        let baseline = Baseline::new("golden", &sid, &fork.id, "", 2, 0);
+        store.create_baseline(&baseline).unwrap();
+
+        let err = engine.delete_fork(&sid, &fork.id).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("baseline"), "got: {msg}");
+
+        // Fork still present.
+        let timelines = store.get_timelines(&sid).unwrap();
+        assert!(timelines.iter().any(|t| t.id == fork.id));
+    }
+
+    #[test]
+    fn delete_fork_errors_when_timeline_id_does_not_exist() {
+        let (_tmp, store) = setup();
+        let (sid, _tid) = seed_session_with_steps(&store, 3);
+        let engine = ReplayEngine::new(&store);
+        let err = engine.delete_fork(&sid, "nonexistent-id").unwrap_err();
+        assert!(err.to_string().contains("not found"), "got: {}", err);
     }
 }

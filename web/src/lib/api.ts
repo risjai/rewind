@@ -2,7 +2,7 @@ import type {
   Session, SessionDetail, StepResponse, StepDetail,
   Baseline, BaselineDetail, CacheStats, Snapshot,
   Timeline, TimelineDiff,
-  ForkResponse, CreateReplayContextResponse, DeleteReplayContextResponse,
+  ForkResponse, CreateReplayContextResponse, DeleteReplayContextResponse, DeleteTimelineResponse,
   EvalDataset, DatasetExample, EvalExperiment,
   ExperimentResultDetail, ExperimentComparisonView,
   SpanResponse,
@@ -116,4 +116,6 @@ export const api = {
     post<CreateReplayContextResponse>('/replay-contexts', body),
   deleteReplayContext: (id: string) =>
     del<DeleteReplayContextResponse>(`/replay-contexts/${id}`),
+  deleteTimeline: (sessionId: string, timelineId: string) =>
+    del<DeleteTimelineResponse>(`/sessions/${sessionId}/timelines/${timelineId}`),
 }

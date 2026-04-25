@@ -499,6 +499,38 @@ impl Store {
         Ok(timelines.into_iter().find(|t| t.parent_timeline_id.is_none()))
     }
 
+    /// Count baselines that reference this timeline as their source. Used by
+    /// `ReplayEngine::delete_fork` to refuse deletes that would orphan saved
+    /// regression tests.
+    pub fn count_baselines_referencing_timeline(&self, timeline_id: &str) -> Result<u32> {
+        let count: u32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM baselines WHERE source_timeline_id = ?1",
+            params![timeline_id],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// Hard-delete a timeline and every row that references it, in dependency
+    /// order. Wrapped in a SQLite transaction so a mid-delete failure leaves
+    /// the database intact.
+    ///
+    /// Invariants (like "not root", "no child forks", "no baselines") are
+    /// enforced higher up in `ReplayEngine::delete_fork`; this method assumes
+    /// the caller has already validated them. See issue #143.
+    pub fn delete_timeline(&self, timeline_id: &str) -> Result<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        // Order matters — each dependent row references `timelines.id` via a
+        // non-cascading FK, so we clear them first.
+        tx.execute("DELETE FROM replay_contexts WHERE timeline_id = ?1", params![timeline_id])?;
+        tx.execute("DELETE FROM timeline_scores WHERE timeline_id = ?1", params![timeline_id])?;
+        tx.execute("DELETE FROM spans WHERE timeline_id = ?1", params![timeline_id])?;
+        tx.execute("DELETE FROM steps WHERE timeline_id = ?1", params![timeline_id])?;
+        let affected = tx.execute("DELETE FROM timelines WHERE id = ?1", params![timeline_id])?;
+        tx.commit()?;
+        Ok(affected > 0)
+    }
+
     // ── Steps ─────────────────────────────────────────────────
 
     pub fn create_step(&self, step: &Step) -> Result<()> {
