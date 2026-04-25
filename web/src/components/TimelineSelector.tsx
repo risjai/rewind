@@ -1,7 +1,9 @@
+import { useState } from 'react'
 import { useStore } from '@/hooks/use-store'
 import { cn } from '@/lib/utils'
-import { GitBranch, GitCommit, ArrowLeftRight } from 'lucide-react'
+import { GitBranch, GitCommit, ArrowLeftRight, Trash2 } from 'lucide-react'
 import type { Timeline } from '@/types/api'
+import { DeleteTimelineConfirmModal } from './DeleteTimelineConfirmModal'
 
 interface TimelineSelectorProps {
   timelines: Timeline[]
@@ -9,6 +11,7 @@ interface TimelineSelectorProps {
 
 export function TimelineSelector({ timelines }: TimelineSelectorProps) {
   const { selectedTimelineId, selectTimeline, setView } = useStore()
+  const [deleteTarget, setDeleteTarget] = useState<Timeline | null>(null)
   const root = timelines.find(t => !t.parent_timeline_id)
   const activeId = selectedTimelineId || root?.id
   const activeTimeline = timelines.find(t => t.id === activeId)
@@ -40,24 +43,43 @@ export function TimelineSelector({ timelines }: TimelineSelectorProps) {
       <div className="flex items-center gap-2 flex-1 min-w-0 overflow-x-auto scrollbar-thin">
         {timelines.map((t) => {
           const isActive = t.id === activeId
+          const isFork = !!t.parent_timeline_id
 
           return (
-            <button
-              key={t.id}
-              onClick={() => selectTimeline(t.id)}
-              className={cn(
-                'flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium transition-colors shrink-0',
-                isActive
-                  ? 'bg-neutral-800 text-neutral-100 border border-neutral-700'
-                  : 'text-neutral-500 hover:text-neutral-300 hover:bg-neutral-900 border border-transparent'
+            // Sibling-overlay wrapper: the trash icon sits outside the pill
+            // <button> to avoid nested interactive elements. `group-hover`
+            // reveals it on mouse-over; `group-focus-within` on keyboard focus.
+            <div key={t.id} className="group relative shrink-0">
+              <button
+                onClick={() => selectTimeline(t.id)}
+                className={cn(
+                  'flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium transition-colors',
+                  // Extra right padding on fork pills reserves space for the
+                  // trash overlay so it doesn't cover the label.
+                  isFork ? 'pr-6' : '',
+                  isActive
+                    ? 'bg-neutral-800 text-neutral-100 border border-neutral-700'
+                    : 'text-neutral-500 hover:text-neutral-300 hover:bg-neutral-900 border border-transparent'
+                )}
+              >
+                <GitCommit size={12} />
+                <span>{t.label}</span>
+                {t.fork_at_step && (
+                  <span className="text-[10px] text-neutral-600">@{t.fork_at_step}</span>
+                )}
+              </button>
+              {isFork && (
+                <button
+                  type="button"
+                  onClick={() => setDeleteTarget(t)}
+                  aria-label={`Delete fork ${t.label}`}
+                  title={`Delete fork ${t.label}`}
+                  className="absolute right-1 top-1/2 -translate-y-1/2 p-0.5 rounded text-neutral-600 hover:text-red-400 focus:outline-none focus:ring-1 focus:ring-red-500 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity"
+                >
+                  <Trash2 size={11} />
+                </button>
               )}
-            >
-              <GitCommit size={12} />
-              <span>{t.label}</span>
-              {t.fork_at_step && (
-                <span className="text-[10px] text-neutral-600">@{t.fork_at_step}</span>
-              )}
-            </button>
+            </div>
           )
         })}
       </div>
@@ -70,6 +92,12 @@ export function TimelineSelector({ timelines }: TimelineSelectorProps) {
           <ArrowLeftRight size={11} /> Diff against parent
         </button>
       )}
+      <DeleteTimelineConfirmModal
+        isOpen={deleteTarget !== null}
+        onClose={() => setDeleteTarget(null)}
+        sessionId={deleteTarget?.session_id ?? ''}
+        timeline={deleteTarget}
+      />
     </div>
   )
 }

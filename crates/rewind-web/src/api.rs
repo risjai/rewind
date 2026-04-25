@@ -38,6 +38,7 @@ pub fn routes(state: AppState) -> Router {
         .route("/sessions/{id}/tool-calls", post(record_tool_call))
         .route("/sessions/{id}/tool-calls/replay-lookup", post(replay_lookup_tool))
         .route("/sessions/{id}/fork", post(fork_session))
+        .route("/sessions/{session_id}/timelines/{timeline_id}", delete(delete_timeline_handler))
         .route("/replay-contexts", post(create_replay_context))
         .route("/replay-contexts/{id}", delete(delete_replay_context_handler))
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10MB
@@ -1284,4 +1285,59 @@ async fn delete_replay_context_handler(
     })?;
 
     Ok(Json(DeleteReplayContextResponse { released }))
+}
+
+#[derive(Serialize)]
+struct DeleteTimelineResponse {
+    deleted: bool,
+}
+
+/// DELETE /api/sessions/{session_id}/timelines/{timeline_id}
+///
+/// Hard-deletes a fork timeline plus its steps, spans, replay contexts,
+/// scores, and step counters. See issue #143.
+///
+/// Unlike most mutation endpoints, this one **requires a full session ID**
+/// — prefix-match and `"latest"` shortcuts are rejected with 400. Losing a
+/// fork to the wrong session via a 2-char prefix would be a bad day.
+///
+/// Status mapping is variant-driven (no string matching on error text):
+///   * `NotFound` → 404
+///   * `IsRoot` / `HasChildren` / `HasBaselines` / `HasActiveReplayContext` → 409
+///   * `Internal` (DB / lock) → 500
+async fn delete_timeline_handler(
+    State(state): State<AppState>,
+    Path((session_id, timeline_id)): Path<(String, String)>,
+) -> Result<Json<DeleteTimelineResponse>, (StatusCode, String)> {
+    // Require a full UUID — 36 chars, "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx".
+    // A short prefix or the "latest" alias would make a destructive call too
+    // easy to misfire.
+    if session_id.len() != 36 || session_id == "latest" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "DELETE requires the full session ID; prefix and 'latest' are rejected".to_string(),
+        ));
+    }
+
+    let store = state.store.lock().map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Lock error: {e}"))
+    })?;
+
+    // We deliberately do NOT call `resolve_session` here — the caller must
+    // provide the canonical id. Existence is established by `delete_fork`'s
+    // own lookup against `timelines WHERE session_id = ?`.
+    let engine = ReplayEngine::new(&store);
+    engine.delete_fork(&session_id, &timeline_id).map_err(|err| {
+        use rewind_replay::DeleteForkError::*;
+        let status = match &err {
+            NotFound(_, _) => StatusCode::NOT_FOUND,
+            IsRoot | HasChildren { .. } | HasBaselines { .. } | HasActiveReplayContext { .. } => {
+                StatusCode::CONFLICT
+            }
+            Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        (status, format!("{err}"))
+    })?;
+
+    Ok(Json(DeleteTimelineResponse { deleted: true }))
 }

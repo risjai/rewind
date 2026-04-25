@@ -33,6 +33,10 @@ export interface DeleteReplayContextResponse {
   released: boolean
 }
 
+export interface DeleteTimelineResponse {
+  deleted: boolean
+}
+
 export interface SessionDetail {
   session: Session
   timelines: Timeline[]

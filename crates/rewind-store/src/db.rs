@@ -499,6 +499,77 @@ impl Store {
         Ok(timelines.into_iter().find(|t| t.parent_timeline_id.is_none()))
     }
 
+    /// Count baselines that reference this timeline as their source. Used by
+    /// `ReplayEngine::delete_fork` to refuse deletes that would orphan saved
+    /// regression tests.
+    pub fn count_baselines_referencing_timeline(&self, timeline_id: &str) -> Result<u32> {
+        let count: u32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM baselines WHERE source_timeline_id = ?1",
+            params![timeline_id],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// Count replay_context rows pointing at this timeline. Any row counts
+    /// as "active" in this schema — the table uses hard-delete on release.
+    /// Used by `ReplayEngine::delete_fork` to refuse deletes while a proxy
+    /// is mid-flight (it would FK-violate on the proxy's next `create_step`).
+    pub fn count_active_replay_contexts_for_timeline(&self, timeline_id: &str) -> Result<u32> {
+        let count: u32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM replay_contexts WHERE timeline_id = ?1",
+            params![timeline_id],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// Count `step_counters` rows matching the given `(session_id, timeline_id)`.
+    /// Used by delete-timeline tests to verify the no-FK bookkeeping row is
+    /// cleared along with the cascade.
+    pub fn count_step_counters_for_timeline_in_session(&self, session_id: &str, timeline_id: &str) -> Result<u32> {
+        let count: u32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM step_counters WHERE session_id = ?1 AND timeline_id = ?2",
+            params![session_id, timeline_id],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// Hard-delete a timeline and every row that references it, in dependency
+    /// order. Wrapped in a SQLite transaction so a mid-delete failure leaves
+    /// the database intact.
+    ///
+    /// Invariants (not root, no child forks, no baselines, no active replay
+    /// context) are enforced higher up in `ReplayEngine::delete_fork`; this
+    /// method assumes the caller has already validated them. See issue #143.
+    ///
+    /// The pre-check + cascade is not wrapped in a single transaction —
+    /// serialization is provided by the caller's `Arc<Mutex<Store>>`. The
+    /// transaction here covers atomicity of the cascade itself (so a failure
+    /// partway through doesn't leave half a fork behind).
+    ///
+    /// **Soft reference:** `experiment_results.trace_timeline_id` is a plain
+    /// TEXT column (no FK, intentionally). We NULL it here rather than
+    /// delete the result — experiments survive the fork they were traced
+    /// against. A follow-up in the experiment UI should degrade gracefully
+    /// when the trace target is gone.
+    pub fn delete_timeline(&self, timeline_id: &str) -> Result<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        // FK-bearing children first (order matters — non-cascading FKs).
+        tx.execute("DELETE FROM replay_contexts WHERE timeline_id = ?1", params![timeline_id])?;
+        tx.execute("DELETE FROM timeline_scores WHERE timeline_id = ?1", params![timeline_id])?;
+        tx.execute("DELETE FROM spans WHERE timeline_id = ?1", params![timeline_id])?;
+        tx.execute("DELETE FROM steps WHERE timeline_id = ?1", params![timeline_id])?;
+        // Non-FK bookkeeping — would otherwise orphan.
+        tx.execute("DELETE FROM step_counters WHERE timeline_id = ?1", params![timeline_id])?;
+        // Soft references — preserve the experiment result row, null the pointer.
+        tx.execute("UPDATE experiment_results SET trace_timeline_id = NULL WHERE trace_timeline_id = ?1", params![timeline_id])?;
+        let affected = tx.execute("DELETE FROM timelines WHERE id = ?1", params![timeline_id])?;
+        tx.commit()?;
+        Ok(affected > 0)
+    }
+
     // ── Steps ─────────────────────────────────────────────────
 
     pub fn create_step(&self, step: &Step) -> Result<()> {
