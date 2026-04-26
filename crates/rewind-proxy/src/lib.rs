@@ -313,9 +313,13 @@ async fn handle_request(
         && let Some(parent_step) = replay_steps.iter().find(|s| s.step_number == step_number)
         && !parent_step.response_blob.is_empty()
     {
-        let resp_data = {
+        // Step 0.3: parse the cached blob via the format discriminator.
+        // format=0 (legacy naked) yields synthetic { status: 200, headers: [], body }.
+        // format=1 (envelope-v1) returns the original status + scrubbed headers + body.
+        let envelope = {
             let store = state.store.lock().unwrap();
-            store.blobs.get(&parent_step.response_blob).unwrap_or_default()
+            let raw = store.blobs.get(&parent_step.response_blob).unwrap_or_default();
+            rewind_store::ResponseEnvelope::from_blob_bytes(parent_step.response_blob_format, &raw)
         };
 
         // Record a replayed step in the forked timeline
@@ -342,12 +346,25 @@ async fn handle_request(
             step_number, fork_at,
         );
 
-        let response = Response::builder()
-            .status(200)
-            .header("content-type", "application/json")
+        // Step 0.3: rebuild the wire HTTP response from the envelope. Status
+        // and recorded headers come from the original upstream response;
+        // x-rewind-* trace headers are appended after.
+        let mut response_builder = Response::builder().status(envelope.status);
+        for (name, value) in &envelope.headers {
+            // Skip recorded content-length — it's the original-body length,
+            // which would mismatch the actual body bytes if anything in the
+            // body changed. Hyper sets a correct content-length on send.
+            if name.eq_ignore_ascii_case("content-length") {
+                continue;
+            }
+            response_builder = response_builder.header(name, value);
+        }
+        // Inject x-rewind-* tracing headers; preserved across cache hits.
+        response_builder = response_builder
             .header("x-rewind-replay", "fork")
-            .header("x-rewind-cached-step", step_number.to_string())
-            .body(box_full(Bytes::from(resp_data)))
+            .header("x-rewind-cached-step", step_number.to_string());
+        let response = response_builder
+            .body(box_full(Bytes::from(envelope.body)))
             .unwrap();
         return Ok(response);
     }
@@ -358,10 +375,48 @@ async fn handle_request(
             let store = state.store.lock().unwrap();
             store.cache_get(&request_hash).ok().flatten()
         } {
-            // Cache hit! Return recorded response instantly
-            let resp_data = {
+            // Cache hit! Return recorded response instantly.
+            // Step 0.3: the cached step may be format=0 (legacy) or format=1
+            // (envelope-v1). The replay_cache table doesn't carry the format
+            // column today — peek at the originating step to learn its
+            // format. If we can't find the originating step (cache row outlived
+            // it), fall back to FORMAT_NAKED_LEGACY which always parses safely.
+            let (envelope, format_for_replayed_step) = {
                 let store = state.store.lock().unwrap();
-                store.blobs.get(&cached.response_blob).unwrap_or_default()
+                let raw = store.blobs.get(&cached.response_blob).unwrap_or_default();
+                // The replay_cache row is keyed by request_hash, not step_id;
+                // all we have to discover format is the blob bytes themselves
+                // and an optimistic FORMAT_ENVELOPE_V1 try (the reader falls
+                // back to legacy on parse failure, which is correct for any
+                // pre-migration cached entry).
+                let env = rewind_store::ResponseEnvelope::from_blob_bytes(
+                    rewind_store::FORMAT_ENVELOPE_V1,
+                    &raw,
+                );
+                // Heuristic: if the parsed envelope's body is non-empty AND
+                // the original blob doesn't trivially decode as a "raw" JSON
+                // body of equal bytes, treat as envelope-v1. Else legacy.
+                // Cheaper: just check whether the blob *looks* like an envelope
+                // JSON — must contain `"status":` near the start.
+                let format = if raw.len() > 12 && raw[0] == b'{'
+                    && std::str::from_utf8(&raw[..raw.len().min(64)])
+                        .ok()
+                        .map(|s| s.contains("\"status\":") && s.contains("\"headers\":") && s.contains("\"body\":"))
+                        .unwrap_or(false)
+                {
+                    rewind_store::FORMAT_ENVELOPE_V1
+                } else {
+                    rewind_store::FORMAT_NAKED_LEGACY
+                };
+                let env = if format == rewind_store::FORMAT_NAKED_LEGACY {
+                    rewind_store::ResponseEnvelope::from_blob_bytes(
+                        rewind_store::FORMAT_NAKED_LEGACY,
+                        &raw,
+                    )
+                } else {
+                    env
+                };
+                (env, format)
             };
 
             // Record as a replayed step
@@ -372,8 +427,7 @@ async fn handle_request(
             step.tokens_out = cached.tokens_out;
             step.request_blob = request_hash.clone();
             step.response_blob = cached.response_blob.clone();
-            // Inherit format from the source cache entry (Step 0.3).
-            // Replayed step references the same blob bytes — same format applies.
+            step.response_blob_format = format_for_replayed_step;
             step.request_hash = Some(request_canonical_hash.clone());
 
             {
@@ -389,12 +443,19 @@ async fn handle_request(
                 cached.tokens_in, cached.tokens_out,
             );
 
-            let response = Response::builder()
-                .status(200)
-                .header("content-type", "application/json")
+            // Step 0.3: rebuild wire response from envelope.
+            let mut response_builder = Response::builder().status(envelope.status);
+            for (name, value) in &envelope.headers {
+                if name.eq_ignore_ascii_case("content-length") {
+                    continue;
+                }
+                response_builder = response_builder.header(name, value);
+            }
+            response_builder = response_builder
                 .header("x-rewind-cache", "hit")
-                .header("x-rewind-saved-tokens", format!("{}", cached.tokens_in + cached.tokens_out))
-                .body(box_full(Bytes::from(resp_data)))
+                .header("x-rewind-saved-tokens", format!("{}", cached.tokens_in + cached.tokens_out));
+            let response = response_builder
+                .body(box_full(Bytes::from(envelope.body)))
                 .unwrap();
             return Ok(response);
         }
@@ -486,15 +547,37 @@ async fn handle_buffered_response(
     start: std::time::Instant,
 ) -> Result<Response<BoxBody>, hyper::Error> {
     let status = resp.status();
+    // Step 0.3: capture headers BEFORE consuming the body so we can record
+    // them in the envelope. resp.headers() is cheap (refs the existing map).
+    // scrub_response_headers strips hop-by-hop, Set-Cookie, Authorization
+    // at record time so they never reach disk.
+    let captured_headers: Vec<(String, String)> = resp
+        .headers()
+        .iter()
+        .filter_map(|(k, v)| v.to_str().ok().map(|s| (k.as_str().to_string(), s.to_string())))
+        .collect();
+    let scrubbed_headers = rewind_store::scrub_response_headers(captured_headers);
     let resp_bytes = resp.bytes().await.unwrap_or_default();
     let duration_ms = start.elapsed().as_millis() as u64;
 
     let (tokens_in, tokens_out) = extract_usage(&resp_bytes);
 
+    // Step 0.3: build a ResponseEnvelope and store the JSON-serialized form.
+    // Format=1 marks the blob as envelope-v1 so read paths know to unwrap.
+    // The envelope's body field is the redacted response bytes (same
+    // redaction pipeline as legacy). Fork-execute cache hit, instant-replay
+    // cache hit, and the explicit-API replay-lookup all read this back via
+    // ResponseEnvelope::from_blob_bytes.
     let response_hash = {
         let redacted = redact::redact_secrets(&resp_bytes);
+        let envelope = rewind_store::ResponseEnvelope {
+            status: status.as_u16(),
+            headers: scrubbed_headers,
+            body: redacted,
+        };
+        let envelope_bytes = envelope.to_blob_bytes();
         let store = state.store.lock().unwrap();
-        store.blobs.put(&redacted).unwrap_or_default()
+        store.blobs.put(&envelope_bytes).unwrap_or_default()
     };
 
     let step_status = if status.is_success() { StepStatus::Success } else { StepStatus::Error };
@@ -512,6 +595,7 @@ async fn handle_buffered_response(
     step.tokens_out = tokens_out;
     step.request_blob = request_hash.clone();
     step.response_blob = response_hash.clone();
+    step.response_blob_format = rewind_store::FORMAT_ENVELOPE_V1;
     step.request_hash = Some(request_canonical_hash);
     step.error = error;
 
@@ -564,6 +648,16 @@ async fn handle_streaming_response(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("text/event-stream")
         .to_string();
+
+    // Step 0.3: capture upstream headers for the envelope before consuming
+    // the body via bytes_stream(). Same scrub policy as the buffered path.
+    let captured_headers: Vec<(String, String)> = resp
+        .headers()
+        .iter()
+        .filter_map(|(k, v)| v.to_str().ok().map(|s| (k.as_str().to_string(), s.to_string())))
+        .collect();
+    let scrubbed_headers = rewind_store::scrub_response_headers(captured_headers);
+    let upstream_status = status.as_u16();
 
     // We'll stream chunks through a channel: upstream → channel → client
     // While also accumulating all chunks for recording.
@@ -631,13 +725,27 @@ async fn handle_streaming_response(
 
         let resp_bytes = serde_json::to_vec(&synthetic_response).unwrap_or_default();
 
+        // Step 0.3: wrap the assembled (final-state) response in an envelope.
+        // The envelope's body is the JSON synthetic response — equivalent to
+        // what an OpenAI/Anthropic SSE-stream client would assemble at end
+        // of stream. Headers are inherited from the upstream HTTP response.
+        // The Python intercept's synthetic SSE re-emitter (Step 0.2) reads
+        // this envelope back and re-emits it as one SSE chunk on cache hit.
         let response_hash = {
             let redacted = redact::redact_secrets(&resp_bytes);
+            let envelope = rewind_store::ResponseEnvelope {
+                status: upstream_status,
+                headers: scrubbed_headers,
+                body: redacted,
+            };
+            let envelope_bytes = envelope.to_blob_bytes();
             let s = store.lock().unwrap();
-            s.blobs.put(&redacted).unwrap_or_default()
+            s.blobs.put(&envelope_bytes).unwrap_or_default()
         };
 
-        // Also store raw SSE for forensics (redacted — same pipeline as synthetic)
+        // Also store raw SSE for forensics (redacted — same pipeline as synthetic).
+        // Forensic blob stays format=0 (naked) — it's not what the replay
+        // path consumes, just a debugging breadcrumb.
         {
             let redacted_raw = redact::redact_secrets(&accumulated_raw);
             let s = store.lock().unwrap();
@@ -651,6 +759,7 @@ async fn handle_streaming_response(
         step.tokens_out = total_output_tokens;
         step.request_blob = request_hash;
         step.response_blob = response_hash;
+        step.response_blob_format = rewind_store::FORMAT_ENVELOPE_V1;
         step.request_hash = Some(request_canonical_hash);
 
         if has_tool_calls {

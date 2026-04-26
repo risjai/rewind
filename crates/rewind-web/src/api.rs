@@ -1231,8 +1231,18 @@ async fn do_replay_lookup(
                 _ => false,
             };
 
-            let resp_data = store.blobs.get(&step.response_blob).unwrap_or_default();
-            let resp_json = serde_json::from_slice(&resp_data).unwrap_or(serde_json::Value::Null);
+            // Step 0.3: unwrap the response envelope. format=0 (legacy)
+            // returns synthetic { status: 200, headers: [], body: bytes },
+            // so legacy blobs round-trip as today. format=1 (envelope) returns
+            // the inner body — the actual JSON response — which is what
+            // SDK callers (ExplicitClient, Tier 1 intercept) expect.
+            let raw = store.blobs.get(&step.response_blob).unwrap_or_default();
+            let envelope = rewind_store::ResponseEnvelope::from_blob_bytes(
+                step.response_blob_format,
+                &raw,
+            );
+            let resp_json = serde_json::from_slice(&envelope.body)
+                .unwrap_or(serde_json::Value::Null);
 
             let header_value = if divergent { "true" } else { "false" };
             Ok((
