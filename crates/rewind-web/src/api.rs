@@ -1081,7 +1081,13 @@ async fn record_tool_call(
 #[derive(Deserialize)]
 struct ReplayLookupRequest {
     replay_context_id: String,
-    #[allow(dead_code)]
+    /// Step 0.1: when supplied, the server hashes this body via
+    /// `rewind_store::normalize_and_hash` and compares against the cached
+    /// step's stored `request_hash`. On mismatch the server logs and either
+    /// (default) returns the cached step with `divergent: true` flag set,
+    /// or (if the replay_context was created with strict_match=1) returns
+    /// HTTP 409. Pre-Tier-1 SDKs that omit this field bypass validation —
+    /// behavior matches v0.12 ordinal-only semantics.
     request_body: Option<serde_json::Value>,
     #[allow(dead_code)]
     tool_name: Option<String>,
@@ -1098,13 +1104,21 @@ struct ReplayLookupResponse {
     step_number: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     active_timeline_id: Option<String>,
+    /// Step 0.1: true when the incoming request_body's canonical hash did
+    /// not match the cached step's request_hash. The cached response is
+    /// still returned (warn-on-divergence default); SDKs may surface this
+    /// as a warning to the operator. Set only when a real comparison was
+    /// performed — pre-migration steps with NULL request_hash and lookups
+    /// without request_body skip validation entirely and leave this false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    divergent: bool,
 }
 
 async fn replay_lookup_llm(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<ReplayLookupRequest>,
-) -> Result<Json<ReplayLookupResponse>, (StatusCode, String)> {
+) -> Result<(StatusCode, [(axum::http::HeaderName, axum::http::HeaderValue); 1], Json<ReplayLookupResponse>), (StatusCode, String)> {
     do_replay_lookup(&state, &id, &body, StepType::LlmCall).await
 }
 
@@ -1112,16 +1126,24 @@ async fn replay_lookup_tool(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<ReplayLookupRequest>,
-) -> Result<Json<ReplayLookupResponse>, (StatusCode, String)> {
+) -> Result<(StatusCode, [(axum::http::HeaderName, axum::http::HeaderValue); 1], Json<ReplayLookupResponse>), (StatusCode, String)> {
     do_replay_lookup(&state, &id, &body, StepType::ToolCall).await
 }
+
+/// Header emitted on cache hits where the incoming request_body diverged
+/// from the originally-recorded step's canonical hash. Operators / SDKs
+/// can surface this in tracing without parsing the JSON response body.
+const HEADER_CACHE_DIVERGENT: &str = "x-rewind-cache-divergent";
 
 async fn do_replay_lookup(
     state: &AppState,
     session_ref: &str,
     body: &ReplayLookupRequest,
     expected_type: StepType,
-) -> Result<Json<ReplayLookupResponse>, (StatusCode, String)> {
+) -> Result<
+    (StatusCode, [(axum::http::HeaderName, axum::http::HeaderValue); 1], Json<ReplayLookupResponse>),
+    (StatusCode, String),
+> {
     let store = state.store.lock().map_err(|e| {
         (StatusCode::INTERNAL_SERVER_ERROR, format!("Lock error: {e}"))
     })?;
@@ -1130,7 +1152,7 @@ async fn do_replay_lookup(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, "Replay context not found".to_string()))?;
 
-    let (ctx_session_id, ctx_timeline_id, from_step, _current_step) = ctx;
+    let (ctx_session_id, ctx_timeline_id, from_step, _current_step, strict_match) = ctx;
 
     let session = resolve_session(&store, session_ref)
         .map_err(|e| (StatusCode::NOT_FOUND, format!("{e}")))?;
@@ -1160,24 +1182,90 @@ async fn do_replay_lookup(
 
     match cached_step {
         Some(ref step) if !step.response_blob.is_empty() => {
+            // Step 0.1: cache content validation. The lookup is ordinal-based
+            // (see advance_replay_context above), so mismatches here mean
+            // the agent's call sequence diverged from the recording — either
+            // the predicate (`is_llm_call`) misclassified an auxiliary call
+            // and shifted the ordinal, or the agent's reasoning path took a
+            // different branch this run.
+            //
+            // Validation runs only when:
+            //   1. Caller supplied request_body (pre-Tier-1 SDKs may omit)
+            //   2. Cached step has a request_hash (pre-migration rows are NULL
+            //      and treated as "match anything" for backwards compat)
+            let divergent = match (&body.request_body, &step.request_hash) {
+                (Some(req), Some(stored_hash)) => {
+                    let body_bytes = serde_json::to_vec(req).unwrap_or_default();
+                    let incoming_hash = rewind_store::normalize_and_hash(&body_bytes);
+                    if &incoming_hash != stored_hash {
+                        if strict_match {
+                            tracing::warn!(
+                                replay_context_id = %body.replay_context_id,
+                                target_step,
+                                stored_hash = %stored_hash,
+                                incoming_hash = %incoming_hash,
+                                "cache_divergence (strict_match) — returning 409"
+                            );
+                            return Err((
+                                StatusCode::CONFLICT,
+                                format!(
+                                    "Cache divergence at step {} (strict_match=true): incoming request hash {} does not match recorded {}",
+                                    target_step,
+                                    &incoming_hash[..16],
+                                    &stored_hash[..16],
+                                ),
+                            ));
+                        }
+                        tracing::warn!(
+                            replay_context_id = %body.replay_context_id,
+                            target_step,
+                            stored_hash = %stored_hash,
+                            incoming_hash = %incoming_hash,
+                            "cache_divergence — returning cached step with X-Rewind-Cache-Divergent header"
+                        );
+                        true
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            };
+
             let resp_data = store.blobs.get(&step.response_blob).unwrap_or_default();
             let resp_json = serde_json::from_slice(&resp_data).unwrap_or(serde_json::Value::Null);
 
-            Ok(Json(ReplayLookupResponse {
-                hit: true,
-                response_body: Some(resp_json),
-                model: Some(step.model.clone()),
-                step_number: Some(step.step_number),
-                active_timeline_id: Some(ctx_timeline_id),
-            }))
+            let header_value = if divergent { "true" } else { "false" };
+            Ok((
+                StatusCode::OK,
+                [(
+                    axum::http::HeaderName::from_static(HEADER_CACHE_DIVERGENT),
+                    axum::http::HeaderValue::from_static(if header_value == "true" { "true" } else { "false" }),
+                )],
+                Json(ReplayLookupResponse {
+                    hit: true,
+                    response_body: Some(resp_json),
+                    model: Some(step.model.clone()),
+                    step_number: Some(step.step_number),
+                    active_timeline_id: Some(ctx_timeline_id),
+                    divergent,
+                }),
+            ))
         }
-        _ => Ok(Json(ReplayLookupResponse {
-            hit: false,
-            response_body: None,
-            model: None,
-            step_number: None,
-            active_timeline_id: Some(ctx_timeline_id),
-        })),
+        _ => Ok((
+            StatusCode::OK,
+            [(
+                axum::http::HeaderName::from_static(HEADER_CACHE_DIVERGENT),
+                axum::http::HeaderValue::from_static("false"),
+            )],
+            Json(ReplayLookupResponse {
+                hit: false,
+                response_body: None,
+                model: None,
+                step_number: None,
+                active_timeline_id: Some(ctx_timeline_id),
+                divergent: false,
+            }),
+        )),
     }
 }
 

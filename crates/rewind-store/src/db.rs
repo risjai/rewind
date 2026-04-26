@@ -700,14 +700,42 @@ impl Store {
         Ok(step)
     }
 
-    pub fn get_replay_context(&self, context_id: &str) -> Result<Option<(String, String, u32, u32)>> {
+    /// Returns (session_id, timeline_id, from_step, current_step, strict_match).
+    /// strict_match was added in v0.13 (Step 0.1); pre-migration rows return
+    /// `false` via the column DEFAULT 0, which decodes as the warn-on-divergence
+    /// fallback at the lookup layer.
+    pub fn get_replay_context(
+        &self, context_id: &str,
+    ) -> Result<Option<(String, String, u32, u32, bool)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT session_id, timeline_id, from_step, current_step FROM replay_contexts WHERE id = ?1",
+            "SELECT session_id, timeline_id, from_step, current_step, strict_match
+             FROM replay_contexts WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(params![context_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, u32>(2)?, row.get::<_, u32>(3)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, u32>(2)?,
+                row.get::<_, u32>(3)?,
+                // Use Option<i64> to gracefully handle the (impossible-but-defensive)
+                // case of a pre-migration row read against a v0.13+ schema.
+                row.get::<_, Option<i64>>(4)?.unwrap_or(0) != 0,
+            ))
         })?;
         Ok(rows.next().transpose()?)
+    }
+
+    /// Set the strict_match flag on a replay context. Strict mode escalates
+    /// content-hash divergence at lookup to HTTP 409 instead of returning
+    /// the cached step with a warning.
+    pub fn set_replay_context_strict_match(
+        &self, context_id: &str, strict: bool,
+    ) -> Result<bool> {
+        let affected = self.conn.execute(
+            "UPDATE replay_contexts SET strict_match = ?1 WHERE id = ?2",
+            params![if strict { 1 } else { 0 }, context_id],
+        )?;
+        Ok(affected > 0)
     }
 
     pub fn delete_replay_context(&self, context_id: &str) -> Result<bool> {
