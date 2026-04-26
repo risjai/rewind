@@ -952,10 +952,16 @@ async fn record_llm_call(
     let step_number = store.next_step_number(&session.id, &timeline_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Counter error: {e}")))?;
 
-    let request_blob = store.blobs.put(&serde_json::to_vec(&body.request_body).unwrap_or_default())
+    let request_bytes = serde_json::to_vec(&body.request_body).unwrap_or_default();
+    let request_blob = store.blobs.put(&request_bytes)
         .map_err(|e| (StatusCode::INSUFFICIENT_STORAGE, format!("Blob error: {e}")))?;
     let response_blob = store.blobs.put(&serde_json::to_vec(&body.response_body).unwrap_or_default())
         .map_err(|e| (StatusCode::INSUFFICIENT_STORAGE, format!("Blob error: {e}")))?;
+    // Step 0.1: canonical post-redaction hash for replay-cache validation.
+    // Distinct from request_blob (content-addressed). Same redaction
+    // pipeline as the proxy record path so cache lookups match across
+    // record paths even though the stored blob may differ in redaction.
+    let request_canonical_hash = rewind_store::normalize_and_hash(&request_bytes);
 
     let mut step = Step::new_llm_call(&timeline_id, &session.id, step_number, &body.model);
     step.status = StepStatus::Success;
@@ -964,6 +970,7 @@ async fn record_llm_call(
     step.tokens_out = body.tokens_out.unwrap_or(0);
     step.request_blob = request_blob;
     step.response_blob = response_blob;
+    step.request_hash = Some(request_canonical_hash);
     if let Some(ref cid) = body.client_step_id {
         step.id = cid.clone();
     }
@@ -1034,10 +1041,15 @@ async fn record_tool_call(
     let step_number = store.next_step_number(&session.id, &timeline_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Counter error: {e}")))?;
 
-    let request_blob = store.blobs.put(&serde_json::to_vec(&body.request_body).unwrap_or_default())
+    let request_bytes = serde_json::to_vec(&body.request_body).unwrap_or_default();
+    let request_blob = store.blobs.put(&request_bytes)
         .map_err(|e| (StatusCode::INSUFFICIENT_STORAGE, format!("Blob error: {e}")))?;
     let response_blob = store.blobs.put(&serde_json::to_vec(&body.response_body).unwrap_or_default())
         .map_err(|e| (StatusCode::INSUFFICIENT_STORAGE, format!("Blob error: {e}")))?;
+    // Step 0.1 — canonical hash for tool-call replay validation. Tool
+    // request bodies are usually short JSON arg dicts; redaction may be a
+    // no-op but normalize_and_hash applies it consistently with LLM calls.
+    let request_canonical_hash = rewind_store::normalize_and_hash(&request_bytes);
 
     let mut step = Step::new_llm_call(&timeline_id, &session.id, step_number, "");
     step.step_type = StepType::ToolCall;
@@ -1047,6 +1059,7 @@ async fn record_tool_call(
     step.response_blob = response_blob;
     step.tool_name = Some(body.tool_name);
     step.error = body.error;
+    step.request_hash = Some(request_canonical_hash);
     if let Some(ref cid) = body.client_step_id {
         step.id = cid.clone();
     }

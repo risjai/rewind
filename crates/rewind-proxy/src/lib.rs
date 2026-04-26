@@ -296,6 +296,15 @@ async fn handle_request(
         store.blobs.put(&redacted).unwrap_or_default()
     };
 
+    // Canonical post-redaction hash for replay cache validation (Step 0.1).
+    // Distinct from `request_hash` above which is the content-addressed blob
+    // hash. They happen to use the same redaction pipeline today, but the
+    // blob hash is "what's stored" while this is "what's compared against
+    // step.request_hash at lookup time". Decoupled so each can evolve
+    // independently (e.g. blob hash could move to compressed bytes; cache
+    // hash must stay raw for cross-path determinism).
+    let request_canonical_hash = rewind_store::normalize_and_hash(&body_bytes);
+
     let streaming = is_stream_request(&body_bytes);
 
     // ── Fork-and-Execute: serve parent steps from cache ──
@@ -317,7 +326,9 @@ async fn handle_request(
         step.tokens_out = parent_step.tokens_out;
         step.request_blob = request_hash.clone();
         step.response_blob = parent_step.response_blob.clone();
+        step.response_blob_format = parent_step.response_blob_format;
         step.step_type = parent_step.step_type.clone();
+        step.request_hash = Some(request_canonical_hash.clone());
 
         {
             let store = state.store.lock().unwrap();
@@ -361,6 +372,9 @@ async fn handle_request(
             step.tokens_out = cached.tokens_out;
             step.request_blob = request_hash.clone();
             step.response_blob = cached.response_blob.clone();
+            // Inherit format from the source cache entry (Step 0.3).
+            // Replayed step references the same blob bytes — same format applies.
+            step.request_hash = Some(request_canonical_hash.clone());
 
             {
                 let store = state.store.lock().unwrap();
@@ -426,10 +440,10 @@ async fn handle_request(
 
     match upstream_resp {
         Ok(resp) if streaming => {
-            handle_streaming_response(resp, state, step_number, model, request_hash, start).await
+            handle_streaming_response(resp, state, step_number, model, request_hash, request_canonical_hash, start).await
         }
         Ok(resp) => {
-            handle_buffered_response(resp, state, step_number, model, request_hash, start).await
+            handle_buffered_response(resp, state, step_number, model, request_hash, request_canonical_hash, start).await
         }
         Err(e) => {
             let duration_ms = start.elapsed().as_millis() as u64;
@@ -444,6 +458,7 @@ async fn handle_request(
             step.status = StepStatus::Error;
             step.duration_ms = duration_ms;
             step.request_blob = request_hash;
+            step.request_hash = Some(request_canonical_hash);
             step.error = Some(format!("Upstream error: {}", e));
 
             {
@@ -467,6 +482,7 @@ async fn handle_buffered_response(
     step_number: u32,
     model: String,
     request_hash: String,
+    request_canonical_hash: String,
     start: std::time::Instant,
 ) -> Result<Response<BoxBody>, hyper::Error> {
     let status = resp.status();
@@ -496,6 +512,7 @@ async fn handle_buffered_response(
     step.tokens_out = tokens_out;
     step.request_blob = request_hash.clone();
     step.response_blob = response_hash.clone();
+    step.request_hash = Some(request_canonical_hash);
     step.error = error;
 
     if is_tool_call_response(&resp_bytes) {
@@ -536,6 +553,7 @@ async fn handle_streaming_response(
     step_number: u32,
     model: String,
     request_hash: String,
+    request_canonical_hash: String,
     start: std::time::Instant,
 ) -> Result<Response<BoxBody>, hyper::Error> {
     let status = resp.status();
@@ -633,6 +651,7 @@ async fn handle_streaming_response(
         step.tokens_out = total_output_tokens;
         step.request_blob = request_hash;
         step.response_blob = response_hash;
+        step.request_hash = Some(request_canonical_hash);
 
         if has_tool_calls {
             step.step_type = StepType::ToolCall;
