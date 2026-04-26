@@ -164,6 +164,8 @@ mod tests {
             error: None,
             span_id: None,
             tool_name: None,
+            request_hash: None,
+            response_blob_format: 0,
         };
         store.create_step(&step1).unwrap();
 
@@ -185,6 +187,8 @@ mod tests {
             error: None,
             span_id: None,
             tool_name: Some("search".into()),
+            request_hash: None,
+            response_blob_format: 0,
         };
         store.create_step(&step2).unwrap();
 

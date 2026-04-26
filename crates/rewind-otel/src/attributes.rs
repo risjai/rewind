@@ -269,6 +269,8 @@ mod tests {
             error: None,
             span_id: None,
             tool_name: tool_name.map(|s| s.to_string()),
+            request_hash: None,
+            response_blob_format: 0,
         }
     }
 

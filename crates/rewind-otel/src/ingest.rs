@@ -189,6 +189,8 @@ pub fn ingest_trace_request(
             error,
             span_id: Some(hex_encode(&span.span_id)),
             tool_name,
+            request_hash: None,
+            response_blob_format: 0,
         };
 
         steps.push(step);

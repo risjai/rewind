@@ -247,6 +247,8 @@ mod tests {
                 error: None,
                 span_id: None,
                 tool_name: None,
+                request_hash: None,
+                response_blob_format: 0,
             },
             request_content: if include_content {
                 Some(serde_json::json!({"messages": [{"role": "user", "content": "hello"}]}))

@@ -1,4 +1,8 @@
-pub mod redact;
+/// Re-export `redact` from rewind-store. Was a proxy-internal module before
+/// v0.13; moved to the storage layer so the explicit-API record path
+/// (rewind-web) can apply identical redaction passes for cache-validation
+/// hashing. See rewind_store::hash::normalize_and_hash.
+pub use rewind_store::redact;
 
 /// Re-export pricing from rewind-store for backwards compatibility.
 pub use rewind_store::pricing;

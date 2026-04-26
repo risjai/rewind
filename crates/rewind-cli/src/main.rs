@@ -3409,6 +3409,8 @@ fn create_step_with_blobs(
         error: error.map(String::from),
         span_id: None,
         tool_name: None,
+        request_hash: None,
+        response_blob_format: 0,
     };
 
     store.create_step(&step)?;

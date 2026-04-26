@@ -4,6 +4,11 @@
 //!
 //! Redaction is applied **before** writing to the blob store so that secrets
 //! never reach disk. The redacted form is `[REDACTED]`.
+//!
+//! Lives in `rewind-store` (rather than `rewind-proxy`) so both proxy-record
+//! and explicit-API-record paths can apply identical redaction passes — a
+//! prerequisite for `normalize_and_hash` (cache-validation hashing must be
+//! deterministic across record paths).
 
 use std::sync::LazyLock;
 use regex::Regex;
@@ -44,11 +49,10 @@ pub fn is_hop_by_hop(header_name: &str) -> bool {
 /// - OpenAI API keys: `sk-[a-zA-Z0-9]{20,}`
 /// - AWS access key IDs: `AKIA[0-9A-Z]{16}`
 /// - Bearer tokens: `Bearer [a-zA-Z0-9_\-.]{10,}`
-/// - Generic long hex tokens: sequences of 40+ hex chars (SHA-1/SHA-256 hashes used as tokens)
 ///
 /// This is best-effort — novel secret formats will not be caught.
 /// Defense-in-depth: the proxy already requires auth (PR #133) and the blob
-/// store uses restrictive file permissions (PR #5 planned).
+/// store uses restrictive file permissions (PR #5).
 pub fn redact_secrets(data: &[u8]) -> Vec<u8> {
     static RE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(concat!(

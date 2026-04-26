@@ -102,11 +102,28 @@ pub struct Step {
     pub tokens_in: u64,
     pub tokens_out: u64,
     pub model: String,
-    pub request_blob: String,  // SHA-256 hash -> blob store
-    pub response_blob: String, // SHA-256 hash -> blob store
+    pub request_blob: String,  // SHA-256 hash -> blob store (content-addressed)
+    pub response_blob: String, // SHA-256 hash -> blob store (content-addressed)
     pub error: Option<String>,
     pub span_id: Option<String>,
     pub tool_name: Option<String>,
+    /// Step 0.1: post-redaction canonical hash of the request body.
+    ///
+    /// Distinct from `request_blob`: the blob hash is computed without
+    /// guarantees about redaction passes (the explicit-API record path on
+    /// `crates/rewind-web/src/api.rs:955` does not redact, while the proxy
+    /// path on `crates/rewind-proxy/src/lib.rs:289` does). For replay-cache
+    /// content validation we need a single canonical hash that's identical
+    /// between record and lookup, regardless of which record path was used.
+    /// `None` for pre-migration rows — the lookup treats `None` as "match
+    /// anything" to preserve backwards-compatible behavior.
+    pub request_hash: Option<String>,
+    /// Step 0.3: discriminator for the `response_blob` payload format.
+    /// `0` = pre-migration naked body (legacy), parsed as `{status: 200,
+    /// headers: [], body}` on read. `1` = `ResponseEnvelope` (status code +
+    /// scrubbed headers + body). New writes always use `1`. Unknown formats
+    /// fall back to `0` parsing for forward-compat.
+    pub response_blob_format: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -380,6 +397,8 @@ impl Step {
             error: None,
             span_id: None,
             tool_name: None,
+            request_hash: None,
+            response_blob_format: 0,
         }
     }
 }

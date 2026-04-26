@@ -349,6 +349,19 @@ impl Store {
             ",
         )?;
 
+        // v0.13 migrations: Step 0 prerequisites (cache content validation +
+        // structured response envelope). Backwards-compat preserved via:
+        //   - request_hash NULL ⇒ "match anything" at lookup (pre-migration rows)
+        //   - response_blob_format=0 ⇒ legacy naked body, read as {status: 200,
+        //     headers: [], body} (pre-migration rows). New writes use format=1.
+        // See docs/replay-and-forking.md and the plan for full rationale.
+        let _ = self.conn.execute("ALTER TABLE steps ADD COLUMN request_hash TEXT", []);
+        let _ = self.conn.execute("ALTER TABLE steps ADD COLUMN response_blob_format INTEGER NOT NULL DEFAULT 0", []);
+        // strict_match: per-context flag for content validation. NULL ⇒ default
+        // "warn-on-divergence" (return cached + X-Rewind-Cache-Divergent header).
+        // 1 ⇒ escalate divergence to HTTP 409. See do_replay_lookup.
+        let _ = self.conn.execute("ALTER TABLE replay_contexts ADD COLUMN strict_match INTEGER NOT NULL DEFAULT 0", []);
+
         Ok(())
     }
 
@@ -574,8 +587,8 @@ impl Store {
 
     pub fn create_step(&self, step: &Step) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO steps (id, timeline_id, session_id, step_number, step_type, status, created_at, duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error, span_id, tool_name)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            "INSERT INTO steps (id, timeline_id, session_id, step_number, step_type, status, created_at, duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error, span_id, tool_name, request_hash, response_blob_format)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 step.id,
                 step.timeline_id,
@@ -593,6 +606,8 @@ impl Store {
                 step.error,
                 step.span_id,
                 step.tool_name,
+                step.request_hash,
+                step.response_blob_format,
             ],
         )?;
         Ok(())
@@ -600,7 +615,7 @@ impl Store {
 
     pub fn get_steps(&self, timeline_id: &str) -> Result<Vec<Step>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, timeline_id, session_id, step_number, step_type, status, created_at, duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error, span_id, tool_name
+            "SELECT id, timeline_id, session_id, step_number, step_type, status, created_at, duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error, span_id, tool_name, request_hash, response_blob_format
              FROM steps WHERE timeline_id = ?1 ORDER BY step_number",
         )?;
         let rows = stmt.query_map(params![timeline_id], Self::row_to_step)?;
@@ -609,7 +624,7 @@ impl Store {
 
     pub fn get_step(&self, step_id: &str) -> Result<Option<Step>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, timeline_id, session_id, step_number, step_type, status, created_at, duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error, span_id, tool_name
+            "SELECT id, timeline_id, session_id, step_number, step_type, status, created_at, duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error, span_id, tool_name, request_hash, response_blob_format
              FROM steps WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(params![step_id], Self::row_to_step)?;
@@ -618,7 +633,7 @@ impl Store {
 
     pub fn get_step_by_number(&self, timeline_id: &str, step_number: u32) -> Result<Option<Step>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, timeline_id, session_id, step_number, step_type, status, created_at, duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error, span_id, tool_name
+            "SELECT id, timeline_id, session_id, step_number, step_type, status, created_at, duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error, span_id, tool_name, request_hash, response_blob_format
              FROM steps WHERE timeline_id = ?1 AND step_number = ?2",
         )?;
         let mut rows = stmt.query_map(params![timeline_id, step_number], Self::row_to_step)?;
@@ -1069,6 +1084,11 @@ impl Store {
             error: row.get(13)?,
             span_id: row.get(14)?,
             tool_name: row.get(15)?,
+            // Both columns added in v0.13 migration. Pre-migration rows return
+            // NULL/0 via SQLite's column default, which row.get() decodes
+            // gracefully (Option<String>::None / u8::0).
+            request_hash: row.get(16)?,
+            response_blob_format: row.get::<_, Option<u8>>(17)?.unwrap_or(0),
         })
     }
 
@@ -1654,7 +1674,7 @@ impl Store {
 
     pub fn get_steps_by_span(&self, span_id: &str) -> Result<Vec<Step>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, timeline_id, session_id, step_number, step_type, status, created_at, duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error, span_id, tool_name
+            "SELECT id, timeline_id, session_id, step_number, step_type, status, created_at, duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error, span_id, tool_name, request_hash, response_blob_format
              FROM steps WHERE span_id = ?1 ORDER BY step_number",
         )?;
         let rows = stmt.query_map(params![span_id], Self::row_to_step)?;
