@@ -6,17 +6,20 @@ This page covers the two recording modes, agent hooks for enriching traces, and 
 
 ---
 
-## Two ways to record
+## Three ways to record
 
 Choose the approach that fits your stack:
 
-| | **Direct mode** (Python) | **Proxy mode** (any language) |
-|:---|:---|:---|
-| **Setup** | `rewind_agent.init()` — one line | `rewind record` in a second terminal |
-| **Languages** | Python (OpenAI + Anthropic SDKs) | Any language that makes HTTP calls |
-| **How it works** | Monkey-patches SDK clients in-process | HTTP proxy intercepts LLM traffic |
-| **Streaming** | Captured via stream wrappers | SSE pass-through, zero added latency |
-| **Best for** | Quick iteration, Python agents | Polyglot teams, non-Python agents |
+| | **Direct mode** (Python) | **HTTP intercept** (Python) | **Proxy mode** (any language) |
+|:---|:---|:---|:---|
+| **Setup** | `rewind_agent.init()` — one line | `rewind_agent.intercept.install()` — one line | `rewind record` in a second terminal |
+| **Languages** | Python (OpenAI + Anthropic SDKs) | Python (any HTTP-based LLM client) | Any language that makes HTTP calls |
+| **How it works** | Monkey-patches SDK clients in-process | Patches HTTP transport layer (httpx, requests, aiohttp) | HTTP proxy intercepts LLM traffic |
+| **Custom gateways** | No (only OpenAI/Anthropic SDKs) | **Yes** (custom predicate matches any host) | Yes (point upstream at anything) |
+| **Streaming** | Captured via stream wrappers | Pass-through on miss; synthetic SSE on hit | SSE pass-through, zero added latency |
+| **Best for** | Quick iteration with OpenAI/Anthropic SDK | Custom HTTP clients, mTLS gateways, third-party LLM wrappers | Polyglot teams, non-Python agents |
+
+**Picking between direct and intercept:** if you use the OpenAI or Anthropic SDK directly, `init()` is zero-config. For everything else Python — LangChain, custom gateways, ray-agent-style mTLS proxies, or wrappers around `httpx`/`requests`/`aiohttp` — use `intercept.install()`. See the [HTTP Intercept Quickstart](intercept-quickstart.md) for examples.
 
 ---
 
