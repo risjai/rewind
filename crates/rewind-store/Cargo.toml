@@ -17,6 +17,10 @@ tracing = { workspace = true }
 # record path (rewind-web) can apply identical redaction passes for
 # cache-validation hashing. See src/hash.rs and src/redact.rs.
 regex = "1"
+# v0.14 (Phase 3): SensitiveString uses subtle::ConstantTimeEq for
+# auth-token comparisons. Pinned to 2.x — the crate is small, stable,
+# and the standard choice for constant-time equality in the Rust ecosystem.
+subtle = "2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
