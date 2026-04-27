@@ -179,12 +179,22 @@ impl ReplayJobState {
 }
 
 /// A dispatched replay job. Tracks state, lease deadlines, and progress.
+///
+/// **Review #152 comment 3:** `runner_id` and `replay_context_id` are
+/// `Option<String>` because the underlying columns are `ON DELETE
+/// SET NULL`. Historical jobs survive runner deletion or replay-context
+/// expiry/deletion; the dashboard renders "Runner deleted" or "Context
+/// deleted" for the null cases. Active jobs (state ∈ {pending,
+/// dispatched, in_progress}) should never have null FKs in practice
+/// because they're created with both populated and the deletion that
+/// nulled them out would normally be blocked by the in-flight state —
+/// but we don't enforce that constraint at the storage layer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplayJob {
     pub id: String,
-    pub runner_id: String,
+    pub runner_id: Option<String>,
     pub session_id: String,
-    pub replay_context_id: String,
+    pub replay_context_id: Option<String>,
     pub state: ReplayJobState,
     pub error_message: Option<String>,
     /// `"dispatch"` (runner didn't reply 202 by `dispatch_deadline_at`),
@@ -412,6 +422,19 @@ impl Store {
         Ok(())
     }
 
+    /// Find expired jobs by runner_id (used for diagnostic queries).
+    /// Returns jobs whose runner_id matches the supplied id (NOT the
+    /// null-runner case).
+    fn _list_replay_jobs_by_runner_inner(&self, runner_id: &str, limit: u32) -> Result<Vec<ReplayJob>> {
+        // helper for tests / diagnostics — see list_replay_jobs_by_runner
+        let mut stmt = self.conn.prepare(
+            "SELECT id, runner_id, session_id, replay_context_id, state, error_message, error_stage, created_at, dispatched_at, started_at, completed_at, dispatch_deadline_at, lease_expires_at, progress_step, progress_total
+             FROM replay_jobs WHERE runner_id = ?1 ORDER BY created_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![runner_id, limit], Self::row_to_replay_job)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     pub fn get_replay_job(&self, id: &str) -> Result<Option<ReplayJob>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, runner_id, session_id, replay_context_id, state, error_message, error_stage, created_at, dispatched_at, started_at, completed_at, dispatch_deadline_at, lease_expires_at, progress_step, progress_total
@@ -421,13 +444,23 @@ impl Store {
         Ok(rows.next().transpose()?)
     }
 
-    /// List jobs for a runner, newest first.
+    /// List jobs for a runner (newest first). Excludes jobs whose
+    /// `runner_id` was nulled out by `ON DELETE SET NULL` after the
+    /// runner was deleted — those still exist in the table for
+    /// historical context but aren't owned by any runner.
     pub fn list_replay_jobs_by_runner(&self, runner_id: &str, limit: u32) -> Result<Vec<ReplayJob>> {
+        self._list_replay_jobs_by_runner_inner(runner_id, limit)
+    }
+
+    /// List jobs whose `runner_id` is null (i.e. their runner has
+    /// been deleted). Useful for the dashboard's "orphaned jobs"
+    /// view and for cleanup tooling.
+    pub fn list_orphaned_replay_jobs(&self, limit: u32) -> Result<Vec<ReplayJob>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, runner_id, session_id, replay_context_id, state, error_message, error_stage, created_at, dispatched_at, started_at, completed_at, dispatch_deadline_at, lease_expires_at, progress_step, progress_total
-             FROM replay_jobs WHERE runner_id = ?1 ORDER BY created_at DESC LIMIT ?2",
+             FROM replay_jobs WHERE runner_id IS NULL ORDER BY created_at DESC LIMIT ?1",
         )?;
-        let rows = stmt.query_map(params![runner_id, limit], Self::row_to_replay_job)?;
+        let rows = stmt.query_map(params![limit], Self::row_to_replay_job)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
@@ -459,11 +492,18 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    /// Transition a job to a new state. Caller is responsible for
-    /// validating the transition is legal — but we enforce
-    /// terminal-state protection here: once a job is in a terminal
-    /// state (`completed`/`errored`), this method refuses further
-    /// transitions and returns false.
+    /// Transition a job to a new state.
+    ///
+    /// **Review #152 comment 2 fix:** terminal-state protection is now
+    /// enforced at the SQL level via `WHERE id = ?N AND state NOT IN
+    /// ('completed', 'errored')`. This closes the TOCTOU race where
+    /// the previous read-then-write check let two concurrent transactions
+    /// (e.g. reaper + late `completed` event) both pass the check and
+    /// then race to write conflicting terminal states.
+    ///
+    /// Returns `true` if the row was updated (state advanced),
+    /// `false` if no row matched (either the job doesn't exist OR
+    /// it's already in a terminal state). Idempotent caller behavior.
     ///
     /// Sets the corresponding timestamp column for the new state.
     pub fn advance_replay_job_state(
@@ -473,12 +513,6 @@ impl Store {
         error_message: Option<&str>,
         error_stage: Option<&str>,
     ) -> Result<bool> {
-        let current = self.get_replay_job(id)?;
-        let Some(job) = current else { return Ok(false); };
-        if job.state.is_terminal() {
-            // Refuse further transitions; idempotent caller behavior.
-            return Ok(false);
-        }
         let now = Utc::now().to_rfc3339();
         let (timestamp_col, timestamp_val): (Option<&str>, Option<&str>) = match new_state {
             ReplayJobState::Dispatched => (Some("dispatched_at"), Some(now.as_str())),
@@ -489,20 +523,136 @@ impl Store {
             ReplayJobState::Pending => (None, None),
         };
 
+        // ATOMIC: state guard inlined into the WHERE clause so two
+        // concurrent transactions can't both pass a read-side check
+        // and then race to write conflicting terminal states. SQLite
+        // serializes the UPDATE; whichever lands first wins, the
+        // second sees 0 rows-affected and returns false.
         let n = if let (Some(col), Some(val)) = (timestamp_col, timestamp_val) {
             self.conn.execute(
                 &format!(
-                    "UPDATE replay_jobs SET state = ?1, error_message = ?2, error_stage = ?3, {col} = ?4 WHERE id = ?5"
+                    "UPDATE replay_jobs SET state = ?1, error_message = ?2, error_stage = ?3, {col} = ?4
+                     WHERE id = ?5 AND state NOT IN ('completed', 'errored')"
                 ),
                 params![new_state.as_str(), error_message, error_stage, val, id],
             )?
         } else {
             self.conn.execute(
-                "UPDATE replay_jobs SET state = ?1, error_message = ?2, error_stage = ?3 WHERE id = ?4",
+                "UPDATE replay_jobs SET state = ?1, error_message = ?2, error_stage = ?3
+                 WHERE id = ?4 AND state NOT IN ('completed', 'errored')",
                 params![new_state.as_str(), error_message, error_stage, id],
             )?
         };
         Ok(n > 0)
+    }
+
+    /// Atomically record an event AND apply the state/progress/lease
+    /// update it implies. Single transaction; terminal-state guarded
+    /// in SQL.
+    ///
+    /// **Review #152 comment 1 fix:** previously, `append_replay_job_event`
+    /// just inserted into `replay_job_events` with no awareness of the
+    /// job's state, so a late `completed` event could land AFTER the
+    /// job was already terminal — the event log would contradict
+    /// `replay_jobs.state`. This method makes the event-and-transition
+    /// atomic: if the job is already in a terminal state, the whole
+    /// thing is rolled back and `Ok(false)` is returned.
+    ///
+    /// Per event_type:
+    /// - `Started` → state = in_progress, started_at = now,
+    ///   extends lease
+    /// - `Progress` → updates progress_step / progress_total,
+    ///   extends lease (no state change)
+    /// - `Completed` → state = completed, completed_at = now
+    /// - `Errored` → state = errored, completed_at = now,
+    ///   error_message + error_stage set
+    ///
+    /// `lease_extension_seconds` controls how far in the future
+    /// `lease_expires_at` is bumped on Started and Progress events.
+    /// 300 (5 min) is the production default; tests may pass smaller
+    /// values to exercise expiry behavior.
+    pub fn record_replay_job_event_atomic(
+        &mut self,
+        event: &ReplayJobEvent,
+        progress_total: Option<u32>,
+        error_message: Option<&str>,
+        error_stage: Option<&str>,
+        lease_extension_seconds: i64,
+    ) -> Result<bool> {
+        let tx = self.conn.transaction()?;
+
+        // 1. Verify the job exists and is non-terminal in the SAME
+        // transaction. SELECT FOR UPDATE isn't a SQLite primitive
+        // but the BEGIN IMMEDIATE-equivalent semantics from rusqlite's
+        // default transaction behavior gives us serializable isolation
+        // here — concurrent transactions block until commit/rollback.
+        let current_state: Option<String> = tx
+            .query_row(
+                "SELECT state FROM replay_jobs WHERE id = ?1",
+                params![event.job_id],
+                |row| row.get(0),
+            )
+            .ok();
+        let Some(state_str) = current_state else {
+            tx.rollback()?;
+            return Ok(false);
+        };
+        if matches!(state_str.as_str(), "completed" | "errored") {
+            tx.rollback()?;
+            return Ok(false);
+        }
+
+        // 2. Insert the event row.
+        tx.execute(
+            "INSERT INTO replay_job_events (id, job_id, event_type, step_number, payload, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                event.id,
+                event.job_id,
+                event.event_type.as_str(),
+                event.step_number,
+                event.payload,
+                event.created_at.to_rfc3339(),
+            ],
+        )?;
+
+        // 3. Apply the state/progress/lease change for this event_type.
+        let now = Utc::now().to_rfc3339();
+        let new_lease = (Utc::now() + chrono::Duration::seconds(lease_extension_seconds))
+            .to_rfc3339();
+        match event.event_type {
+            ReplayJobEventType::Started => {
+                tx.execute(
+                    "UPDATE replay_jobs SET state = 'in_progress', started_at = ?1, lease_expires_at = ?2
+                     WHERE id = ?3",
+                    params![now, new_lease, event.job_id],
+                )?;
+            }
+            ReplayJobEventType::Progress => {
+                tx.execute(
+                    "UPDATE replay_jobs SET progress_step = ?1, progress_total = COALESCE(?2, progress_total), lease_expires_at = ?3
+                     WHERE id = ?4",
+                    params![event.step_number.unwrap_or(0), progress_total, new_lease, event.job_id],
+                )?;
+            }
+            ReplayJobEventType::Completed => {
+                tx.execute(
+                    "UPDATE replay_jobs SET state = 'completed', completed_at = ?1
+                     WHERE id = ?2",
+                    params![now, event.job_id],
+                )?;
+            }
+            ReplayJobEventType::Errored => {
+                tx.execute(
+                    "UPDATE replay_jobs SET state = 'errored', completed_at = ?1, error_message = ?2, error_stage = ?3
+                     WHERE id = ?4",
+                    params![now, error_message, error_stage, event.job_id],
+                )?;
+            }
+        }
+
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Extend the lease (called on heartbeat / progress events). The
@@ -537,8 +687,11 @@ impl Store {
     fn row_to_replay_job(row: &rusqlite::Row) -> rusqlite::Result<ReplayJob> {
         Ok(ReplayJob {
             id: row.get(0)?,
+            // ON DELETE SET NULL means runner_id can be NULL after
+            // runner deletion (Review #152 comment 3); model as Option<>.
             runner_id: row.get(1)?,
             session_id: row.get(2)?,
+            // Same: nullable after replay-context deletion / TTL.
             replay_context_id: row.get(3)?,
             state: {
                 let s: String = row.get(4)?;
@@ -563,10 +716,24 @@ impl Store {
         })
     }
 
-    // ReplayJobEvents (append-only)
+    // ReplayJobEvents (append-only — see record_replay_job_event_atomic
+    // for the production write path; this raw method is footgun-protected
+    // pub(crate) for diagnostic / migration tooling only).
     // -------------------------------------------------------------
 
-    pub fn append_replay_job_event(&self, event: &ReplayJobEvent) -> Result<()> {
+    /// Insert an event row without checking job state.
+    ///
+    /// **Review #152 comment 1:** this raw insert is gated behind
+    /// `#[cfg(test)]` because it bypasses the terminal-state guard.
+    /// Production callers (HTTP event ingestion in commit 6) MUST go
+    /// through [`Self::record_replay_job_event_atomic`] which
+    /// validates state in a transaction. Tests use this to seed
+    /// out-of-band event histories that wouldn't be reachable via
+    /// the production state machine. If a future operator tool
+    /// genuinely needs raw event backfill, promote this to
+    /// `pub(crate)` then and document the migration use case.
+    #[cfg(test)]
+    pub(crate) fn append_replay_job_event(&self, event: &ReplayJobEvent) -> Result<()> {
         self.conn.execute(
             "INSERT INTO replay_job_events (id, job_id, event_type, step_number, payload, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -759,6 +926,26 @@ mod tests {
         assert!(after.last_seen_at.is_some());
     }
 
+    /// Seed a session + timeline + replay_context and return the
+    /// context id. Used by tests that exercise the replay_context_id
+    /// FK behavior (e.g. ON DELETE SET NULL cascade).
+    fn fake_replay_context_for_job(store: &Store, session_id: &str) -> String {
+        let timeline_id = Uuid::new_v4().to_string();
+        store
+            .conn
+            .execute(
+                "INSERT INTO timelines (id, session_id, parent_timeline_id, fork_at_step, created_at, label)
+                 VALUES (?1, ?2, NULL, NULL, ?3, 'main')",
+                params![timeline_id, session_id, Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+        let ctx_id = Uuid::new_v4().to_string();
+        store
+            .create_replay_context(&ctx_id, session_id, &timeline_id, 0)
+            .unwrap();
+        ctx_id
+    }
+
     fn fake_session_for_job(store: &Store) -> String {
         // Replay jobs FK to sessions, so we need a real session row.
         use crate::{Session, SessionSource, SessionStatus};
@@ -780,11 +967,15 @@ mod tests {
     }
 
     fn fake_job(runner_id: &str, session_id: &str) -> ReplayJob {
+        // replay_context_id defaults to None to avoid FK violations
+        // in tests that don't care about the replay-context relation.
+        // Tests that exercise the replay_context FK (e.g. the cascade
+        // regression) seed a real replay_context row separately.
         ReplayJob {
             id: Uuid::new_v4().to_string(),
-            runner_id: runner_id.to_string(),
+            runner_id: Some(runner_id.to_string()),
             session_id: session_id.to_string(),
-            replay_context_id: Uuid::new_v4().to_string(),
+            replay_context_id: None,
             state: ReplayJobState::Pending,
             error_message: None,
             error_stage: None,
@@ -810,7 +1001,7 @@ mod tests {
         store.create_replay_job(&job).unwrap();
         let fetched = store.get_replay_job(&job.id).unwrap().unwrap();
         assert_eq!(fetched.state, ReplayJobState::Pending);
-        assert_eq!(fetched.runner_id, runner.id);
+        assert_eq!(fetched.runner_id.as_deref(), Some(runner.id.as_str()));
         assert_eq!(fetched.session_id, session_id);
         assert_eq!(fetched.progress_step, 0);
     }
@@ -994,5 +1185,323 @@ mod tests {
         assert!(!ReplayJobState::InProgress.is_terminal());
         assert!(ReplayJobState::Completed.is_terminal());
         assert!(ReplayJobState::Errored.is_terminal());
+    }
+
+    // ── Review #152 regression coverage ────────────────────────
+
+    /// Comment 4: auth_token_hash must be UNIQUE — duplicate insertion
+    /// must fail at the schema boundary. Pre-fix this was a non-unique
+    /// index and two runners could collide.
+    #[test]
+    fn duplicate_auth_token_hash_is_rejected_by_schema() {
+        let (store, _dir) = test_store();
+
+        let r1 = fake_runner("first");
+        // Override r2's hash to match r1's, simulating a collision.
+        // (In production a hash collision is astronomically unlikely
+        // but operator import bugs / fixture mistakes can produce one.)
+        let mut r2 = fake_runner("second");
+        r2.auth_token_hash = r1.auth_token_hash.clone();
+
+        store.create_runner(&r1).unwrap();
+        let result = store.create_runner(&r2);
+
+        assert!(
+            result.is_err(),
+            "duplicate auth_token_hash should fail at the unique-index boundary"
+        );
+        // Sanity: the original runner is still findable by hash.
+        let found = store.get_runner_by_auth_hash(&r1.auth_token_hash).unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().id, r1.id);
+    }
+
+    /// Comment 3: deleting a runner must SET NULL on dependent
+    /// replay_jobs.runner_id rather than block deletion or cascade
+    /// delete the historical job rows.
+    #[test]
+    fn delete_runner_nulls_runner_id_on_replay_jobs() {
+        let (store, _dir) = test_store();
+        let runner = fake_runner("doomed");
+        store.create_runner(&runner).unwrap();
+        let session_id = fake_session_for_job(&store);
+
+        // Create a job referencing the runner.
+        let job = fake_job(&runner.id, &session_id);
+        store.create_replay_job(&job).unwrap();
+        assert_eq!(
+            store.get_replay_job(&job.id).unwrap().unwrap().runner_id.as_deref(),
+            Some(runner.id.as_str())
+        );
+
+        // Delete the runner. The job should survive but with runner_id NULL.
+        assert!(store.delete_runner(&runner.id).unwrap());
+        let after = store.get_replay_job(&job.id).unwrap().unwrap();
+        assert!(
+            after.runner_id.is_none(),
+            "ON DELETE SET NULL should null out runner_id, not delete the job"
+        );
+        // Job state preserved (historical context).
+        assert_eq!(after.state, ReplayJobState::Pending);
+
+        // The job appears in the orphaned-jobs listing.
+        let orphans = store.list_orphaned_replay_jobs(10).unwrap();
+        assert!(orphans.iter().any(|j| j.id == job.id));
+    }
+
+    /// Comment 3: same cascade behavior for replay_context_id.
+    /// Deleting a replay_context (e.g. by TTL cleanup) nulls out
+    /// dependent replay_jobs.replay_context_id but leaves the job
+    /// row intact.
+    #[test]
+    fn delete_replay_context_nulls_context_id_on_replay_jobs() {
+        let (store, _dir) = test_store();
+        let runner = fake_runner("doomed-ctx");
+        store.create_runner(&runner).unwrap();
+        let session_id = fake_session_for_job(&store);
+        let ctx_id = fake_replay_context_for_job(&store, &session_id);
+
+        // Create a job referencing both runner and context.
+        let mut job = fake_job(&runner.id, &session_id);
+        job.replay_context_id = Some(ctx_id.clone());
+        store.create_replay_job(&job).unwrap();
+        assert_eq!(
+            store
+                .get_replay_job(&job.id)
+                .unwrap()
+                .unwrap()
+                .replay_context_id
+                .as_deref(),
+            Some(ctx_id.as_str())
+        );
+
+        // Delete the replay_context — TTL cleanup or explicit user action.
+        store
+            .conn
+            .execute(
+                "DELETE FROM replay_contexts WHERE id = ?1",
+                params![ctx_id],
+            )
+            .unwrap();
+
+        // Job survives, with replay_context_id nulled out.
+        let after = store.get_replay_job(&job.id).unwrap().unwrap();
+        assert!(
+            after.replay_context_id.is_none(),
+            "ON DELETE SET NULL on replay_context_id should null it out"
+        );
+        assert_eq!(after.runner_id.as_deref(), Some(runner.id.as_str()));
+    }
+
+    /// Comment 2: terminal-state protection must be atomic. Two
+    /// concurrent transitions to terminal states (e.g. reaper sets
+    /// errored while a late `completed` event arrives) must both
+    /// not "succeed" — only one wins, the second sees the row in a
+    /// terminal state and reports false.
+    ///
+    /// SQLite serializes concurrent UPDATEs at the connection level
+    /// rather than truly running them in parallel; the simulation
+    /// below reads-then-writes from two different angles and confirms
+    /// the SQL-level guard rejects the second write.
+    #[test]
+    fn advance_state_atomic_guard_rejects_post_terminal_writes() {
+        let (store, _dir) = test_store();
+        let runner = fake_runner("r1");
+        store.create_runner(&runner).unwrap();
+        let session_id = fake_session_for_job(&store);
+        let job = fake_job(&runner.id, &session_id);
+        store.create_replay_job(&job).unwrap();
+
+        // Reaper transitions to errored first.
+        let reaper_won = store
+            .advance_replay_job_state(
+                &job.id,
+                ReplayJobState::Errored,
+                Some("lease expired"),
+                Some("lease_expired"),
+            )
+            .unwrap();
+        assert!(reaper_won, "reaper's transition should succeed");
+
+        // Late event tries to transition to completed. SQL-level
+        // guard rejects it; rows-affected is 0; we return false.
+        let late_event_won = store
+            .advance_replay_job_state(&job.id, ReplayJobState::Completed, None, None)
+            .unwrap();
+        assert!(
+            !late_event_won,
+            "late completed event after terminal errored should NOT succeed (SQL guard)"
+        );
+
+        // Confirm the job is still in errored state with reaper's
+        // error message — the late completed didn't bleed through.
+        let final_job = store.get_replay_job(&job.id).unwrap().unwrap();
+        assert_eq!(final_job.state, ReplayJobState::Errored);
+        assert_eq!(final_job.error_message.as_deref(), Some("lease expired"));
+        assert_eq!(final_job.error_stage.as_deref(), Some("lease_expired"));
+    }
+
+    /// Comment 1: the new atomic `record_replay_job_event_atomic`
+    /// rejects late events arriving after the job is already terminal.
+    /// Same threat model as comment 2 but via the event-ingestion
+    /// path that commit 6 will use.
+    #[test]
+    fn atomic_event_record_rejects_late_event_after_terminal() {
+        let (mut store, _dir) = test_store();
+        let runner = fake_runner("r1");
+        store.create_runner(&runner).unwrap();
+        let session_id = fake_session_for_job(&store);
+        let job = fake_job(&runner.id, &session_id);
+        store.create_replay_job(&job).unwrap();
+
+        // Move to terminal state via the legitimate path.
+        store
+            .advance_replay_job_state(
+                &job.id,
+                ReplayJobState::Completed,
+                None,
+                None,
+            )
+            .unwrap();
+
+        // Now try to record a late `progress` event. Atomic guard
+        // sees the terminal state, rolls back, returns false.
+        let late_event = ReplayJobEvent {
+            id: Uuid::new_v4().to_string(),
+            job_id: job.id.clone(),
+            event_type: ReplayJobEventType::Progress,
+            step_number: Some(99),
+            payload: Some(r#"{"step":"99"}"#.to_string()),
+            created_at: Utc::now(),
+        };
+        let accepted = store
+            .record_replay_job_event_atomic(&late_event, None, None, None, 300)
+            .unwrap();
+        assert!(
+            !accepted,
+            "late progress event after terminal must be rejected"
+        );
+
+        // The event row was NOT inserted (transaction rolled back).
+        let events = store.list_replay_job_events(&job.id).unwrap();
+        assert!(
+            !events.iter().any(|e| e.id == late_event.id),
+            "rolled-back transaction left the event row in the DB"
+        );
+
+        // Job state untouched.
+        let final_job = store.get_replay_job(&job.id).unwrap().unwrap();
+        assert_eq!(final_job.state, ReplayJobState::Completed);
+    }
+
+    /// Comment 1: atomic `started` event transitions state +
+    /// extends lease + inserts event row in one transaction.
+    #[test]
+    fn atomic_started_event_transitions_state_and_extends_lease() {
+        let (mut store, _dir) = test_store();
+        let runner = fake_runner("r1");
+        store.create_runner(&runner).unwrap();
+        let session_id = fake_session_for_job(&store);
+        let mut job = fake_job(&runner.id, &session_id);
+        job.state = ReplayJobState::Dispatched;
+        store.create_replay_job(&job).unwrap();
+
+        let started_event = ReplayJobEvent {
+            id: Uuid::new_v4().to_string(),
+            job_id: job.id.clone(),
+            event_type: ReplayJobEventType::Started,
+            step_number: None,
+            payload: None,
+            created_at: Utc::now(),
+        };
+        let accepted = store
+            .record_replay_job_event_atomic(&started_event, None, None, None, 300)
+            .unwrap();
+        assert!(accepted);
+
+        let after = store.get_replay_job(&job.id).unwrap().unwrap();
+        assert_eq!(after.state, ReplayJobState::InProgress);
+        assert!(after.started_at.is_some());
+        assert!(after.lease_expires_at.is_some());
+
+        // Lease should be ~5min in the future (within tolerance).
+        let lease = after.lease_expires_at.unwrap();
+        let expected_min = Utc::now() + chrono::Duration::seconds(290);
+        let expected_max = Utc::now() + chrono::Duration::seconds(310);
+        assert!(
+            lease >= expected_min && lease <= expected_max,
+            "lease should be ~5min in the future, got {lease}"
+        );
+
+        let events = store.list_replay_job_events(&job.id).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, ReplayJobEventType::Started);
+    }
+
+    /// Comment 1: atomic `progress` event updates progress_step +
+    /// extends lease without changing state.
+    #[test]
+    fn atomic_progress_event_updates_progress_and_lease_no_state_change() {
+        let (mut store, _dir) = test_store();
+        let runner = fake_runner("r1");
+        store.create_runner(&runner).unwrap();
+        let session_id = fake_session_for_job(&store);
+        let mut job = fake_job(&runner.id, &session_id);
+        job.state = ReplayJobState::InProgress;
+        store.create_replay_job(&job).unwrap();
+
+        let progress_event = ReplayJobEvent {
+            id: Uuid::new_v4().to_string(),
+            job_id: job.id.clone(),
+            event_type: ReplayJobEventType::Progress,
+            step_number: Some(7),
+            payload: Some(r#"{"step":"7"}"#.to_string()),
+            created_at: Utc::now(),
+        };
+        store
+            .record_replay_job_event_atomic(&progress_event, Some(20), None, None, 300)
+            .unwrap();
+
+        let after = store.get_replay_job(&job.id).unwrap().unwrap();
+        assert_eq!(after.state, ReplayJobState::InProgress, "progress events don't change state");
+        assert_eq!(after.progress_step, 7);
+        assert_eq!(after.progress_total, Some(20));
+    }
+
+    /// Comment 1 sanity: atomic `errored` event transitions state +
+    /// records error_message / error_stage in one transaction.
+    #[test]
+    fn atomic_errored_event_records_error_fields() {
+        let (mut store, _dir) = test_store();
+        let runner = fake_runner("r1");
+        store.create_runner(&runner).unwrap();
+        let session_id = fake_session_for_job(&store);
+        let mut job = fake_job(&runner.id, &session_id);
+        job.state = ReplayJobState::InProgress;
+        store.create_replay_job(&job).unwrap();
+
+        let errored = ReplayJobEvent {
+            id: Uuid::new_v4().to_string(),
+            job_id: job.id.clone(),
+            event_type: ReplayJobEventType::Errored,
+            step_number: None,
+            payload: Some(r#"{"error":"agent died"}"#.to_string()),
+            created_at: Utc::now(),
+        };
+        store
+            .record_replay_job_event_atomic(
+                &errored,
+                None,
+                Some("agent died at step 5"),
+                Some("agent"),
+                300,
+            )
+            .unwrap();
+
+        let after = store.get_replay_job(&job.id).unwrap().unwrap();
+        assert_eq!(after.state, ReplayJobState::Errored);
+        assert_eq!(after.error_message.as_deref(), Some("agent died at step 5"));
+        assert_eq!(after.error_stage.as_deref(), Some("agent"));
+        assert!(after.completed_at.is_some());
     }
 }

@@ -408,10 +408,14 @@ impl Store {
             )",
             [],
         )?;
-        // Indexed for the inbound-auth fast path (commit 6's
-        // X-Rewind-Runner-Auth header lookup).
+        // Review #152 comment 4: auth_token_hash MUST be UNIQUE — it's
+        // the inbound-auth lookup key. If two rows ever share a hash
+        // (buggy import, fixture mistake, manual edit, pathological
+        // generation), get_runner_by_auth_hash returns whichever row
+        // SQLite yields first and ownership checks could bind events
+        // to the wrong runner. Enforce at the schema boundary.
         self.conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_runners_auth_token_hash ON runners(auth_token_hash)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_runners_auth_token_hash ON runners(auth_token_hash)",
             [],
         )?;
         self.conn.execute(
@@ -419,12 +423,19 @@ impl Store {
             [],
         )?;
 
+        // Review #152 comment 3: replay_jobs needs FKs on runner_id and
+        // replay_context_id. Both nullable with ON DELETE SET NULL so
+        // historical job rows survive runner / replay-context deletion
+        // (the dashboard renders "Runner deleted" / "Context deleted"
+        // for null values). Hard NOT NULL would force cascading deletes
+        // (lose history) or RESTRICT (block delete until jobs are
+        // cleaned). Nullable+SET NULL is the documented choice.
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS replay_jobs (
                 id TEXT PRIMARY KEY,
-                runner_id TEXT NOT NULL,
-                session_id TEXT NOT NULL,
-                replay_context_id TEXT NOT NULL,
+                runner_id TEXT REFERENCES runners(id) ON DELETE SET NULL,
+                session_id TEXT NOT NULL REFERENCES sessions(id),
+                replay_context_id TEXT REFERENCES replay_contexts(id) ON DELETE SET NULL,
                 state TEXT NOT NULL DEFAULT 'pending'
                     CHECK (state IN ('pending','dispatched','in_progress','completed','errored')),
                 error_message TEXT,
@@ -436,8 +447,7 @@ impl Store {
                 dispatch_deadline_at TEXT,
                 lease_expires_at TEXT,
                 progress_step INTEGER NOT NULL DEFAULT 0,
-                progress_total INTEGER,
-                FOREIGN KEY(session_id) REFERENCES sessions(id)
+                progress_total INTEGER
             )",
             [],
         )?;
