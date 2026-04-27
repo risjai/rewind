@@ -16,31 +16,54 @@ You can use both at once. The decorator's check fires first (it wraps the user's
 
 ## Session requirement
 
-The decorator records via `ExplicitClient.record_llm_call`, which is a no-op when no Rewind session is active. **You must enter a session context before calling decorated functions** — otherwise the function runs normally and returns the live result, but nothing gets recorded (silent no-op consistent with the rest of the SDK).
+The decorator records via `ExplicitClient.record_llm_call`, which is a no-op when no Rewind session is active on the `ExplicitClient` contextvar. **You must enter a session through `ExplicitClient` before calling decorated functions** — otherwise the function runs normally and returns the live result, but nothing gets recorded (silent no-op consistent with the rest of the SDK).
 
-Three ways to enter a session:
+Three valid patterns:
 
 ```python
-# 1. Scoped context manager (preferred for tests / one-off scripts)
 from rewind_agent import ExplicitClient
 
 client = ExplicitClient()
+
+# 1. Scoped context manager (preferred for tests / one-off scripts)
 with client.session("my-experiment"):
     result = chat("What is 2+2?")  # records under "my-experiment"
 
-# 2. Long-lived session (one per conversation)
+# 2. Long-lived session (one per conversation; auto-cached, evicts after 2h idle)
 client.ensure_session(conversation_id="user-123")
 result1 = chat(...)
 result2 = chat(...)  # both record under the same session
 
-# 3. Auto-session via init() (zero-config for OpenAI/Anthropic SDK users)
-import rewind_agent
-rewind_agent.init()  # opens a session for this process
-# Plus init() patches OpenAI/Anthropic SDK clients, so the decorator
-# is overlay icing on top of automatic SDK recording.
+# 3. Replay against an existing session
+client.start_replay(session_id, strict_match=False)
+result = chat(...)  # cache hit if args match the recording
 ```
 
-Without one of these, the decorated function works correctly but recording silently does nothing. This is by design: the decorator should never crash a production agent because Rewind isn't configured.
+### `init()` does NOT enable the decorator
+
+A common gotcha: `rewind_agent.init()` opens a session for the **direct-mode SDK monkey-patches** (`patch.py`), but the decorator records through `ExplicitClient`, which uses a separate contextvar in `explicit.py`. The two are NOT the same.
+
+If you call `init()` and decorate a function, the inner OpenAI/Anthropic SDK call gets recorded (via `init()`'s patches), but the decorator's outer `record_llm_call` is still a silent no-op. To get function-level recording, you need one of the three `ExplicitClient` patterns above.
+
+You can use them together:
+
+```python
+import rewind_agent
+from rewind_agent import ExplicitClient, cached_llm_call
+
+rewind_agent.init()                 # records OpenAI/Anthropic SDK calls
+client = ExplicitClient()
+
+@cached_llm_call()
+def chat(q): ...
+
+with client.session("composed"):
+    result = chat("...")  # NOW the decorator records too
+    # The contextvar suppresses init()'s inner record on miss to
+    # avoid double-recording — see "Composition" section below.
+```
+
+Without `ExplicitClient.session()`/`ensure_session()`/`start_replay()`, the decorator runs and returns correctly but doesn't record. This is by design: the decorator should never crash a production agent because Rewind isn't configured.
 
 ## 60-second quickstart
 
