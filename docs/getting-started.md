@@ -72,6 +72,19 @@ The `rewind demo` command seeds sample data so you can explore the TUI, web dash
 rewind demo && rewind inspect latest
 ```
 
+### Already-Python alternative — no proxy
+
+If your agent is Python, you can skip the proxy entirely:
+
+```python
+from rewind_agent import intercept
+intercept.install()  # patches httpx / requests / aiohttp; recording starts
+
+# … your existing code unchanged …
+```
+
+This is the **HTTP intercept** path — works with any HTTP-based LLM client (OpenAI SDK, Anthropic SDK, LangChain, custom gateways via custom predicates, etc.). See the [HTTP Intercept Quickstart](intercept-quickstart.md).
+
 ---
 
 ## Works with any LLM provider
