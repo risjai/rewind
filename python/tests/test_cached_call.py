@@ -431,6 +431,10 @@ class TestToJsonSerializable(unittest.TestCase):
 
 class TestRequestPayload(unittest.TestCase):
     def test_default_payload_shape_is_stable(self) -> None:
+        # Review #2 fix: payload now contains ONLY identity fields
+        # (_rewind_decorator, fn_name, cache_key). args/kwargs are
+        # absent so unstable arg reprs (object IDs etc) can't poison
+        # the server-side hash.
         payload = _build_request_payload(
             "my_module.my_fn", ("a",), {"k": "v"}, cache_key=None
         )
@@ -438,8 +442,12 @@ class TestRequestPayload(unittest.TestCase):
         self.assertEqual(payload["fn_name"], "my_module.my_fn")
         self.assertIsInstance(payload["cache_key"], str)
         self.assertEqual(len(payload["cache_key"]), 64)  # SHA-256 hex
-        self.assertEqual(payload["args_repr"], ["a"])
-        self.assertEqual(payload["kwargs_repr"], {"k": "v"})
+        # Args/kwargs intentionally absent — see Review #2 fix.
+        self.assertNotIn("args_repr", payload)
+        self.assertNotIn("kwargs_repr", payload)
+        # Payload has exactly 3 fields; any drift would change the
+        # server-side hash and break cross-version cache hits.
+        self.assertEqual(set(payload.keys()), {"_rewind_decorator", "fn_name", "cache_key"})
 
     def test_custom_cache_key_replaces_default(self) -> None:
         payload = _build_request_payload(
@@ -455,6 +463,184 @@ class TestRequestPayload(unittest.TestCase):
 
         payload = _build_request_payload("fn", (), {}, cache_key=boom)
         self.assertEqual(len(payload["cache_key"]), 64)  # default sha256
+
+
+# ── Review #151 regression coverage ────────────────────────────────
+
+
+class TestCustomCacheKeyIsolation(unittest.TestCase):
+    """Review #151 #2: custom cache_key MUST control server-side
+    cache identity — the request_payload sent to the server must NOT
+    include args/kwargs whose repr varies across processes
+    (memory-address-bearing objects). Two calls with the same custom
+    cache_key but different unhashable arg objects must produce
+    identical payloads.
+    """
+
+    def test_custom_cache_key_payload_is_independent_of_arg_reprs(self) -> None:
+        """The whole point of custom cache_key. Two `object()` instances
+        have different reprs (different memory addresses), so if our
+        payload baked args_repr in, the hash would differ.
+        """
+        client1 = object()  # different objects, different reprs
+        client2 = object()
+        self.assertNotEqual(repr(client1), repr(client2))
+
+        payload1 = _build_request_payload(
+            "chat", (client1, "hi"), {}, cache_key=lambda client, q: q
+        )
+        payload2 = _build_request_payload(
+            "chat", (client2, "hi"), {}, cache_key=lambda client, q: q
+        )
+
+        # Identical payloads — the unhashable client arg is invisible
+        # to the cache. SAME hash on the server.
+        self.assertEqual(payload1, payload2,
+                         "custom cache_key didn't isolate cache identity from "
+                         "non-stable arg reprs — Review #151 #2 regression")
+        self.assertEqual(payload1["cache_key"], "hi")
+
+    def test_decorator_with_custom_cache_key_records_stable_request_across_clients(self) -> None:
+        """End-to-end: two calls through the decorator, with the same
+        custom cache_key but different unhashable client args, produce
+        the same request payload at record time. The server would see
+        identical request_hashes → cache hit on the second call.
+        """
+        with _CacheHarness() as h:
+            # cache_key ignores the first positional arg (client),
+            # uses only the second (question).
+            @cached_llm_call(cache_key=lambda client, q: q)
+            def chat(client: Any, q: str) -> dict:
+                return {"answer": q}
+
+            client1 = object()
+            client2 = object()
+
+            # Both calls miss (cache_response stays None) → both record.
+            chat(client1, "hello")
+            chat(client2, "hello")
+
+            self.assertEqual(len(h.recorded_calls), 2)
+            req1 = h.recorded_calls[0]["request"]
+            req2 = h.recorded_calls[1]["request"]
+            self.assertEqual(req1, req2,
+                             "two recordings with same custom cache_key but "
+                             "different client objects produced different requests")
+
+    def test_default_cache_key_payload_independent_of_unstable_object_args(self) -> None:
+        """Even WITHOUT a custom cache_key, the default key derivation
+        uses _safe_repr which falls back to repr(). Pathological
+        objects with address-bearing reprs (the WHOLE reason custom
+        cache_key exists) WILL produce different default keys across
+        processes — that's expected and documented. This test pins
+        the behavior so a future "smart" default-key change doesn't
+        silently shift it.
+        """
+        # Two distinct object instances → different repr → different
+        # default cache_key. Documented behavior.
+        client1 = object()
+        client2 = object()
+        payload1 = _build_request_payload("fn", (client1,), {}, cache_key=None)
+        payload2 = _build_request_payload("fn", (client2,), {}, cache_key=None)
+        self.assertNotEqual(
+            payload1["cache_key"], payload2["cache_key"],
+            "default cache key collided across distinct object args — "
+            "should differ until user supplies custom cache_key"
+        )
+
+
+class TestNoSessionSilentBehavior(unittest.TestCase):
+    """Review #151 #1: ExplicitClient.record_llm_call returns None
+    silently when no session is active (``_session_id`` contextvar
+    is unset). The decorator inherits this behavior — function still
+    runs and returns the live result, but recording is a no-op.
+
+    This is consistent with the rest of the SDK (init() / intercept
+    have the same precondition). Document this in the docstring; this
+    test pins the contract so a future "auto-create session"
+    refactor doesn't silently change it without explicit decision.
+    """
+
+    def test_no_session_function_runs_and_returns_live_result(self) -> None:
+        # Reset session contextvar to simulate "user never entered
+        # client.session() / called ensure_session() / called init()".
+        from rewind_agent import explicit as _explicit_mod
+
+        sid_token = _explicit_mod._session_id.set(None)
+        try:
+            calls = []
+
+            @cached_llm_call()
+            def my_fn(q: str) -> dict:
+                calls.append(q)
+                return {"answer": q}
+
+            # Function runs, returns live result. No exception.
+            result = my_fn("hello")
+            self.assertEqual(result, {"answer": "hello"})
+            self.assertEqual(calls, ["hello"])
+        finally:
+            _explicit_mod._session_id.reset(sid_token)
+
+    def test_no_session_record_is_silent_no_op(self) -> None:
+        """Call the REAL ExplicitClient.record_llm_call (no patch)
+        with no active session — verify it returns None without
+        raising. This is the test the reviewer asked for: shows the
+        decorator's silent-no-op behavior under the actual production
+        guard, not via a mock that bypasses it.
+        """
+        from rewind_agent import explicit as _explicit_mod
+        from rewind_agent.explicit import ExplicitClient
+
+        sid_token = _explicit_mod._session_id.set(None)
+        try:
+            client = ExplicitClient()
+            # Real call to the real method — no patch. Returns None
+            # because there's no session. No HTTP attempted (the
+            # session-guard short-circuits before urllib).
+            result = client.record_llm_call(
+                request={"q": "hi"},
+                response={"a": "ok"},
+                model="gpt-4o",
+                duration_ms=10,
+            )
+            self.assertIsNone(result)
+        finally:
+            _explicit_mod._session_id.reset(sid_token)
+
+    def test_active_session_records_via_real_client_path(self) -> None:
+        """Inverse of the previous test: when a session IS active,
+        record_llm_call attempts the HTTP POST. We can't actually
+        exercise the HTTP without a Rewind server, but we verify the
+        guard passes and the code reaches the _post call (which would
+        then try to talk to localhost:4800 and silently return None
+        on connection refused — which is fine for this test).
+        """
+        from rewind_agent import explicit as _explicit_mod
+        from rewind_agent.explicit import ExplicitClient
+
+        sid_token = _explicit_mod._session_id.set("test-session-id")
+        post_invocations: list[str] = []
+        try:
+            client = ExplicitClient()
+            # Patch _post to verify it's invoked (proving the
+            # session-guard passed) without making real HTTP.
+            with patch.object(
+                ExplicitClient,
+                "_post",
+                side_effect=lambda path, body: post_invocations.append(path) or {"step_number": 1},
+            ):
+                result = client.record_llm_call(
+                    request={"q": "hi"},
+                    response={"a": "ok"},
+                    model="gpt-4o",
+                    duration_ms=10,
+                )
+            self.assertEqual(result, 1, "active session should reach _post and return step_number")
+            self.assertEqual(len(post_invocations), 1, "session-active path didn't call _post")
+            self.assertIn("/llm-calls", post_invocations[0])
+        finally:
+            _explicit_mod._session_id.reset(sid_token)
 
 
 if __name__ == "__main__":

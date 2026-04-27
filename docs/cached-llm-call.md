@@ -14,10 +14,38 @@ Wrap a Python function once and Rewind caches its return value. The decorator gi
 
 You can use both at once. The decorator's check fires first (it wraps the user's function), and on miss the inner HTTP calls under intercept are NOT double-recorded — see [Composition](#composition-with-httpinterceptinstall) below.
 
+## Session requirement
+
+The decorator records via `ExplicitClient.record_llm_call`, which is a no-op when no Rewind session is active. **You must enter a session context before calling decorated functions** — otherwise the function runs normally and returns the live result, but nothing gets recorded (silent no-op consistent with the rest of the SDK).
+
+Three ways to enter a session:
+
+```python
+# 1. Scoped context manager (preferred for tests / one-off scripts)
+from rewind_agent import ExplicitClient
+
+client = ExplicitClient()
+with client.session("my-experiment"):
+    result = chat("What is 2+2?")  # records under "my-experiment"
+
+# 2. Long-lived session (one per conversation)
+client.ensure_session(conversation_id="user-123")
+result1 = chat(...)
+result2 = chat(...)  # both record under the same session
+
+# 3. Auto-session via init() (zero-config for OpenAI/Anthropic SDK users)
+import rewind_agent
+rewind_agent.init()  # opens a session for this process
+# Plus init() patches OpenAI/Anthropic SDK clients, so the decorator
+# is overlay icing on top of automatic SDK recording.
+```
+
+Without one of these, the decorated function works correctly but recording silently does nothing. This is by design: the decorator should never crash a production agent because Rewind isn't configured.
+
 ## 60-second quickstart
 
 ```python
-from rewind_agent import cached_llm_call
+from rewind_agent import ExplicitClient, cached_llm_call
 
 @cached_llm_call()
 def chat(question: str) -> dict:
@@ -27,12 +55,23 @@ def chat(question: str) -> dict:
     )
     return response.model_dump()  # JSON-serializable for the cache
 
-# First call: hits OpenAI, records the return value
-result1 = chat("What is 2+2?")
+client = ExplicitClient()
+with client.session("my-quickstart"):
+    # First call: hits OpenAI, records the return value
+    result1 = chat("What is 2+2?")
 
-# Second call (with same args): served from cache, OpenAI NOT hit
-result2 = chat("What is 2+2?")
-assert result1 == result2  # True; cached round-trip
+    # Second call (with same args): served from cache, OpenAI NOT hit
+    result2 = chat("What is 2+2?")
+    assert result1 == result2  # True; cached round-trip
+```
+
+To replay a previously-recorded session deterministically (instead of recording fresh):
+
+```python
+client.start_replay(session_id, strict_match=False)
+# Now decorated calls hit cache on matching args; live calls happen
+# only on cache miss or args that diverge from the recording.
+result = chat("What is 2+2?")  # cache hit (zero-cost)
 ```
 
 ## Async functions
@@ -93,6 +132,31 @@ def chat(*, question: str, model: str = "gpt-4o-mini") -> dict:
 ```
 
 The custom function receives the same `(*args, **kwargs)` your decorated function gets. If it raises, we fall back to the default derivation (and log a warning).
+
+### What gets sent to the server (identity-only payload)
+
+The decorator sends a minimal payload to the Rewind server for cache lookup and recording:
+
+```json
+{
+  "_rewind_decorator": "cached_llm_call",
+  "fn_name": "module.chat",
+  "cache_key": "<sha256-hex-or-user-supplied-string>"
+}
+```
+
+**Args and kwargs are deliberately NOT in the payload.** The server hashes the whole request body to derive the lookup key (Phase 0 content validation), so including args would make unstable arg reprs (memory addresses, file handles) defeat custom `cache_key` lambdas that try to ignore those args. The cache key IS the identity; everything else is derivation noise.
+
+If you want richer dashboard display (the request payload is what shows in the dashboard's "request" view), encode the human-readable identity directly in the cache key:
+
+```python
+@cached_llm_call(
+    # Plain string keys are fine; they show up in the dashboard verbatim
+    cache_key=lambda *, question, model: f"chat:{model}:{question[:50]}",
+)
+def chat(*, question: str, model: str) -> dict:
+    ...
+```
 
 ## Return type round-trip
 

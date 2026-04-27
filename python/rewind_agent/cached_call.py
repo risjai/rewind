@@ -478,14 +478,29 @@ def _build_request_payload(
         {
           "_rewind_decorator": "cached_llm_call",
           "fn_name": "<qualname>",
-          "cache_key": "<sha256-hex>",
-          "args_repr": ["<repr1>", ...],
-          "kwargs_repr": {"k": "<repr_v>", ...}
+          "cache_key": "<sha256-hex>"
         }
 
-    The server's content-hash validation (Phase 0) hashes this whole
-    dict to derive the request_hash for cache lookup. Equal inputs
-    → equal payload → equal hash → cache hit.
+    **Identity-only payload (Review #2 fix on PR #151).** The server's
+    content-hash validation (Phase 0) hashes the WHOLE request body to
+    derive the request_hash for cache lookup. If we included
+    ``args_repr`` / ``kwargs_repr`` here, two calls with the same custom
+    ``cache_key`` but different non-stable args (e.g. an OpenAI client
+    object whose repr embeds a memory address) would produce different
+    request_hashes and miss the cache.
+
+    The fix: only stable identity fields go in the payload. The
+    ``cache_key`` (default-derived from args via ``_default_cache_key``,
+    or user-supplied via ``cache_key=`` parameter) IS the identity.
+    Args / kwargs are NOT in the payload at all — when the user passes
+    a custom ``cache_key=lambda client, q, **_: q``, the client object's
+    unstable repr is correctly invisible to the cache.
+
+    For dashboard display, the ``fn_name + cache_key`` pair is enough
+    to identify the call. Power users wanting full args in the dashboard
+    can encode them inside their custom ``cache_key`` (a plain string
+    like ``f"chat:{q}"`` instead of a hash) so the key itself is
+    human-readable.
     """
     if cache_key is not None:
         try:
@@ -507,8 +522,6 @@ def _build_request_payload(
         "_rewind_decorator": "cached_llm_call",
         "fn_name": fn_name,
         "cache_key": key,
-        "args_repr": [_safe_repr(a) for a in args],
-        "kwargs_repr": {k: _safe_repr(v) for k, v in sorted(kwargs.items())},
     }
 
 
