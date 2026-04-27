@@ -6,51 +6,85 @@ path in ``rewind_agent.patch``. It intercepts at the transport layer of
 common Python HTTP clients (httpx, requests, aiohttp) so any agent making
 HTTP-shaped LLM calls can record + replay without per-call-site changes.
 
-Step 0.2 (this commit) lays down the core primitives:
+## Quickstart
 
-- :mod:`._request` — normalized ``RewindRequest`` dataclass, the single
-  request shape passed to ``is_llm_call``/``is_tool_call`` predicates
-  across all three transport adapters.
-- :mod:`._core` — streaming detection and synthetic SSE emission. The
-  proxy/server now stores responses as a ``ResponseEnvelope`` (status +
-  headers + body); the intercept layer reads the envelope on cache hit
-  and re-emits it as either a buffered response or a single-chunk SSE
-  stream depending on whether the agent asked for streaming.
+>>> from rewind_agent import intercept
+>>> intercept.install()
+>>> # Any subsequent httpx.Client, requests.Session, or
+>>> # aiohttp.ClientSession routes through cache-then-live automatically.
 
-The actual transport adapters land in Tier 1:
+## What's available
 
-- ``httpx_transport.py`` — wraps ``httpx.HTTPTransport`` /
-  ``httpx.AsyncHTTPTransport`` and patches ``httpx.Client.__init__`` so
-  late-bound clients still get intercepted.
-- ``requests_adapter.py`` — subclass of ``requests.adapters.HTTPAdapter``
-  with a ``requests.Session.__init__`` patch.
-- ``aiohttp_middleware.py`` — ``aiohttp.ClientSession`` middleware via
-  the ``trace_configs`` API.
+**Public API** — what most users need:
 
-Public surface (for now, just the request type and core helpers — full
-``install()`` arrives with the transport adapters):
+- :func:`install` — patch all importable HTTP libraries; idempotent,
+  missing-library tolerant.
+- :func:`uninstall` — reverse :func:`install`. Mainly for tests.
+- :func:`is_installed` — check current install status.
+- :func:`savings` — read the process-lifetime cache-hit savings counter
+  (cache hits, tokens saved, USD estimate).
+- :class:`DefaultPredicates` — strict-by-default predicate set; subclass
+  to extend with custom gateway hosts. Pass to ``install(predicates=…)``.
+- :class:`Predicates` — Protocol type for fully custom routing.
+- :class:`SavingsSnapshot` — frozen dataclass returned by :func:`savings`.
 
->>> from rewind_agent.intercept import RewindRequest, detect_streaming
->>> req = RewindRequest(url="https://api.openai.com/v1/chat/completions",
-...                     method="POST",
-...                     headers={"content-type": "application/json"},
-...                     body=b'{"stream":true,"messages":[]}')
->>> detect_streaming(req)
-True
+**Lower-level building blocks** — the Phase 0 primitives, exported for
+operators writing custom adapters or extending behavior:
+
+- :class:`RewindRequest` — normalized request shape passed to predicates.
+- :func:`detect_streaming` — heuristic for "does the agent expect SSE?"
+- :func:`is_json_content` — content-type guard for body-sniffing.
+- :func:`synthetic_sse_for_cache_hit` — wrap a buffered response body as
+  a single SSE event + ``[DONE]`` sentinel.
+- :data:`SSE_DONE_SENTINEL` — the literal ``b"data: [DONE]\\n\\n"``.
+
+The transport adapters themselves (``httpx_transport``,
+``requests_adapter``, ``aiohttp_middleware``) are package modules with
+``patch_*`` / ``unpatch_*`` functions. Most users go through
+:func:`install` / :func:`uninstall` and never reach for them directly.
 """
 
 from rewind_agent.intercept._core import (
+    SSE_DONE_SENTINEL,
     detect_streaming,
     is_json_content,
     synthetic_sse_for_cache_hit,
-    SSE_DONE_SENTINEL,
+)
+from rewind_agent.intercept._install import (
+    install,
+    is_installed,
+    uninstall,
+)
+from rewind_agent.intercept._predicates import (
+    DEFAULT_LLM_HOSTS,
+    DefaultPredicates,
+    Predicates,
+    default_is_llm_call,
+    default_is_tool_call,
 )
 from rewind_agent.intercept._request import RewindRequest
+from rewind_agent.intercept._savings import (
+    SavingsSnapshot,
+    savings,
+)
 
 __all__ = [
+    # Public API
+    "install",
+    "uninstall",
+    "is_installed",
+    "savings",
+    "DefaultPredicates",
+    "Predicates",
+    "SavingsSnapshot",
+    # Low-level Phase 0 primitives
     "RewindRequest",
     "detect_streaming",
     "is_json_content",
     "synthetic_sse_for_cache_hit",
     "SSE_DONE_SENTINEL",
+    # Default predicate components for users who want to compose
+    "DEFAULT_LLM_HOSTS",
+    "default_is_llm_call",
+    "default_is_tool_call",
 ]

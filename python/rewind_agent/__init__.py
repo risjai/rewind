@@ -29,7 +29,7 @@ from .hooks import (
     wrap_langgraph,
     wrap_crew,
 )
-from .explicit import ExplicitClient
+from .explicit import ExplicitClient, RewindReplayDivergenceError
 from .assertions import Assertions, AssertionResult
 from .openai_agents import openai_agents_hooks
 from .pydantic_ai import pydantic_ai_hooks
@@ -88,6 +88,7 @@ __all__ = [
     "export_otel",
     # Explicit Recording API
     "ExplicitClient",
+    "RewindReplayDivergenceError",
 ]
 
 

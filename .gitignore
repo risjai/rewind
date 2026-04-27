@@ -60,3 +60,8 @@ dist/
 
 # Asset build tooling (cast files, recording scripts, generators)
 /assets/dev/
+
+# Local-only scratch test (uses openai SDK which isn't a project dep;
+# CI doesn't have openai installed). Stays in working tree but never
+# gets tracked.
+python/tests/test_replay_e2e.py

@@ -57,6 +57,45 @@ _TIMEOUT = 2.0
 _SESSION_CACHE_TTL = 7200  # 2 hours
 
 
+class RewindReplayDivergenceError(RuntimeError):
+    """Phase 1 (Santa #4): strict-match replay lookup returned HTTP 409.
+
+    Raised by :meth:`ExplicitClient.get_replayed_response` /
+    ``_async`` when the server detects that the agent's request body
+    hash diverges from the recording's stored ``request_hash`` at the
+    next ordinal in the replay timeline AND the replay context was
+    created with ``strict_match=True``.
+
+    The replay cursor stays put on 409 (Phase 0 contract — see Santa
+    review #2 in PR #148) so the caller can fix the request body and
+    retry. Without this exception type the divergence would be
+    swallowed by ``_post``'s generic ``except Exception`` and the
+    adapters would silently treat it as a cache miss, defeating the
+    whole purpose of strict mode.
+
+    Attributes
+    ----------
+    message:
+        Server-supplied error string. Includes truncated stored vs
+        incoming hashes for visual diffing (Phase 0 server format).
+    target_step:
+        The recording step number where divergence occurred.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        target_step: int | None = None,
+        stored_hash: str | None = None,
+        incoming_hash: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.target_step = target_step
+        self.stored_hash = stored_hash
+        self.incoming_hash = incoming_hash
+
+
 class ExplicitClient:
     """Wire-format-agnostic recording client for the Rewind explicit API."""
 
@@ -327,8 +366,64 @@ class ExplicitClient:
 
     # ── Replay ────────────────────────────────────────────────
 
+    def _post_replay_lookup(
+        self, sid: str, body: dict[str, Any]
+    ) -> dict | None:
+        """Post to ``/sessions/{sid}/llm-calls/replay-lookup`` with
+        explicit HTTP 409 handling.
+
+        Phase 1 (Santa #4): the generic ``_post`` swallows all
+        exceptions to None — fine for record paths where errors
+        should be best-effort, but wrong for strict-match replay
+        where 409 is a meaningful signal that the caller diverged
+        from the recording. This method re-raises 409 as
+        :class:`RewindReplayDivergenceError` so adapters can surface
+        it to user code (which is the whole point of opting into
+        strict mode).
+
+        Other errors (timeouts, server crashes, network glitches)
+        still degrade to None (cache miss) so a transient Rewind
+        outage doesn't break the agent's normal flow.
+        """
+        if not self._enabled:
+            return None
+        url = f"{self.base_url}/api/sessions/{sid}/llm-calls/replay-lookup"
+        data = json.dumps(body).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            if e.code == 409:
+                # Strict-match divergence — read the body for the
+                # server's diagnostic and convert to a typed exception.
+                try:
+                    error_body = e.read().decode("utf-8", errors="replace")
+                except Exception:
+                    error_body = f"HTTP 409 Conflict from {url}"
+                raise RewindReplayDivergenceError(error_body) from e
+            # Non-409 HTTP error — degrade to cache miss.
+            logger.debug(
+                "Rewind replay-lookup HTTP %d: %s", e.code, e.reason
+            )
+            return None
+        except Exception as e:
+            logger.debug("Rewind replay-lookup failed: %s", e)
+            return None
+
     def get_replayed_response(self, request: Any = None) -> dict | None:
-        """Check if a cached LLM response exists for replay. Returns response_body or None."""
+        """Check if a cached LLM response exists for replay. Returns response_body or None.
+
+        Raises :class:`RewindReplayDivergenceError` when the server
+        reports HTTP 409 strict-match divergence. Adapters propagate
+        the exception as a library-native error so user code can
+        choose to retry, log, or fail loudly.
+        """
         sid = _session_id.get()
         ctx_id = _replay_context_id.get()
         if sid is None or ctx_id is None:
@@ -336,13 +431,14 @@ class ExplicitClient:
         body: dict[str, Any] = {"replay_context_id": ctx_id}
         if request is not None:
             body["request_body"] = request
-        result = self._post(f"/sessions/{sid}/llm-calls/replay-lookup", body)
+        result = self._post_replay_lookup(sid, body)
         if result and result.get("hit"):
             return result.get("response_body")
         return None
 
     async def get_replayed_response_async(self, request: Any = None) -> dict | None:
-        """Async variant."""
+        """Async variant. Same divergence semantics as the sync
+        method — :class:`RewindReplayDivergenceError` propagates."""
         sid = _session_id.get()
         ctx_id = _replay_context_id.get()
         if sid is None or ctx_id is None:
@@ -351,8 +447,10 @@ class ExplicitClient:
         if request is not None:
             body["request_body"] = request
         loop = asyncio.get_running_loop()
+        # run_in_executor doesn't propagate exceptions across the
+        # await — they're embedded in the future and re-raised on await.
         result = await loop.run_in_executor(
-            None, lambda: self._post(f"/sessions/{sid}/llm-calls/replay-lookup", body)
+            None, lambda: self._post_replay_lookup(sid, body)
         )
         if result and result.get("hit"):
             return result.get("response_body")
