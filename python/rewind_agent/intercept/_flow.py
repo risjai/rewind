@@ -95,6 +95,21 @@ from rewind_agent.intercept._request import RewindRequest
 from rewind_agent.intercept._savings import record_cache_hit
 from rewind_agent.intercept._tokens import extract_tokens_and_model
 
+
+def _is_under_cached_llm_call() -> bool:
+    """Phase 2: when a ``@cached_llm_call``-decorated function is
+    executing, intercept's recording must be suppressed so we don't
+    double-record the same logical event at two different
+    granularities (decorator records at function-return level;
+    intercept would record the inner HTTP call). Imported lazily to
+    avoid a circular dependency with ``rewind_agent.cached_call``.
+    """
+    try:
+        from rewind_agent.cached_call import is_cached_llm_call_active
+    except ImportError:  # pragma: no cover — same SDK package
+        return False
+    return is_cached_llm_call_active()
+
 logger = logging.getLogger(__name__)
 
 
@@ -264,6 +279,16 @@ def _serve_cache_miss_sync(
     started = time.monotonic()
     resp = live()
     duration_ms = int((time.monotonic() - started) * 1000)
+
+    # Phase 2 — composition with cached_llm_call decorator: when the
+    # decorator is the outer scope, IT does the recording at the
+    # function-return level. We suppress the inner HTTP recording to
+    # avoid double-recording the same logical event at two
+    # granularities. The duration_ms above is still computed (cheap)
+    # so future intercept-only paths could log it, but no
+    # ExplicitClient.record_llm_call is issued.
+    if _is_under_cached_llm_call():
+        return resp
 
     # Phase 1 (Santa #2) — STREAMING MISS PASS-THROUGH.
     #
@@ -480,6 +505,11 @@ async def _handle_llm_async(
     started = time.monotonic()
     resp = await live()
     duration_ms = int((time.monotonic() - started) * 1000)
+
+    # Phase 2: under cached_llm_call decorator, suppress inner-HTTP
+    # recording. The decorator records at function-return granularity.
+    if _is_under_cached_llm_call():
+        return resp
 
     # Phase 1 (Santa #2): same streaming-pass-through contract as sync.
     # Pre-reading the body would consume the stream before user code

@@ -29,6 +29,7 @@ from .hooks import (
     wrap_langgraph,
     wrap_crew,
 )
+from .cached_call import cached_llm_call
 from .explicit import ExplicitClient, RewindReplayDivergenceError
 from .assertions import Assertions, AssertionResult
 from .openai_agents import openai_agents_hooks
@@ -89,6 +90,8 @@ __all__ = [
     # Explicit Recording API
     "ExplicitClient",
     "RewindReplayDivergenceError",
+    # Cached LLM call decorator (Phase 2 / Tier 2)
+    "cached_llm_call",
 ]
 
 

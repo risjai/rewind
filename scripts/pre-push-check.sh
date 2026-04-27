@@ -19,6 +19,12 @@
 # CI's bare environment via a sys.meta_path import blocker so you catch the
 # discrepancy locally before pushing.
 #
+# Stage 0 is "fetch and check ahead/behind" — added after the lesson on
+# PR #151 where the remote branch had been auto-merged with master while
+# local was behind. Pushing without pulling first gets rejected, but the
+# real cost is missing context (e.g. a merged sibling PR's tests) until
+# you discover the rejection.
+#
 # Usage:
 #   ./scripts/pre-push-check.sh
 #
@@ -34,7 +40,33 @@ echo "Pre-push verification (mirrors CI exactly)"
 echo "============================================="
 echo
 
-echo "[1/5] ruff check (Python lint, mirrors CI's 'ruff check .')"
+echo "[0/6] git fetch + ahead/behind check"
+# Auto-fetch silently. The whole point: confirm local matches what's on
+# the remote before running the rest of the suite, so we don't waste
+# 30 seconds on tests against stale code.
+git fetch origin --quiet 2>&1 || true
+current_branch=$(git branch --show-current)
+upstream="origin/${current_branch}"
+if ! git rev-parse --verify --quiet "$upstream" >/dev/null 2>&1; then
+    echo "(no upstream branch yet — first push)"
+elif [ "$current_branch" = "" ]; then
+    echo "❌ detached HEAD — push from a named branch"
+    exit 1
+else
+    behind=$(git rev-list --count HEAD.."$upstream" 2>/dev/null || echo 0)
+    ahead=$(git rev-list --count "$upstream"..HEAD 2>/dev/null || echo 0)
+    if [ "$behind" -gt 0 ]; then
+        echo "❌ Branch is BEHIND $upstream by $behind commit(s)."
+        echo "   Run: git pull --rebase  (or: git pull)"
+        echo "   Then re-run this script. Push without pulling will be"
+        echo "   rejected by GitHub anyway — pull first to avoid waste."
+        exit 1
+    fi
+    echo "  ahead $ahead / behind $behind — up to date with $upstream"
+fi
+echo
+
+echo "[1/6] ruff check (Python lint, mirrors CI's 'ruff check .')"
 cd "$REPO_ROOT/python"
 python3 -m ruff check . || {
     echo "❌ ruff failed — run 'python3 -m ruff check . --fix' to auto-fix"
@@ -43,7 +75,7 @@ python3 -m ruff check . || {
 echo "✅ ruff clean"
 echo
 
-echo "[2/5] pytest tests/ — local env (with httpx/requests/aiohttp)"
+echo "[2/6] pytest tests/ — local env (with httpx/requests/aiohttp)"
 find . -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 python3 -m pytest tests/ -q --no-header || {
     echo "❌ local pytest failed"
@@ -52,7 +84,7 @@ python3 -m pytest tests/ -q --no-header || {
 echo "✅ local pytest passed"
 echo
 
-echo "[3/5] pytest tests/ — simulated bare env (CI mirror)"
+echo "[3/6] pytest tests/ — simulated bare env (CI mirror)"
 # Heredoc-into-python with explicit error trap (avoids `|| {}` + heredoc
 # interaction which bash parses awkwardly).
 python3 - <<'PYEOF'
@@ -88,7 +120,7 @@ echo "✅ bare-env pytest passed"
 echo
 
 cd "$REPO_ROOT"
-echo "[4/5] cargo clippy -- -D warnings (Rust CI)"
+echo "[4/6] cargo clippy -- -D warnings (Rust CI)"
 rustup run stable cargo clippy -- -D warnings || {
     echo "❌ clippy failed"
     exit 1
@@ -96,7 +128,7 @@ rustup run stable cargo clippy -- -D warnings || {
 echo "✅ clippy clean"
 echo
 
-echo "[5/5] cargo test --workspace (Rust CI)"
+echo "[5/6] cargo test --workspace (Rust CI)"
 rustup run stable cargo test --workspace || {
     echo "❌ cargo test failed"
     exit 1
