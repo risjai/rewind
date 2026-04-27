@@ -25,6 +25,33 @@ The dashboard is a viewer, not a control surface. **Tier 3 closes the loop:** re
 
 Net effect: one-click replay from the same UI you used to inspect the session. No context-switching to a terminal.
 
+> **REVIEW SUMMARY (ordered by severity):**
+> 1. **BLOCKER:** the token model is internally inconsistent: the plan says raw runner tokens are never stored, but the server must know the raw shared secret to HMAC-sign Rewind→runner webhooks after registration/restart. The proposed in-memory cache makes registered runners unusable after process restart and breaks multi-instance deployments.
+> 2. **BLOCKER:** `/api/replay-jobs/{id}/events` needs runner-specific authentication and ownership checks that bypass or compose with the existing dashboard bearer-token middleware. Otherwise external runners will get `401`, or unauthenticated clients can spoof job progress/completion.
+> 3. **BLOCKER:** the dashboard job API takes a `replay_context_id`, but the UI flow never creates one. The API should probably create fork + replay context atomically from `{timeline_id, at_step, runner_id}` or explicitly reuse an existing fork context with validation.
+> 4. **HIGH:** the Python runner example uses non-existent SDK parameters (`ExplicitClient(rewind_url=...)`, `start_replay(..., replay_context_id=...)`), so implementers will copy broken code.
+> 5. **HIGH:** cancellation is listed as a state/event but has no runner-side cancellation protocol. Marking a job cancelled while the agent continues writing steps will corrupt user expectations.
+> 6. **MEDIUM:** jobs can get stuck forever in `dispatched`/`in_progress`; the plan needs a lease/timeout/reaper policy.
+> 7. **MEDIUM:** the modal fallback mentions a `rewind replay --runner` command that is not in the CLI scope.
+> 8. **LOW:** version bump instructions should stay conditional on release state per `CLAUDE.md`, especially Python SDK `0.16.0`.
+
+## Plan revision (post-review v1)
+
+All 8 review comments verified against the codebase and accepted. Resolutions:
+
+| # | Severity | Resolution |
+| --- | :---: | --- |
+| 1 | BLOCKER | Token model rewritten. Raw runner secret now stored encrypted-at-rest under a server app key (`REWIND_RUNNER_SECRET_KEY` env var). Registrations are durable across restarts and multi-replica safe. `SensitiveString` redacts the encrypted form on logs/API responses. See revised "Auth model" + "Token storage" sections below. |
+| 2 | BLOCKER | New auth path on `POST /api/replay-jobs/{id}/events` — bypasses the dashboard bearer-token middleware in favor of `X-Rewind-Runner-Auth: <runner-token>`. Server hashes the supplied token, compares against `auth_token_hash`, and verifies the matched runner owns the job (`job.runner_id == runner.id`). See revised "Status events" section. |
+| 3 | BLOCKER | API shape revised. `POST /api/sessions/{sid}/replay-jobs` accepts EITHER `{runner_id, source_timeline_id, at_step, [strict_match]}` (creates fork + replay context atomically) OR `{runner_id, replay_context_id}` (validates ownership, ensures cursor isn't being consumed). Modal flow defaults to (a). See revised "High-level flow" diagram + "Replay job dispatch endpoint" section. |
+| 4 | HIGH | New `ExplicitClient.attach_replay_context(session_id, replay_context_id)` API added to Phase 3 scope. Sets the contextvars for an existing context without creating a new one. Python runner example rewritten with correct signatures. Env-var bootstrap (`REWIND_SESSION_ID`, `REWIND_REPLAY_CONTEXT_ID`) also added so a runner spawned as a subprocess can be configured without touching the SDK. |
+| 5 | HIGH | `cancelled` removed from v1. Cooperative cancel deferred to v3.1 (proper protocol: server cancel-flag → runner polls/receives → reports `cancelled`). v1 state machine: `pending → dispatched → in_progress → completed`/`errored` (no cancellation). |
+| 6 | MEDIUM | Lease + reaper added. `replay_jobs.dispatch_deadline_at` (10s — runner must reply 202) and `replay_jobs.lease_expires_at` (5min — extended on heartbeat or progress event). Background tokio task (`crates/rewind-web/src/reaper.rs`) scans for expired leases every 30s, marks them `errored` with `stage: "lease_expired"`. |
+| 7 | MEDIUM | Modal fallback rewritten to use the existing `rewind replay <session> --from <step> --fork-id <fork>` CLI command instead of a hypothetical `--runner` flag. CLI scope unchanged at `rewind runners {list,add,remove}`. |
+| 8 | LOW | Version bumps now conditional. Per CLAUDE.md track-2 rule: master Python SDK is 0.15.0 but PyPI is at 0.14.8 → 0.15.0 is unpublished → Phase 3 RIDES 0.15.0, **does NOT** bump to 0.16.0. Same logic for python-mcp 0.13.0 (unpublished, no MCP API change anyway → stays at 0.13.0). Rust bump 0.13.0 → 0.14.0 IS warranted (master 0.13.0 has been released as v0.13.0 GitHub tag, and Phase 3 has a schema migration). |
+
+The original blockquote comments are preserved inline below as an audit trail. Each affected section has been rewritten to reflect the resolutions above; affected sections are marked **(REVISED)** in their headers.
+
 ## What ships in this PR
 
 ### Rust
@@ -113,7 +140,43 @@ Estimated ~80 cases across:
 └────────────────────────────────────────────────────────────────────┘
 ```
 
-### Auth model: HMAC-signed webhooks
+**Resolution (BLOCKER #3): Replay job dispatch endpoint accepts two shapes.** The original plan assumed the dashboard already had a `replay_context_id`, but the existing fork flow creates a fork timeline and shows a CLI command — no persisted replay context. Endpoint shape revised:
+
+```
+POST /api/sessions/{sid}/replay-jobs
+
+# Shape (a): create-and-dispatch (typical from the dashboard button)
+{
+    "runner_id": "<uuid>",
+    "source_timeline_id": "<timeline_id>",  # the fork point's parent timeline
+    "at_step": <int>,                       # fork at this step
+    "strict_match": false                   # optional, default false
+}
+# → server atomically creates fork timeline + replay_context + replay_job
+# → all three rolled back on any failure (e.g. runner suddenly disabled)
+
+# Shape (b): reuse-existing-context (CLI / programmatic)
+{
+    "runner_id": "<uuid>",
+    "replay_context_id": "<uuid>"
+}
+# → server validates: replay_context exists, belongs to session sid,
+#   is not already being consumed by another in-flight job
+#   (replay cursor would be a hot-spot otherwise)
+# → server creates replay_job referencing existing context
+```
+
+Validation in shape (b):
+- `replay_context_id` row exists AND `session_id` matches the URL param
+- replay context's `current_step == from_step` (no other job has advanced the cursor)
+- No other in-flight `replay_job` references the same `replay_context_id`
+- Replay context is not expired (Phase 0's TTL still applies)
+
+Returns `{job_id, replay_context_id, fork_timeline_id?, dispatch_deadline_at}`. Dashboard subscribes to WebSocket and shows live progress.
+
+### Auth model: HMAC-signed webhooks (REVISED post-review)
+
+**Resolution to BLOCKER #1.** The original plan had two contradictory storage stories; this revision picks one model and uses it consistently across registration, dispatch, and event ingestion.
 
 The runner is registered with a shared secret (the auth token). Every webhook from Rewind→runner carries:
 
@@ -124,7 +187,18 @@ X-Rewind-Job-Id: <uuid>
 
 Signature is `HMAC-SHA256(shared_secret, X-Rewind-Job-Id || \n || raw_body)`. Standard pattern (Stripe / GitHub webhooks use the same shape). Runner verifies before processing; we provide a helper in `rewind_agent.runner` for this.
 
-The shared secret is generated by Rewind at runner-registration time and shown ONCE in the dashboard / CLI output. After that the runner stores it; Rewind stores its `SensitiveString`-wrapped form (which never appears in logs / debug / API responses). This is why `SensitiveString` is in scope for this PR — auth tokens are precisely the thing we don't want leaking through the obvious channels.
+**Storage:** the shared secret is stored **encrypted at rest** in the `runners` table, under a server-managed app key (`REWIND_RUNNER_SECRET_KEY` env var, base64-32-bytes). At registration, server generates the raw secret, encrypts it with the app key (AES-256-GCM via the `aes-gcm` Rust crate), persists the ciphertext + nonce. At dispatch, server decrypts on-demand. The plaintext exists only briefly during dispatch; never logged, never serialized through API. `SensitiveString` redacts the (rare) cases where it would appear in error messages or debug output.
+
+**Why encrypted-at-rest beats hash-only or in-memory-only:**
+- **Durable across server restart** — registered runners stay usable.
+- **Multi-replica safe** — any replica can dispatch to any runner (they all share the app key + DB).
+- **Honest about secrets at rest** — admins know what's stored and how it's protected; no surprise "runner suddenly stopped working" after a deploy.
+
+**Bootstrap:** if `REWIND_RUNNER_SECRET_KEY` is unset at server startup, the runner registry endpoint returns `503 Service Unavailable` with a clear error pointing operators at the env var. Documented in `docs/runners.md`. Generation: `openssl rand -base64 32`. Rotation requires re-registering all runners (acceptable for v1; v3.1 adds key versioning).
+
+**Why not hash-only:** `SHA-256(token)` works for inbound auth (verify a runner-supplied token by hashing + comparing) but the server must HMAC-sign OUTBOUND webhooks, and hash → raw is a one-way function. A hash-only model would force in-memory caching of the raw token, which doesn't survive restart or scale to multi-replica.
+
+**Why not invert the protocol (no outbound signing):** if Rewind doesn't authenticate to the runner, anyone who can reach the runner's webhook URL can trigger an agent run. Operators with public-ish webhook endpoints (the typical deployment) need the signature. Inverting only works if the runner is on a private network, which contradicts the Tier 3 use case.
 
 ### Why webhooks (push) and not long-polling (pull)
 
@@ -149,6 +223,28 @@ Runners post these to `POST /api/replay-jobs/{id}/events`:
 | `cancelled` | dashboard cancelled the job mid-flight | `{ event: "cancelled" }` |
 
 Server records these into `replay_job_events` (append-only) and broadcasts via the existing `StoreEvent` channel that the dashboard's WebSocket already subscribes to.
+
+**Event endpoint auth (REVISED post-review, resolves BLOCKER #2).** The dashboard auth middleware (`auth::auth_middleware` in `crates/rewind-web/src/lib.rs:350`) protects all `/api/*` routes today and expects a dashboard/server bearer token that runners don't have. Three options were considered:
+
+1. Give every runner a dashboard-level bearer token. **Rejected** — over-privileged. A compromised runner shouldn't be able to read all sessions or delete data.
+2. Layer the existing middleware to allow EITHER bearer OR runner-token. **Rejected** — fragile, easy to introduce auth-bypass bugs.
+3. **Adopted:** dedicated runner-auth path. `POST /api/replay-jobs/{id}/events` is registered OUTSIDE the dashboard-bearer middleware (via Axum's `Router::nest`/`merge` shape), and gets its own middleware that:
+   - Reads `X-Rewind-Runner-Auth: <runner-token>`
+   - Hashes the supplied token, looks up the matching `runners` row by `auth_token_hash`
+   - Verifies `runner.id == job.runner_id` (the runner posting events owns this job)
+   - On success, attaches the runner to the request extensions so the handler doesn't re-lookup
+   - On failure, returns `401 Unauthorized` (token invalid) or `403 Forbidden` (token valid but runner doesn't own the job)
+
+**Terminal-state protection:** event handlers reject any event arriving after a terminal state (`completed`/`errored`). The job's `state` is checked under a row-level lock; concurrent events get serialized at the DB level so there's no TOCTOU race.
+
+**Cancellation: NOT in v1 (REVISED post-review, resolves HIGH #5).** The original plan listed `cancelled` as both a state and an event but had no protocol for the dashboard to actually tell the runner to stop. Rather than ship half a feature, v1 has 4 events (`started`/`progress`/`completed`/`errored`) and the state machine is:
+
+```
+pending → dispatched → in_progress → completed
+                            └──────→ errored
+```
+
+No cancellation. v3.1 will add cooperative cancel: server sets a cancel flag → runner polls or receives `POST {runner.webhook_url}/cancel/{job_id}` → runner reports `cancelled` → server records. The Python `RewindRunner` library will expose a cancellation token that decorated agents can check. This is a meaningful protocol, not a one-line addition; deferring it to v3.1 keeps v1 honest.
 
 ## Component-by-component
 
@@ -208,27 +304,88 @@ pub enum RunnerMode { Webhook, Polling }
 pub enum RunnerStatus { Active, Disabled, Stale }
 ```
 
-### Token storage
+### Token storage (REVISED post-review, resolves BLOCKER #1)
 
-Auth tokens are NEVER stored raw. At registration:
-1. Server generates a 32-byte random token, base64-url encoded.
-2. Server returns the raw token to the registering client (CLI or dashboard) ONCE in the response.
-3. Server stores SHA-256(token) in `auth_token_hash` and the first 8 chars + `***` in `auth_token_preview` (for UI display so users can identify which token they have).
-4. On subsequent requests, the runner sends the raw token in `X-Rewind-Auth`; server hashes it and looks up the runner.
+The original "hash-only" model worked for inbound auth (verify runner-supplied token) but failed for outbound HMAC-signed webhooks (server can't recover raw token from a hash). Encrypted-at-rest is the unambiguous fix.
 
-Same model as GitHub personal access tokens. Token rotation: dashboard "regenerate" button creates a new token, updates the hash, returns the new raw token once, invalidates the old one.
+At registration:
 
-### Replay job state machine
+1. Server generates a 32-byte random token, base64-url encoded (the "raw token" returned to the client).
+2. Server encrypts the raw token with the app key (`REWIND_RUNNER_SECRET_KEY`, AES-256-GCM, fresh nonce per row).
+3. Server stores `(ciphertext, nonce)` in `runners.encrypted_token` + `runners.token_nonce`.
+4. Server stores SHA-256(raw_token) in `runners.auth_token_hash` (for fast inbound auth lookups — no decryption needed in the hot path).
+5. Server stores the first 8 chars + `***` in `runners.auth_token_preview` (UI display, so operators can identify which token they have).
+6. The raw token is returned ONCE in the registration response and never persisted in plaintext on the server.
+
+At dispatch:
+1. Server fetches `(encrypted_token, nonce)` from the `runners` row.
+2. Decrypts with the app key.
+3. Uses the plaintext to compute `HMAC-SHA256(raw_token, ...)` for the outbound webhook.
+4. Discards the plaintext immediately after signing.
+
+At inbound auth (runner posting events):
+1. Server reads `X-Rewind-Runner-Auth` header (the raw token).
+2. Server computes SHA-256 of the supplied token.
+3. Server looks up `runners.auth_token_hash` by that SHA — fast, no decryption.
+4. On match, server verifies `runner.id == job.runner_id` (ownership).
+
+**Token rotation:** dashboard "regenerate" button creates a new raw token, encrypts and re-stores both the ciphertext and the new hash, invalidates the old hash. Returns the new raw token once. Existing in-flight jobs continue using the new token (signing happens at dispatch time, not at job-creation time). Multi-replica safe because every replica reads the freshest DB row.
+
+**Why this is honest about secrets:** an admin running the Rewind server can choose to (a) backup the DB but not the env var (separate handling for secrets-at-rest from data-at-rest), or (b) include both — explicit choice. Encrypted-at-rest with a key-management story matches industry norm.
+
+**Open: app key rotation.** Rotating `REWIND_RUNNER_SECRET_KEY` requires re-encrypting every `runners.encrypted_token` row. v1 does NOT support key rotation; admins generate the key once and keep it. v3.1 adds key versioning (`encrypted_token_key_version` column, rolling rotation).
+
+### Replay job state machine (REVISED post-review, resolves MEDIUM #6 + HIGH #5)
 
 ```
 pending → dispatched → in_progress → completed
             ↓              ↓             
             errored        errored
-            
-            cancelled (from any non-terminal state)
 ```
 
-Stored in `replay_jobs` table with timestamps for each transition. Append-only event log in `replay_job_events` for the per-step progress messages.
+Cancellation removed from v1 per HIGH #5 resolution. Lease/timeout/reaper added per MEDIUM #6.
+
+Stored in `replay_jobs` table with timestamps for each transition + lease columns:
+
+```sql
+CREATE TABLE replay_jobs (
+    id TEXT PRIMARY KEY,
+    runner_id TEXT NOT NULL REFERENCES runners(id),
+    session_id TEXT NOT NULL REFERENCES sessions(id),
+    replay_context_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('pending','dispatched','in_progress','completed','errored')),
+    error_message TEXT,
+    error_stage TEXT,                  -- 'dispatch' | 'agent' | 'lease_expired'
+    -- Timestamps
+    created_at TEXT NOT NULL,
+    dispatched_at TEXT,
+    started_at TEXT,
+    completed_at TEXT,
+    -- Leases
+    dispatch_deadline_at TEXT,         -- runner must reply 202 by this time
+    lease_expires_at TEXT,             -- extended on heartbeat / progress event
+    -- Stats
+    progress_step INTEGER NOT NULL DEFAULT 0,
+    progress_total INTEGER             -- optional; runner reports if known
+);
+
+CREATE TABLE replay_job_events (
+    id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL REFERENCES replay_jobs(id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL CHECK (event_type IN ('started','progress','completed','errored')),
+    step_number INTEGER,
+    payload TEXT,                      -- JSON
+    created_at TEXT NOT NULL
+);
+```
+
+**Lease semantics:**
+- `dispatch_deadline_at` = `dispatched_at + 10s`. If no `started` event by then, reaper marks job `errored` with `stage: "dispatch"`.
+- `lease_expires_at` = `last_event_at + 5min`. Extended on every heartbeat or progress event. If exceeded, reaper marks job `errored` with `stage: "lease_expired"`.
+
+**Reaper task** (`crates/rewind-web/src/reaper.rs`): tokio task spawned at server startup, scans every 30s. Single SQL `UPDATE` transitions expired jobs to `errored` atomically. Reaper logs each transition for observability.
+
+**Dashboard behavior on lease expiry:** the WebSocket broadcast includes the `errored` event, so the dashboard's modal sees it and shows "Lease expired — runner stopped responding. Last seen: <timestamp>" with a "Retry" button. Documented in `docs/runners.md` troubleshooting.
 
 ### Webhook dispatcher
 
@@ -263,26 +420,70 @@ impl Dispatcher {
 }
 ```
 
-**Token re-cache concern:** the dispatcher needs the raw token to sign webhooks, but we only stored the hash. Solution: keep the raw token in an in-memory cache (process-local `Arc<RwLock<HashMap<runner_id, SensitiveString>>>`) populated at registration. On server restart, the cache is empty until the runner re-registers OR the dispatcher 401s and the dashboard prompts the operator to regenerate. **Documented limitation: server restart breaks dispatch until token re-issuance.** v3.1 fix: secure-storage backend (keyring on macOS, libsecret on Linux, OS-encrypted file).
+**Token decryption flow (REVISED post-review, resolves BLOCKER #1 part 2):** at dispatch, the server reads `(encrypted_token, nonce)` from the `runners` row, decrypts via AES-256-GCM with `REWIND_RUNNER_SECRET_KEY`, uses the plaintext to compute the HMAC, and discards the plaintext. No in-memory cache, no process-local state, no restart fragility, multi-replica safe.
 
-### Python `rewind_agent.runner`
+Concrete code:
+
+```rust
+let raw_token = self.crypto.decrypt(&runner.encrypted_token, &runner.token_nonce)?;
+let signature = hmac_sha256(raw_token.expose(), &job.id, &body_bytes);
+// raw_token (SensitiveString) drops at end of scope; never logged.
+```
+
+The `CryptoBox` abstraction wraps AES-256-GCM via the `aes-gcm` crate. App key is read once at server startup (`crates/rewind-web/src/main.rs`) and held in `AppState`. If `REWIND_RUNNER_SECRET_KEY` is unset, runner endpoints return `503` with the clear bootstrap error.
+
+### Python `rewind_agent.runner` (REVISED post-review, resolves HIGH #4)
+
+The original example used non-existent SDK params (`ExplicitClient(rewind_url=...)`, `start_replay(replay_context_id=...)`). Two bridges are needed in Phase 3 to make this work:
+
+**(a)** New `ExplicitClient.attach_replay_context(session_id, replay_context_id)` method that sets `_session_id` and `_replay_context_id` ContextVars to bind an existing context (without creating a new one — `start_replay` always creates).
+
+**(b)** Env-var bootstrap. When `REWIND_SESSION_ID` and `REWIND_REPLAY_CONTEXT_ID` are set in the process environment, `intercept.install()` automatically calls `attach_replay_context` so the agent doesn't need to know about replay at all. Critical for the runner's spawn-subprocess pattern.
+
+Both are added to Phase 3 scope. Code:
 
 ```python
-# python/rewind_agent/runner.py
+# In rewind_agent.explicit:
+def attach_replay_context(self, session_id: str, replay_context_id: str) -> None:
+    """Bind an EXISTING replay context (created server-side by Phase 3
+    runner dispatch). Sets contextvars without creating a new context.
+    For decorator + intercept users who received the context from
+    a runner job dispatch, not from start_replay.
+    """
+    _session_id.set(session_id)
+    _replay_context_id.set(replay_context_id)
+
+# In rewind_agent.intercept._install:
+def install(predicates=None) -> None:
+    # … existing patching logic …
+    # NEW: env-var bootstrap for runner subprocesses
+    sid = os.environ.get("REWIND_SESSION_ID")
+    rcid = os.environ.get("REWIND_REPLAY_CONTEXT_ID")
+    if sid and rcid:
+        ExplicitClient().attach_replay_context(sid, rcid)
+```
+
+Now the corrected runner example:
+
+```python
+# python/rewind_agent/runner.py — operator's webhook endpoint
+import os
 from rewind_agent import ExplicitClient, intercept
 from rewind_agent.runner import RewindRunner
 
 runner = RewindRunner(
-    rewind_url="http://rewind.corp.example",
+    base_url=os.environ["REWIND_BASE_URL"],          # NOTE: base_url, not rewind_url
     auth_token=os.environ["REWIND_RUNNER_TOKEN"],
 )
 
 @runner.handle_replay
 async def run_agent(job):
-    # job.session_id, job.replay_context_id provided
+    # job.session_id and job.replay_context_id provided by the webhook payload.
+    # Bind them to ExplicitClient before running the agent.
     intercept.install()
-    client = ExplicitClient(rewind_url=job.base_url)
-    client.start_replay(job.session_id, replay_context_id=job.replay_context_id)
+    client = ExplicitClient(base_url=job.base_url)
+    client.attach_replay_context(job.session_id, job.replay_context_id)
+
     try:
         await runner.report_progress(job.id, "started")
         await my_agent.run()  # operator's existing agent code
@@ -291,13 +492,38 @@ async def run_agent(job):
         await runner.report_progress(job.id, "errored", error=str(e))
         raise
 
-# Mount on operator's existing FastAPI / aiohttp / Flask app:
+# Mount on the operator's existing FastAPI / aiohttp / Flask app:
 app.add_route("/rewind-webhook", runner.asgi_handler())
 # OR start a standalone server for one-off use:
 runner.serve(host="0.0.0.0", port=8080)
 ```
 
-The `RewindRunner` class handles signature verification, job-level error catching, and progress reporting. Operators write their `@handle_replay` body around their existing agent invocation.
+The `RewindRunner` class handles HMAC signature verification (using the runner's stored token, the SAME token Rewind used to sign), job-level error catching, and the progress-reporting helper. The operator writes their `@handle_replay` body around the existing agent invocation.
+
+For runners that spawn the agent as a subprocess (e.g. the agent is a separate `python my_agent.py`), use the env-var bootstrap pattern instead:
+
+```python
+@runner.handle_replay
+async def run_agent(job):
+    env = os.environ.copy()
+    env["REWIND_BASE_URL"] = job.base_url
+    env["REWIND_SESSION_ID"] = job.session_id
+    env["REWIND_REPLAY_CONTEXT_ID"] = job.replay_context_id
+    proc = await asyncio.create_subprocess_exec(
+        "python", "my_agent.py",
+        env=env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    await runner.report_progress(job.id, "started")
+    rc = await proc.wait()
+    if rc == 0:
+        await runner.report_progress(job.id, "completed")
+    else:
+        await runner.report_progress(job.id, "errored", error=f"exit code {rc}")
+```
+
+In this mode the spawned `my_agent.py` doesn't need to know it's running under a replay — `intercept.install()` reads the env vars and binds the context automatically.
 
 ### Dashboard UI
 
@@ -313,7 +539,7 @@ The `RewindRunner` class handles signature verification, job-level error catchin
   → Modal opens
   → Lists registered runners (name, last-seen, status)
   → Operator picks one
-  → "OR show me the CLI command instead" toggle (escape hatch — generates the equivalent `rewind replay --session-id ... --runner ...` command for copy-paste, useful when no runners are registered or the operator wants local debugging)
+  → "OR show me the CLI command instead" toggle (escape hatch — generates the equivalent `rewind replay <session_id> --from <step> --fork-id <fork>` command using the EXISTING `rewind replay` CLI that's already shipped, useful when no runners are registered or the operator wants local debugging. NO new `--runner` flag introduced; if the operator wants runner-based replay, they go through the dashboard button. Resolves MEDIUM #7.)
   → "Run replay" button
   → POST /api/sessions/{sid}/replay-jobs
   → Modal switches to live-progress view (subscribes to WebSocket)
@@ -321,6 +547,8 @@ The `RewindRunner` class handles signature verification, job-level error catchin
   → On `completed`: shows the new replay timeline ID + "Open" button
   → On `errored`: shows the error + "Retry" button
 ```
+
+**Resolution (MEDIUM #7):** modal fallback now shows the existing `rewind replay <session_id> --from <step> --fork-id <fork>` command — no new CLI flag introduced. CLI scope unchanged at `rewind runners {list,add,remove}`. The runner-driven flow is dashboard-only; the CLI fallback is for local debugging where the operator runs the agent themselves.
 
 #### Runners management page
 
@@ -364,7 +592,22 @@ The CLI is a thin wrapper around the same `/api/runners` endpoints the dashboard
 10. `feat(cli): rewind runners {list,add,remove}`
 11. `test: end-to-end integration test (register runner → fire button → progress events back → completion)`
 12. `docs: runners.md + decision-matrix update from 3-way to 5-way` (bundles the deferred Phase 2 doc gap)
-13. `chore: bump versions — Rust 0.13.0 → 0.14.0, Python SDK 0.15.0 → 0.16.0, MCP 0.13.0 → 0.13.1 (no MCP API change)`
+13. `chore: conditional version bumps` — see "Versioning" section below for the exact decision tree.
+
+**Versioning (REVISED post-review, resolves LOW #8).** Per CLAUDE.md track-1 + track-2 rules, the version bumps are conditional on what's already been released:
+
+- **Rust workspace `0.13.0 → 0.14.0`:** YES, warranted. Master 0.13.0 has been released as GitHub tag `v0.13.0` (cut Apr 27 07:26 UTC). Phase 3 has a schema migration (`runners` + `replay_jobs` tables) and new endpoints, so a minor bump is correct. All 5 mirror files (`Cargo.toml`, `Cargo.lock`, `python/rewind_cli.py`, `python-mcp/pyproject.toml`, `python-mcp/rewind_mcp_cli.py`) move together to keep CLI_VERSION in lockstep.
+- **Python SDK `0.15.0`:** STAYS at 0.15.0. Master is at 0.15.0 but PyPI is at 0.14.8 — 0.15.0 is unpublished. Per CLAUDE.md track-2: "Has the current SDK version already been published to PyPI? NO → No bump needed (changes ride with the unreleased version)." Phase 3's Python additions (`rewind_agent.runner`, `ExplicitClient.attach_replay_context`, env-var bootstrap in `intercept.install`) ride 0.15.0.
+- **Python MCP `0.13.0`:** STAYS at 0.13.0. No MCP API change AND PyPI is at 0.12.10 (unpublished). Track-1 rule fires only if `crates/` or `web/src/` changes AND the current Rust version has been released — `crates/` IS changing in this PR, so `python-mcp/pyproject.toml` and `python-mcp/rewind_mcp_cli.py` need to update CLI_VERSION to `0.14.0` to match the Rust binary they're a thin wrapper over (the binary version, not the package version). The python-mcp package version itself stays at `0.13.0`.
+
+Concrete file changes in commit 13:
+- `Cargo.toml`: `0.13.0 → 0.14.0`
+- `Cargo.lock`: rebuild (auto)
+- `python/rewind_cli.py`: `CLI_VERSION = "0.14.0"`
+- `python-mcp/pyproject.toml`: stays at `0.13.0`, but `CLI_VERSION` constant inside it (if any — TBD when implementing) tracks `0.14.0`
+- `python-mcp/rewind_mcp_cli.py`: `CLI_VERSION = "0.14.0"`
+- `python/pyproject.toml`: stays at `0.15.0`
+- `python/rewind_agent/__init__.py`: stays at `__version__ = "0.15.0"`
 
 ## Acceptance criteria
 
@@ -424,13 +667,13 @@ Alternative: dispatch all jobs immediately, runner's responsibility to queue. Mo
 - **Multi-step replay scheduling (run N replays in sequence with diff at the end)** — adjacent feature; separate planning.
 - **Fork-from-replay-button** — when a replay errors mid-flight, "fork from this step" is a natural follow-on. Adjacent UI work.
 
-## Estimated scope
+## Estimated scope (REVISED post-review)
 
-- **New code:** ~2500 LOC across ~15 new files (1500 Rust + 600 web + 250 Python + 150 CLI).
-- **Tests:** ~80 cases across Rust unit, Rust integration, web component, Python, end-to-end.
-- **Docs:** `docs/runners.md` (~250 lines) + decision-matrix updates in `docs/recording.md` and `docs/getting-started.md`.
-- **Versions:** Rust 0.13.0 → **0.14.0** (schema migration); Python SDK 0.15.0 → **0.16.0** (new package surface); MCP 0.13.0 (unchanged).
-- **Effort estimate:** ~5-7 days of focused work, depending on Q1/Q2/Q3 answers.
+- **New code:** ~2800 LOC across ~16 new files (1800 Rust + 600 web + 300 Python + 100 CLI). Bumped from 2500 due to the encrypted-token storage path (BLOCKER #1) and the lease/reaper subsystem (MEDIUM #6).
+- **Tests:** ~95 cases (was 80) — added coverage for the new encryption round-trip, lease expiry, runner-token auth on `/events`, atomic fork+context+job creation, and the `attach_replay_context` API.
+- **Docs:** `docs/runners.md` (~280 lines including bootstrap of `REWIND_RUNNER_SECRET_KEY` and lease/restart troubleshooting) + decision-matrix updates in `docs/recording.md` and `docs/getting-started.md`.
+- **Versions:** Rust workspace 0.13.0 → **0.14.0**. Python SDK rides at **0.15.0** (unpublished, per CLAUDE.md track-2). MCP package stays at **0.13.0**; CLI_VERSION constants in MCP move to `0.14.0` to track the Rust binary.
+- **Effort estimate:** ~6-8 days of focused work (was 5-7). Encryption layer + reaper + atomic-fork-creation are new work; the offset is some scope removal (cancellation deferred to v3.1).
 
 ## Plan reference for predecessors
 
