@@ -1103,15 +1103,17 @@ fn cmd_show(session_ref: String, flat: bool) -> Result<()> {
                 println!("  │   {} {}", "ERROR:".red().bold(), err.red());
             }
 
-            if let Ok(data) = store.blobs.get(&step.response_blob)
-                && let Ok(json_str) = String::from_utf8(data)
-                    && let Ok(val) = serde_json::from_str::<serde_json::Value>(&json_str) {
-                        let preview = extract_response_preview(&val);
-                        if !preview.is_empty() {
-                            let truncated: String = preview.chars().take(100).collect();
-                            println!("  │   {} {}", "→".dimmed(), truncated.dimmed());
-                        }
-                    }
+            // Step 0.3 (Phase 0 follow-up): route through Store helper so
+            // v0.13+ envelope blobs unwrap to the inner body before preview
+            // extraction. Pre-migration format=0 blobs round-trip unchanged
+            // via the legacy fallback in ResponseEnvelope::from_blob_bytes.
+            if let Some(val) = store.read_step_response_json(step) {
+                let preview = extract_response_preview(&val);
+                if !preview.is_empty() {
+                    let truncated: String = preview.chars().take(100).collect();
+                    println!("  │   {} {}", "→".dimmed(), truncated.dimmed());
+                }
+            }
         }
     }
 
@@ -3409,6 +3411,8 @@ fn create_step_with_blobs(
         error: error.map(String::from),
         span_id: None,
         tool_name: None,
+        request_hash: None,
+        response_blob_format: 0,
     };
 
     store.create_step(&step)?;
@@ -3658,11 +3662,10 @@ fn build_diagnosis_payload(
     } else {
         None
     };
-    let failure_response = if !failure_step.response_blob.is_empty() {
-        store.blobs.get_json::<serde_json::Value>(&failure_step.response_blob).ok()
-    } else {
-        None
-    };
+    // Step 0.3 (Phase 0 follow-up): unwrap envelope before passing to the
+    // failure-analysis output. Without this, `rewind failures` would dump
+    // {status, headers, body} wrappers for v0.13+ proxy-recorded sessions.
+    let failure_response = store.read_step_response_json(failure_step);
 
     let preceding_steps: Vec<serde_json::Value> = steps.iter()
         .filter(|s| {
@@ -3670,16 +3673,14 @@ fn build_diagnosis_payload(
                 && s.step_number >= failure_step_num.saturating_sub(3)
         })
         .map(|s| {
+            // Request blobs are never envelope-wrapped — they're raw JSON
+            // request bodies. Response blobs need format-aware unwrap.
             let req = if !s.request_blob.is_empty() {
                 store.blobs.get_json::<serde_json::Value>(&s.request_blob).ok()
             } else {
                 None
             };
-            let resp = if !s.response_blob.is_empty() {
-                store.blobs.get_json::<serde_json::Value>(&s.response_blob).ok()
-            } else {
-                None
-            };
+            let resp = store.read_step_response_json(s);
             serde_json::json!({
                 "step_number": s.step_number,
                 "request": req,

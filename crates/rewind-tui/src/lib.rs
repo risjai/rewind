@@ -343,7 +343,10 @@ impl TuiApp {
     }
 
     fn draw_response_panel(&self, frame: &mut Frame, area: Rect, step: &Step) {
-        let content = self.format_blob_for_display(&step.response_blob, false);
+        // Step 0.3 (Phase 0 follow-up): use the envelope-aware helper
+        // so v0.13+ proxy-recorded steps unwrap to the inner model
+        // response. Pre-migration format=0 round-trips unchanged.
+        let content = self.format_response_blob_for_display(step);
         let focused = self.panel == Panel::Response;
         let border_style = if focused {
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
@@ -364,25 +367,59 @@ impl TuiApp {
     }
 
     fn format_blob_for_display(&self, blob_hash: &str, is_request: bool) -> Vec<Line<'static>> {
-        if blob_hash.is_empty() {
+        // Request path: blobs are always naked JSON (no envelope), so a
+        // direct read is correct. Response path: callers MUST go through
+        // `format_response_blob_for_display` for envelope-aware unwrap.
+        // The `is_request: false` branch is preserved for backward compat
+        // with any caller that hasn't been migrated, but it would break on
+        // v0.13+ envelope blobs — explicit assertion documents the expectation.
+        debug_assert!(
+            is_request,
+            "format_blob_for_display(is_request=false) is unsafe for v0.13+ \
+             envelope blobs; use format_response_blob_for_display(step) instead",
+        );
+        self.format_blob_bytes_for_display(blob_hash.is_empty(), || {
+            self.store.blobs.get(blob_hash).ok().map(|d| d.to_vec())
+        }, is_request)
+    }
+
+    /// Step 0.3 (Phase 0 follow-up): envelope-aware response display.
+    ///
+    /// Routes through `Store::read_step_response_body` so the inner
+    /// model response is what gets formatted, not the envelope wrapper
+    /// JSON. Pre-migration format=0 blobs read identically to today
+    /// via the legacy fallback in `ResponseEnvelope::from_blob_bytes`.
+    fn format_response_blob_for_display(&self, step: &Step) -> Vec<Line<'static>> {
+        self.format_blob_bytes_for_display(
+            step.response_blob.is_empty(),
+            || self.store.read_step_response_body(step),
+            false,
+        )
+    }
+
+    fn format_blob_bytes_for_display<F>(
+        &self,
+        is_empty: bool,
+        fetch: F,
+        is_request: bool,
+    ) -> Vec<Line<'static>>
+    where
+        F: FnOnce() -> Option<Vec<u8>>,
+    {
+        if is_empty {
             return vec![Line::from(Span::styled("(empty)", Style::default().fg(Color::DarkGray)))];
         }
-
-        let data = match self.store.blobs.get(blob_hash) {
-            Ok(d) => d,
-            Err(_) => return vec![Line::from(Span::styled("(blob not found)", Style::default().fg(Color::Red)))],
+        let Some(data) = fetch() else {
+            return vec![Line::from(Span::styled("(blob not found)", Style::default().fg(Color::Red)))];
         };
-
         let json_str = match String::from_utf8(data) {
             Ok(s) => s,
             Err(_) => return vec![Line::from(Span::styled("(binary data)", Style::default().fg(Color::DarkGray)))],
         };
-
         let val: serde_json::Value = match serde_json::from_str(&json_str) {
             Ok(v) => v,
             Err(_) => return vec![Line::from(Span::raw(json_str))],
         };
-
         if is_request {
             self.format_request_json(&val)
         } else {

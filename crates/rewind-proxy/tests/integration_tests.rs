@@ -317,9 +317,15 @@ async fn streaming_request_records_synthetic_response() {
     assert_eq!(step.tokens_out, 5);
     assert_eq!(step.status.as_str(), "success");
 
-    // Verify the synthetic response was stored (not raw SSE)
+    // Verify the synthetic response was stored (not raw SSE).
+    // v0.13: response_blob is now a ResponseEnvelope (format=1) — unwrap to
+    // get the assembled synthetic body before parsing as JSON.
     let resp_data = store.blobs.get(&step.response_blob).unwrap();
-    let synthetic: serde_json::Value = serde_json::from_slice(&resp_data).unwrap();
+    let envelope = rewind_store::ResponseEnvelope::from_blob_bytes(
+        step.response_blob_format,
+        &resp_data,
+    );
+    let synthetic: serde_json::Value = serde_json::from_slice(&envelope.body).unwrap();
     assert_eq!(synthetic["choices"][0]["message"]["content"], "Hello world");
 }
 

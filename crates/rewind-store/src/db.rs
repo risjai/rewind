@@ -349,6 +349,31 @@ impl Store {
             ",
         )?;
 
+        // v0.13 migrations: Step 0 prerequisites (cache content validation +
+        // structured response envelope). Backwards-compat preserved via:
+        //   - request_hash NULL ⇒ "match anything" at lookup (pre-migration rows)
+        //   - response_blob_format=0 ⇒ legacy naked body, read as {status: 200,
+        //     headers: [], body} (pre-migration rows AND explicit-API record
+        //     paths, which have no HTTP envelope to capture — see record_llm_call
+        //     in crates/rewind-web/src/api.rs).
+        //   - response_blob_format=1 ⇒ ResponseEnvelope, used by the proxy
+        //     record path (handle_buffered_response / handle_streaming_response
+        //     in crates/rewind-proxy/src/lib.rs).
+        // Reads switch on the column regardless of writer.
+        // See docs/replay-and-forking.md and the plan for full rationale.
+        let _ = self.conn.execute("ALTER TABLE steps ADD COLUMN request_hash TEXT", []);
+        let _ = self.conn.execute("ALTER TABLE steps ADD COLUMN response_blob_format INTEGER NOT NULL DEFAULT 0", []);
+        // strict_match: per-context flag for content validation. NULL ⇒ default
+        // "warn-on-divergence" (return cached + X-Rewind-Cache-Divergent header).
+        // 1 ⇒ escalate divergence to HTTP 409. See do_replay_lookup.
+        let _ = self.conn.execute("ALTER TABLE replay_contexts ADD COLUMN strict_match INTEGER NOT NULL DEFAULT 0", []);
+        // Step 0.3 (Santa review #3): replay_cache needs the format
+        // discriminator too so instant-replay cache hits can unwrap envelope-v1
+        // blobs deterministically — no JSON-shape sniff heuristic. Pre-v0.13
+        // cache rows default to 0 (legacy naked body), matching their write-time
+        // semantics.
+        let _ = self.conn.execute("ALTER TABLE replay_cache ADD COLUMN response_blob_format INTEGER NOT NULL DEFAULT 0", []);
+
         Ok(())
     }
 
@@ -574,8 +599,8 @@ impl Store {
 
     pub fn create_step(&self, step: &Step) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO steps (id, timeline_id, session_id, step_number, step_type, status, created_at, duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error, span_id, tool_name)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            "INSERT INTO steps (id, timeline_id, session_id, step_number, step_type, status, created_at, duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error, span_id, tool_name, request_hash, response_blob_format)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 step.id,
                 step.timeline_id,
@@ -593,6 +618,8 @@ impl Store {
                 step.error,
                 step.span_id,
                 step.tool_name,
+                step.request_hash,
+                step.response_blob_format,
             ],
         )?;
         Ok(())
@@ -600,7 +627,7 @@ impl Store {
 
     pub fn get_steps(&self, timeline_id: &str) -> Result<Vec<Step>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, timeline_id, session_id, step_number, step_type, status, created_at, duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error, span_id, tool_name
+            "SELECT id, timeline_id, session_id, step_number, step_type, status, created_at, duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error, span_id, tool_name, request_hash, response_blob_format
              FROM steps WHERE timeline_id = ?1 ORDER BY step_number",
         )?;
         let rows = stmt.query_map(params![timeline_id], Self::row_to_step)?;
@@ -609,7 +636,7 @@ impl Store {
 
     pub fn get_step(&self, step_id: &str) -> Result<Option<Step>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, timeline_id, session_id, step_number, step_type, status, created_at, duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error, span_id, tool_name
+            "SELECT id, timeline_id, session_id, step_number, step_type, status, created_at, duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error, span_id, tool_name, request_hash, response_blob_format
              FROM steps WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(params![step_id], Self::row_to_step)?;
@@ -618,11 +645,63 @@ impl Store {
 
     pub fn get_step_by_number(&self, timeline_id: &str, step_number: u32) -> Result<Option<Step>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, timeline_id, session_id, step_number, step_type, status, created_at, duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error, span_id, tool_name
+            "SELECT id, timeline_id, session_id, step_number, step_type, status, created_at, duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error, span_id, tool_name, request_hash, response_blob_format
              FROM steps WHERE timeline_id = ?1 AND step_number = ?2",
         )?;
         let mut rows = stmt.query_map(params![timeline_id, step_number], Self::row_to_step)?;
         Ok(rows.next().transpose()?)
+    }
+
+    // ── Step 0.3 envelope-aware response readers ──────────────────
+    //
+    // These are the canonical helpers for reading a step's response body.
+    // Every display surface (CLI, MCP, TUI, OTel export, web API,
+    // replay-preview) must route through here — direct
+    // `blobs.get(&step.response_blob)` reads bypass envelope unwrapping
+    // and surface the wrapper JSON ({status, headers, body}) instead of
+    // the model response on v0.13+ proxy-recorded data.
+    //
+    // The format discriminator on `Step` decides parse strategy:
+    //   - `FORMAT_NAKED_LEGACY` (= 0): pre-migration step OR explicit-API
+    //     write (which has no HTTP status/headers to capture). Returns
+    //     the raw blob bytes as the body.
+    //   - `FORMAT_ENVELOPE_V1`  (= 1): proxy-recorded with full HTTP
+    //     metadata. Returns the inner body bytes from the envelope.
+    //   - Unknown format: defensive legacy fallback (forward-compat with
+    //     hypothetical envelope-v2 blobs read by an older binary).
+    //
+    // Pre-migration steps have `response_blob_format = 0` via the column
+    // DEFAULT, so legacy data round-trips unchanged through these helpers.
+
+    /// Read a step's response body bytes with envelope unwrap applied.
+    ///
+    /// Returns `None` when the response_blob is empty (the case for
+    /// hook events without a response, or in-flight steps) OR when the
+    /// blob is missing from the content-addressed store. Both cases are
+    /// "no body to display" rather than an error condition, so the
+    /// caller decides whether to omit the field, render an error
+    /// placeholder, or fall through to a different content source.
+    pub fn read_step_response_body(&self, step: &crate::Step) -> Option<Vec<u8>> {
+        if step.response_blob.is_empty() {
+            return None;
+        }
+        let raw = self.blobs.get(&step.response_blob).ok()?;
+        let envelope = crate::ResponseEnvelope::from_blob_bytes(step.response_blob_format, &raw);
+        Some(envelope.body)
+    }
+
+    /// Read a step's response body and parse it as JSON.
+    ///
+    /// Convenience wrapper for the common case where the caller wants
+    /// the parsed model response (OpenAI / Anthropic / etc. JSON shapes).
+    /// Returns `None` if the body is empty, missing, or not valid JSON.
+    /// The "not valid JSON" case is rare in practice — model providers
+    /// always return JSON for chat/completions endpoints — but the
+    /// nullable return preserves the existing call-site error policies
+    /// (`.ok()` chains, `.unwrap_or(serde_json::Value::Null)`, etc.).
+    pub fn read_step_response_json(&self, step: &crate::Step) -> Option<serde_json::Value> {
+        let body = self.read_step_response_body(step)?;
+        serde_json::from_slice(&body).ok()
     }
 
     // ── Step Counters (Explicit API) ──────────────────────────
@@ -685,14 +764,56 @@ impl Store {
         Ok(step)
     }
 
-    pub fn get_replay_context(&self, context_id: &str) -> Result<Option<(String, String, u32, u32)>> {
+    /// Row shape returned by [`Self::get_replay_context`].
+    ///
+    /// `strict_match` was added in the v0.13 migration (Step 0.1);
+    /// pre-migration rows decode via column DEFAULT 0 to `false`, which is
+    /// the warn-on-divergence fallback at the lookup layer.
+    pub fn get_replay_context(&self, context_id: &str) -> Result<Option<ReplayContextRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT session_id, timeline_id, from_step, current_step FROM replay_contexts WHERE id = ?1",
+            "SELECT session_id, timeline_id, from_step, current_step, strict_match
+             FROM replay_contexts WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(params![context_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, u32>(2)?, row.get::<_, u32>(3)?))
+            Ok(ReplayContextRow {
+                session_id: row.get::<_, String>(0)?,
+                timeline_id: row.get::<_, String>(1)?,
+                from_step: row.get::<_, u32>(2)?,
+                current_step: row.get::<_, u32>(3)?,
+                // Option<i64> to gracefully handle the (impossible-but-defensive)
+                // case of a pre-migration row read against a v0.13+ schema.
+                strict_match: row.get::<_, Option<i64>>(4)?.unwrap_or(0) != 0,
+            })
         })?;
         Ok(rows.next().transpose()?)
+    }
+
+    /// Peek the next replay step number without advancing the cursor.
+    ///
+    /// Step 0.1 fix: cursor advancement was previously unconditional, so a
+    /// strict-mode `409` divergence consumed the slot — retrying the agent's
+    /// call would skip ahead to the next ordinal. Now `do_replay_lookup`
+    /// peeks first, validates, and only advances on the success path.
+    pub fn peek_next_replay_step(&self, context_id: &str) -> Result<u32> {
+        let current: u32 = self.conn.query_row(
+            "SELECT current_step FROM replay_contexts WHERE id = ?1",
+            params![context_id],
+            |row| row.get(0),
+        )?;
+        Ok(current + 1)
+    }
+
+    /// Set the strict_match flag on a replay context. Strict mode escalates
+    /// content-hash divergence at lookup to HTTP 409 instead of returning
+    /// the cached step with a warning.
+    pub fn set_replay_context_strict_match(
+        &self, context_id: &str, strict: bool,
+    ) -> Result<bool> {
+        let affected = self.conn.execute(
+            "UPDATE replay_contexts SET strict_match = ?1 WHERE id = ?2",
+            params![if strict { 1 } else { 0 }, context_id],
+        )?;
+        Ok(affected > 0)
     }
 
     pub fn delete_replay_context(&self, context_id: &str) -> Result<bool> {
@@ -721,18 +842,40 @@ impl Store {
 
     // ── Instant Replay Cache ──────────────────────────────────
 
-    pub fn cache_put(&self, request_hash: &str, response_blob: &str, model: &str, tokens_in: u64, tokens_out: u64) -> Result<()> {
+    /// Insert (or replace) a replay_cache entry.
+    ///
+    /// `response_blob_format` should match the originating step's format
+    /// (typically `FORMAT_ENVELOPE_V1` for v0.13+ writes). Pre-v0.13
+    /// callers that don't know about format may pass `FORMAT_NAKED_LEGACY`
+    /// (= 0) and the column will round-trip as legacy on read.
+    pub fn cache_put(
+        &self,
+        request_hash: &str,
+        response_blob: &str,
+        response_blob_format: u8,
+        model: &str,
+        tokens_in: u64,
+        tokens_out: u64,
+    ) -> Result<()> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO replay_cache (request_hash, response_blob, model, tokens_in, tokens_out, hit_count, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
-            params![request_hash, response_blob, model, tokens_in, tokens_out, chrono::Utc::now().to_rfc3339()],
+            "INSERT OR REPLACE INTO replay_cache (request_hash, response_blob, response_blob_format, model, tokens_in, tokens_out, hit_count, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
+            params![
+                request_hash,
+                response_blob,
+                response_blob_format,
+                model,
+                tokens_in,
+                tokens_out,
+                chrono::Utc::now().to_rfc3339(),
+            ],
         )?;
         Ok(())
     }
 
     pub fn cache_get(&self, request_hash: &str) -> Result<Option<CacheEntry>> {
         let mut stmt = self.conn.prepare(
-            "SELECT request_hash, response_blob, model, tokens_in, tokens_out, hit_count
+            "SELECT request_hash, response_blob, model, tokens_in, tokens_out, hit_count, response_blob_format
              FROM replay_cache WHERE request_hash = ?1",
         )?;
         let mut rows = stmt.query_map(params![request_hash], |row| {
@@ -743,6 +886,10 @@ impl Store {
                 tokens_in: row.get(3)?,
                 tokens_out: row.get(4)?,
                 hit_count: row.get(5)?,
+                // Defensive Option<u8> read — pre-v0.13 rows return NULL
+                // before the migration runs (immediately after upgrade) and
+                // we want them to read as 0 (legacy naked body).
+                response_blob_format: row.get::<_, Option<u8>>(6)?.unwrap_or(0),
             })
         })?;
         Ok(rows.next().transpose()?)
@@ -1069,6 +1216,11 @@ impl Store {
             error: row.get(13)?,
             span_id: row.get(14)?,
             tool_name: row.get(15)?,
+            // Both columns added in v0.13 migration. Pre-migration rows return
+            // NULL/0 via SQLite's column default, which row.get() decodes
+            // gracefully (Option<String>::None / u8::0).
+            request_hash: row.get(16)?,
+            response_blob_format: row.get::<_, Option<u8>>(17)?.unwrap_or(0),
         })
     }
 
@@ -1654,7 +1806,7 @@ impl Store {
 
     pub fn get_steps_by_span(&self, span_id: &str) -> Result<Vec<Step>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, timeline_id, session_id, step_number, step_type, status, created_at, duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error, span_id, tool_name
+            "SELECT id, timeline_id, session_id, step_number, step_type, status, created_at, duration_ms, tokens_in, tokens_out, model, request_blob, response_blob, error, span_id, tool_name, request_hash, response_blob_format
              FROM steps WHERE span_id = ?1 ORDER BY step_number",
         )?;
         let rows = stmt.query_map(params![span_id], Self::row_to_step)?;
@@ -1958,5 +2110,300 @@ mod tests {
         assert_eq!(store.get_session("active-c").unwrap().unwrap().status, SessionStatus::Recording);
         // done-d still completed (not double-updated)
         assert_eq!(store.get_session("done-d").unwrap().unwrap().status, SessionStatus::Completed);
+    }
+
+    // ── Step 0 regression tests (Santa review fixes) ────────────────
+
+    /// Helper: create a minimal session + timeline + replay context for
+    /// the cursor / strict-match tests.
+    fn seed_replay_context(store: &Store, strict: bool) -> String {
+        use crate::Timeline;
+        let session = Session {
+            id: "sess-replay".into(),
+            name: "replay-test".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            status: SessionStatus::Recording,
+            source: SessionSource::Hooks,
+            total_steps: 0,
+            total_tokens: 0,
+            metadata: serde_json::json!({}),
+            thread_id: None,
+            thread_ordinal: None,
+        };
+        store.create_session(&session).unwrap();
+        let timeline = Timeline::new_root(&session.id);
+        store.create_timeline(&timeline).unwrap();
+        let ctx_id = "ctx-replay".to_string();
+        store
+            .create_replay_context(&ctx_id, &session.id, &timeline.id, 0)
+            .unwrap();
+        if strict {
+            store.set_replay_context_strict_match(&ctx_id, true).unwrap();
+        }
+        ctx_id
+    }
+
+    /// Santa review #2: peek_next_replay_step must NOT advance the cursor
+    /// — that's the whole reason it exists. Validates the new transactional
+    /// cursor model (peek → validate → advance only on success).
+    #[test]
+    fn peek_replay_step_does_not_advance_cursor() {
+        let (store, _dir) = test_store();
+        let ctx_id = seed_replay_context(&store, false);
+
+        // Initial state: current_step = 0, peek returns 1.
+        assert_eq!(store.peek_next_replay_step(&ctx_id).unwrap(), 1);
+        // Re-peeking returns the same value — no mutation.
+        assert_eq!(store.peek_next_replay_step(&ctx_id).unwrap(), 1);
+        assert_eq!(store.peek_next_replay_step(&ctx_id).unwrap(), 1);
+
+        // Confirm get_replay_context still reports current_step = 0.
+        let ctx = store.get_replay_context(&ctx_id).unwrap().unwrap();
+        assert_eq!(ctx.current_step, 0);
+    }
+
+    /// Santa review #2: advance is what bumps the counter; peek only reads.
+    #[test]
+    fn advance_after_peek_increments_normally() {
+        let (store, _dir) = test_store();
+        let ctx_id = seed_replay_context(&store, false);
+
+        assert_eq!(store.peek_next_replay_step(&ctx_id).unwrap(), 1);
+        assert_eq!(store.advance_replay_context(&ctx_id).unwrap(), 1);
+        assert_eq!(store.peek_next_replay_step(&ctx_id).unwrap(), 2);
+        assert_eq!(store.advance_replay_context(&ctx_id).unwrap(), 2);
+    }
+
+    /// Santa review #2: strict_match flag round-trips through the schema.
+    #[test]
+    fn strict_match_round_trips_via_setter() {
+        let (store, _dir) = test_store();
+
+        // Default-false context.
+        let ctx_id_default = seed_replay_context(&store, false);
+        assert!(!store.get_replay_context(&ctx_id_default).unwrap().unwrap().strict_match);
+
+        // Construct a SECOND context on the same session/timeline so the
+        // FK constraints are satisfied. Cannot use seed_replay_context
+        // here (it'd try to re-insert the session and panic on the unique
+        // primary key); instead, fetch the timeline_id and reuse it.
+        let timelines = store.get_timelines("sess-replay").unwrap();
+        let timeline_id = timelines.first().unwrap().id.clone();
+
+        let ctx_id_strict = "ctx-strict-explicit".to_string();
+        store
+            .create_replay_context(&ctx_id_strict, "sess-replay", &timeline_id, 0)
+            .unwrap();
+        store.set_replay_context_strict_match(&ctx_id_strict, true).unwrap();
+        assert!(store.get_replay_context(&ctx_id_strict).unwrap().unwrap().strict_match);
+
+        // Toggling back to false also works.
+        store.set_replay_context_strict_match(&ctx_id_strict, false).unwrap();
+        assert!(!store.get_replay_context(&ctx_id_strict).unwrap().unwrap().strict_match);
+    }
+
+    // ── Phase 0 follow-up: envelope-aware response readers ─────────
+    //
+    // These tests are the contract for `read_step_response_body` and
+    // `read_step_response_json`, the canonical helpers that every
+    // display surface (CLI, MCP, TUI, OTel export, web API,
+    // replay-preview) routes through. If these break, every surface
+    // breaks — they're the single source of truth.
+
+    fn seed_step_with_response(
+        store: &Store,
+        step_id: &str,
+        body: &[u8],
+        format: u8,
+    ) -> crate::Step {
+        use crate::Timeline;
+        // Idempotent seed of a session+timeline so multiple tests can
+        // share `test_store()` if needed.
+        if store.get_session("sess-blob").unwrap().is_none() {
+            let session = Session {
+                id: "sess-blob".into(),
+                name: "blob-test".into(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                status: SessionStatus::Recording,
+                source: SessionSource::Hooks,
+                total_steps: 0,
+                total_tokens: 0,
+                metadata: serde_json::json!({}),
+                thread_id: None,
+                thread_ordinal: None,
+            };
+            store.create_session(&session).unwrap();
+            let timeline = Timeline::new_root(&session.id);
+            store.create_timeline(&timeline).unwrap();
+        }
+        let timeline_id = store.get_timelines("sess-blob").unwrap()[0].id.clone();
+        let blob_hash = store.blobs.put(body).unwrap();
+        let mut step = crate::Step::new_llm_call(&timeline_id, "sess-blob", 1, "gpt-4o");
+        step.id = step_id.to_string();
+        step.response_blob = blob_hash;
+        step.response_blob_format = format;
+        store.create_step(&step).unwrap();
+        step
+    }
+
+    /// Phase 0 contract: legacy blobs (format=0) round-trip as the
+    /// raw bytes. Pre-migration data was always written this way and
+    /// must continue to read identically — that's the whole reason
+    /// `from_blob_bytes(0, ...)` synthesizes a 200/empty-headers
+    /// envelope around the blob bytes instead of failing the unwrap.
+    #[test]
+    fn read_step_response_body_returns_raw_for_legacy_format() {
+        let (store, _dir) = test_store();
+        let raw = br#"{"choices":[{"message":{"content":"hello"}}]}"#;
+        let step = seed_step_with_response(&store, "step-legacy", raw, crate::FORMAT_NAKED_LEGACY);
+
+        let body = store.read_step_response_body(&step).unwrap();
+        assert_eq!(body, raw, "legacy format must return raw blob bytes unchanged");
+
+        let json = store.read_step_response_json(&step).unwrap();
+        assert_eq!(
+            json.pointer("/choices/0/message/content").and_then(|v| v.as_str()),
+            Some("hello"),
+            "legacy round-trip preserves the OpenAI response shape",
+        );
+    }
+
+    /// Phase 0 contract: envelope blobs (format=1) unwrap to the inner
+    /// body, NOT the wrapper JSON. The wrapper has shape
+    /// `{status, headers, body}` — surfacing that to a CLI / MCP / TUI
+    /// user is exactly the v0.13 regression that this helper exists
+    /// to prevent.
+    #[test]
+    fn read_step_response_body_unwraps_envelope_format() {
+        let (store, _dir) = test_store();
+
+        let inner_body = br#"{"choices":[{"message":{"content":"unwrapped"}}]}"#;
+        let envelope = crate::ResponseEnvelope {
+            status: 200,
+            headers: vec![("Content-Type".into(), "application/json".into())],
+            body: inner_body.to_vec(),
+        };
+        let envelope_blob = serde_json::to_vec(&envelope).unwrap();
+        let step = seed_step_with_response(
+            &store,
+            "step-envelope",
+            &envelope_blob,
+            crate::FORMAT_ENVELOPE_V1,
+        );
+
+        let body = store.read_step_response_body(&step).unwrap();
+        assert_eq!(
+            body,
+            inner_body,
+            "envelope unwrap must return ONLY the inner body bytes",
+        );
+
+        let json = store.read_step_response_json(&step).unwrap();
+        assert_eq!(
+            json.pointer("/choices/0/message/content").and_then(|v| v.as_str()),
+            Some("unwrapped"),
+            "envelope round-trip preserves the OpenAI response shape",
+        );
+
+        // Critical regression check: the cached JSON does NOT contain
+        // the wrapper fields. If a future refactor accidentally
+        // returns the parsed envelope instead of the inner body,
+        // these would be present and the assertion fires.
+        assert!(
+            json.get("status").is_none(),
+            "envelope unwrap leaked wrapper 'status' field — display surfaces would break"
+        );
+        assert!(
+            json.get("headers").is_none(),
+            "envelope unwrap leaked wrapper 'headers' field — display surfaces would break"
+        );
+        assert!(
+            json.get("body").is_none(),
+            "envelope unwrap leaked wrapper 'body' field — display surfaces would break"
+        );
+    }
+
+    /// Phase 0 contract: empty response_blob means "no body" — used by
+    /// hook events without a response, in-flight steps, etc. Helpers
+    /// must return None instead of falling into the legacy decoder
+    /// (which would synthesize an envelope around zero bytes).
+    #[test]
+    fn read_step_response_body_returns_none_for_empty_blob() {
+        use crate::Timeline;
+        let (store, _dir) = test_store();
+        let session = Session {
+            id: "sess-empty".into(),
+            name: "empty-test".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            status: SessionStatus::Recording,
+            source: SessionSource::Hooks,
+            total_steps: 0,
+            total_tokens: 0,
+            metadata: serde_json::json!({}),
+            thread_id: None,
+            thread_ordinal: None,
+        };
+        store.create_session(&session).unwrap();
+        let timeline = Timeline::new_root(&session.id);
+        store.create_timeline(&timeline).unwrap();
+        let step = crate::Step::new_llm_call(&timeline.id, &session.id, 1, "gpt-4o");
+        // step.response_blob is "" by default from new_llm_call.
+        assert_eq!(step.response_blob, "");
+        assert!(store.read_step_response_body(&step).is_none());
+        assert!(store.read_step_response_json(&step).is_none());
+    }
+
+    /// Phase 0 contract: unknown format values fall through to the
+    /// legacy decoder rather than panic. A v0.13 binary reading a
+    /// hypothetical v0.14 envelope-v2 blob should degrade gracefully
+    /// (the user sees raw bytes as a "body") instead of crashing.
+    /// Forward-compat is cheap; the helper is a hot path.
+    #[test]
+    fn read_step_response_body_degrades_for_unknown_format() {
+        let (store, _dir) = test_store();
+        let raw = br#"{"some":"future-format-payload"}"#;
+        let step = seed_step_with_response(&store, "step-future", raw, 99);
+
+        // Decodes as if format were 0 — synthetic 200/empty/body=raw.
+        let body = store.read_step_response_body(&step).unwrap();
+        assert_eq!(body, raw, "unknown format degrades to legacy raw-body");
+    }
+
+    /// Santa review #3: cache_put / cache_get round-trip the format
+    /// discriminator. Pre-v0.13 cache entries default to format=0.
+    #[test]
+    fn cache_format_round_trips() {
+        let (store, _dir) = test_store();
+
+        // Write an envelope-format-1 cache entry (the new live-record path).
+        store
+            .cache_put(
+                "hash-envelope",
+                "blob-1",
+                crate::FORMAT_ENVELOPE_V1,
+                "gpt-4o",
+                100,
+                50,
+            )
+            .unwrap();
+        let entry = store.cache_get("hash-envelope").unwrap().unwrap();
+        assert_eq!(entry.response_blob_format, crate::FORMAT_ENVELOPE_V1);
+
+        // Write a legacy cache entry — format 0 stays 0 on read.
+        store
+            .cache_put(
+                "hash-legacy",
+                "blob-2",
+                crate::FORMAT_NAKED_LEGACY,
+                "gpt-4o",
+                10,
+                5,
+            )
+            .unwrap();
+        let legacy = store.cache_get("hash-legacy").unwrap().unwrap();
+        assert_eq!(legacy.response_blob_format, crate::FORMAT_NAKED_LEGACY);
     }
 }

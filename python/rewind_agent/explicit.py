@@ -402,8 +402,33 @@ class ExplicitClient:
     def start_replay(
         self, session_id: str, *, from_step: int = 0,
         timeline_id: str | None = None,
+        strict_match: bool = False,
     ) -> str | None:
-        """Create a replay context. Returns the replay_context_id."""
+        """Create a replay context. Returns the replay_context_id.
+
+        Parameters
+        ----------
+        session_id:
+            Session whose recorded steps will be served from cache during
+            replay.
+        from_step:
+            Step number where the replay forks. Cache lookups walk
+            ``[from_step + 1, from_step + 2, ...]`` against the replayed
+            timeline.
+        timeline_id:
+            Fork timeline to record new (live) steps into. Defaults to the
+            session's root timeline (creates an in-place replay against
+            ``main``).
+        strict_match:
+            **Step 0.1 cache content validation.** When ``True``, a
+            divergence between the agent's request body and the
+            recording's stored ``request_hash`` returns HTTP 409 instead
+            of the cached response. The cursor stays put on 409 so the
+            caller can fix and retry without consuming an ordinal slot.
+            Default ``False`` (warn-on-divergence): cached step is
+            returned with an ``X-Rewind-Cache-Divergent: true`` header
+            and ``divergent: true`` in the JSON body.
+        """
         if timeline_id is None:
             sess = self._get(f"/sessions/{session_id}")
             if sess and "timelines" in sess:
@@ -417,11 +442,18 @@ class ExplicitClient:
         if timeline_id is None:
             logger.warning("Could not resolve timeline for session %s", session_id)
             return None
-        result = self._post("/replay-contexts", {
+        body: dict[str, Any] = {
             "session_id": session_id,
             "from_step": from_step,
             "fork_timeline_id": timeline_id,
-        })
+        }
+        if strict_match:
+            # Only emit the field when set so older servers (pre-v0.13)
+            # that don't know strict_match receive a request shape they
+            # already accept (the field is unrecognized → ignored). Once
+            # v0.13 is the floor we can pass it unconditionally.
+            body["strict_match"] = True
+        result = self._post("/replay-contexts", body)
         if result:
             ctx_id = result["replay_context_id"]
             _replay_context_id.set(ctx_id)
@@ -439,10 +471,14 @@ class ExplicitClient:
     def replay_from_iteration(
         self, session_id: str, iteration: int,
         *, timeline_id: str | None = None,
+        strict_match: bool = False,
     ) -> str | None:
         """Start replay from the Nth LLM call (1-indexed).
 
         Iteration N = the Nth step where step_type == "llm_call".
+
+        ``strict_match`` is forwarded to :meth:`start_replay` — see that
+        method's docstring for cache validation semantics.
         """
         tid = timeline_id
         if tid is None:
@@ -463,7 +499,12 @@ class ExplicitClient:
             return None
 
         from_step = llm_steps[iteration - 1]["step_number"] - 1
-        return self.start_replay(session_id, from_step=from_step, timeline_id=tid)
+        return self.start_replay(
+            session_id,
+            from_step=from_step,
+            timeline_id=tid,
+            strict_match=strict_match,
+        )
 
     # ── Fork ──────────────────────────────────────────────────
 

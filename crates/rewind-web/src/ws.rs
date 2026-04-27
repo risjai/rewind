@@ -129,7 +129,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             if subscribed_session.as_deref() == Some(session_id) {
                                 let preview = {
                                     let store = state.store.lock().unwrap();
-                                    crate::api::extract_preview_from_store(&store, &step.response_blob)
+                                    crate::api::extract_preview_from_store(
+                                        &store,
+                                        &step.response_blob,
+                                        step.response_blob_format,
+                                    )
                                 };
                                 Some(ServerMessage::Step {
                                     data: Box::new(StepEventData {

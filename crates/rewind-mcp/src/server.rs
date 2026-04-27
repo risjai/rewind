@@ -324,7 +324,7 @@ impl RewindMcp {
         let step_summaries: Vec<StepSummaryResponse> = steps
             .iter()
             .map(|s| {
-                let preview = extract_response_preview(&store, &s.response_blob);
+                let preview = extract_response_preview(&store, s);
                 StepSummaryResponse {
                     step_number: s.step_number,
                     step_type: s.step_type.as_str().to_string(),
@@ -379,9 +379,12 @@ impl RewindMcp {
             .map_err(|e| mcp_err(&e))?
             .ok_or_else(|| mcp_err_str(&format!("Step not found: {}", params.step_id)))?;
 
+        // Step 0.3 (Phase 0 follow-up): envelope-aware unwrap. Without
+        // this, MCP `get_step` would return {status, headers, body}
+        // wrapper JSON to LLM agents querying Rewind for v0.13+
+        // proxy-recorded sessions, defeating the purpose of the tool.
         let response: serde_json::Value = store
-            .blobs
-            .get_json(&step.response_blob)
+            .read_step_response_json(&step)
             .unwrap_or(serde_json::json!({"error": "blob not found"}));
 
         let mut result = serde_json::json!({
@@ -1514,7 +1517,7 @@ fn build_mcp_span_node(span: &rewind_store::Span, all_spans: &[rewind_store::Spa
     let span_steps: Vec<serde_json::Value> = all_steps.iter()
         .filter(|s| s.span_id.as_deref() == Some(&span.id))
         .map(|s| {
-            let preview = extract_response_preview(store, &s.response_blob);
+            let preview = extract_response_preview(store, s);
             serde_json::json!({
                 "step_number": s.step_number,
                 "step_type": s.step_type.as_str(),
@@ -1541,41 +1544,55 @@ fn build_mcp_span_node(span: &rewind_store::Span, all_spans: &[rewind_store::Spa
     })
 }
 
-fn extract_response_preview(store: &Store, response_blob: &str) -> String {
-    store
-        .blobs
-        .get(response_blob)
-        .ok()
-        .and_then(|data| String::from_utf8(data).ok())
-        .and_then(|json_str| {
-            let val: serde_json::Value = serde_json::from_str(&json_str).ok()?;
-            if let Some(content) = val
-                .pointer("/choices/0/message/content")
-                .and_then(|c| c.as_str())
-            {
-                return Some(content.replace('\n', " ").chars().take(150).collect());
-            }
-            if let Some(calls) = val
-                .pointer("/choices/0/message/tool_calls")
-                .and_then(|c| c.as_array())
-            {
-                let names: Vec<&str> = calls
-                    .iter()
-                    .filter_map(|c| c.pointer("/function/name").and_then(|n| n.as_str()))
-                    .collect();
-                return Some(format!("tool_calls: {}", names.join(", ")));
-            }
-            if let Some(content) = val.get("content").and_then(|c| c.as_array())
-                && let Some(text) = content
-                    .first()
-                    .and_then(|b| b.get("text"))
-                    .and_then(|t| t.as_str())
-            {
-                return Some(text.replace('\n', " ").chars().take(150).collect());
-            }
-            Some(json_str.chars().take(150).collect())
-        })
-        .unwrap_or_else(|| "(no response)".to_string())
+/// Extract a 150-char preview from a step's response body.
+///
+/// Step 0.3 (Phase 0 follow-up): takes a `&Step` (rather than the bare
+/// `response_blob` hash) so we can route through the envelope-aware
+/// helper [`Store::read_step_response_body`]. Pre-migration format=0
+/// blobs round-trip unchanged via the legacy fallback; v0.13+ envelope
+/// blobs unwrap to the inner model response before preview extraction.
+fn extract_response_preview(store: &Store, step: &rewind_store::Step) -> String {
+    let Some(body) = store.read_step_response_body(step) else {
+        return "(no response)".to_string();
+    };
+    let Ok(json_str) = String::from_utf8(body) else {
+        return "(no response)".to_string();
+    };
+    let parsed: Option<serde_json::Value> = serde_json::from_str(&json_str).ok();
+
+    let preview = parsed.as_ref().and_then(|val| {
+        if let Some(content) = val
+            .pointer("/choices/0/message/content")
+            .and_then(|c| c.as_str())
+        {
+            return Some(content.replace('\n', " ").chars().take(150).collect());
+        }
+        if let Some(calls) = val
+            .pointer("/choices/0/message/tool_calls")
+            .and_then(|c| c.as_array())
+        {
+            let names: Vec<&str> = calls
+                .iter()
+                .filter_map(|c| c.pointer("/function/name").and_then(|n| n.as_str()))
+                .collect();
+            return Some(format!("tool_calls: {}", names.join(", ")));
+        }
+        if let Some(content) = val.get("content").and_then(|c| c.as_array())
+            && let Some(text) = content
+                .first()
+                .and_then(|b| b.get("text"))
+                .and_then(|t| t.as_str())
+        {
+            return Some(text.replace('\n', " ").chars().take(150).collect());
+        }
+        None
+    });
+
+    preview.unwrap_or_else(|| {
+        // Last-resort: truncated raw JSON. Better than nothing for
+        // unrecognized response shapes (custom providers, debug dumps).
+        json_str.chars().take(150).collect::<String>()
+    })
 }
 
 fn format_bytes(bytes: u64) -> String {

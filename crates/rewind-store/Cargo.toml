@@ -13,6 +13,10 @@ uuid = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+# v0.13: redact module moved here from rewind-proxy so the explicit-API
+# record path (rewind-web) can apply identical redaction passes for
+# cache-validation hashing. See src/hash.rs and src/redact.rs.
+regex = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

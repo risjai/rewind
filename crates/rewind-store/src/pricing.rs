@@ -91,6 +91,8 @@ mod tests {
             error: None,
             span_id: None,
             tool_name: None,
+            request_hash: None,
+            response_blob_format: 0,
         }
     }
 

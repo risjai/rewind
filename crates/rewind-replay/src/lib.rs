@@ -305,31 +305,39 @@ impl<'a> ReplayEngine<'a> {
     }
 
     fn step_summary(&self, step: &Step) -> StepSummary {
-        let response_preview = self.store.blobs.get(&step.response_blob)
-            .ok()
-            .and_then(|data| String::from_utf8(data).ok())
-            .and_then(|json_str| {
-                let val: serde_json::Value = serde_json::from_str(&json_str).ok()?;
-                // OpenAI format
-                if let Some(choices) = val.get("choices").and_then(|c| c.as_array())
-                    && let Some(msg) = choices.first()
-                        .and_then(|c| c.get("message"))
-                        .and_then(|m| m.get("content"))
-                        .and_then(|c| c.as_str())
-                    {
-                        return Some(msg.chars().take(150).collect());
-                    }
-                // Anthropic format
-                if let Some(content) = val.get("content").and_then(|c| c.as_array())
-                    && let Some(text) = content.first()
-                        .and_then(|b| b.get("text"))
-                        .and_then(|t| t.as_str())
-                    {
-                        return Some(text.chars().take(150).collect());
-                    }
-                Some(json_str.chars().take(150).collect())
-            })
-            .unwrap_or_else(|| "(no response)".to_string());
+        // Step 0.3 (Phase 0 follow-up): envelope-aware unwrap before
+        // preview extraction. Without this, fork-diff views would surface
+        // {status, headers, body} wrapper text in the response_preview
+        // field for v0.13+ proxy-recorded steps. Pre-migration format=0
+        // round-trips unchanged.
+        let response_preview = match self.store.read_step_response_body(step) {
+            Some(body) => match String::from_utf8(body) {
+                Ok(json_str) => {
+                    let parsed = serde_json::from_str::<serde_json::Value>(&json_str).ok();
+                    let derived = parsed.as_ref().and_then(|val| {
+                        if let Some(choices) = val.get("choices").and_then(|c| c.as_array())
+                            && let Some(msg) = choices.first()
+                                .and_then(|c| c.get("message"))
+                                .and_then(|m| m.get("content"))
+                                .and_then(|c| c.as_str())
+                        {
+                            return Some(msg.chars().take(150).collect());
+                        }
+                        if let Some(content) = val.get("content").and_then(|c| c.as_array())
+                            && let Some(text) = content.first()
+                                .and_then(|b| b.get("text"))
+                                .and_then(|t| t.as_str())
+                        {
+                            return Some(text.chars().take(150).collect());
+                        }
+                        None
+                    });
+                    derived.unwrap_or_else(|| json_str.chars().take(150).collect::<String>())
+                }
+                Err(_) => "(binary data)".to_string(),
+            },
+            None => "(no response)".to_string(),
+        };
 
         StepSummary {
             step_type: step.step_type.label().to_string(),

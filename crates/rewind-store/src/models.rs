@@ -102,11 +102,74 @@ pub struct Step {
     pub tokens_in: u64,
     pub tokens_out: u64,
     pub model: String,
-    pub request_blob: String,  // SHA-256 hash -> blob store
-    pub response_blob: String, // SHA-256 hash -> blob store
+    pub request_blob: String,  // SHA-256 hash -> blob store (content-addressed)
+    pub response_blob: String, // SHA-256 hash -> blob store (content-addressed)
     pub error: Option<String>,
     pub span_id: Option<String>,
     pub tool_name: Option<String>,
+    /// Step 0.1: post-redaction canonical hash of the request body.
+    ///
+    /// Distinct from `request_blob`: the blob hash is computed without
+    /// guarantees about redaction passes (the explicit-API record path on
+    /// `crates/rewind-web/src/api.rs:955` does not redact, while the proxy
+    /// path on `crates/rewind-proxy/src/lib.rs:289` does). For replay-cache
+    /// content validation we need a single canonical hash that's identical
+    /// between record and lookup, regardless of which record path was used.
+    /// `None` for pre-migration rows — the lookup treats `None` as "match
+    /// anything" to preserve backwards-compatible behavior.
+    pub request_hash: Option<String>,
+    /// Step 0.3: discriminator for the `response_blob` payload format.
+    ///
+    /// **`0` = `FORMAT_NAKED_LEGACY`** — naked JSON body. Used by:
+    ///
+    /// - Pre-migration rows (column DEFAULT 0); back-compat with v0.12.x
+    ///   data written before the envelope existed.
+    /// - Explicit-API record paths (`record_llm_call`, `record_tool_call`
+    ///   in `crates/rewind-web/src/api.rs`): the SDK caller hands us a
+    ///   parsed JSON `Value`, so there's no HTTP status/headers to wrap —
+    ///   persisting naked is the natural fit.
+    /// - Hooks ingest path (`crates/rewind-otel/src/ingest.rs`): OTel
+    ///   spans don't carry HTTP envelopes either.
+    /// - Transcript import (`crates/rewind-web/src/transcript.rs`):
+    ///   synthesizes steps from Claude Code transcripts, no HTTP source.
+    ///
+    /// On read, `ResponseEnvelope::from_blob_bytes` decodes a format-0
+    /// blob as `{status: 200, headers: [], body: <raw bytes>}` so the
+    /// downstream code sees the same envelope shape as a real HTTP capture.
+    ///
+    /// **`1` = `FORMAT_ENVELOPE_V1`** — `ResponseEnvelope` (status code +
+    /// scrubbed headers + body). Used **only** by the proxy record path
+    /// (`handle_buffered_response` / `handle_streaming_response` in
+    /// `crates/rewind-proxy/src/lib.rs`), which has the full HTTP wire
+    /// response to preserve. Replayed steps that inherit from a cache
+    /// hit copy this format from the originating cached step.
+    ///
+    /// Unknown values fall back to `0` parsing for forward-compat.
+    pub response_blob_format: u8,
+}
+
+/// Step 0.1: row shape of the `replay_contexts` table.
+///
+/// Replaces the 5-tuple return type from `Store::get_replay_context` that
+/// clippy flagged as `type_complexity`. Named fields also make the call
+/// site self-documenting.
+#[derive(Debug, Clone)]
+pub struct ReplayContextRow {
+    pub session_id: String,
+    pub timeline_id: String,
+    /// Step number the replay forks at. `current_step` advances within
+    /// `[from_step, total_steps]`.
+    pub from_step: u32,
+    /// Number of replay-lookup calls served so far for this context.
+    /// Advanced by `Store::advance_replay_context` on the success path;
+    /// peeked by `Store::peek_next_replay_step` for pre-validation
+    /// lookups so a strict-mode 409 doesn't consume an ordinal slot.
+    pub current_step: u32,
+    /// `false` (default) → warn-on-divergence: cache hit returns the
+    /// recorded step plus an `X-Rewind-Cache-Divergent: true` header.
+    /// `true` → divergence escalates to HTTP 409 and the cursor stays put
+    /// so the caller can retry without consuming an ordinal slot.
+    pub strict_match: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -318,6 +381,12 @@ pub struct CacheEntry {
     pub tokens_in: u64,
     pub tokens_out: u64,
     pub hit_count: u64,
+    /// Step 0.3: format discriminator inherited from the originating step.
+    /// Pre-v0.13 cache rows decode as 0 (legacy naked body) via the column
+    /// DEFAULT, preserving back-compat. New `cache_put` calls forward the
+    /// originating step's format so cache hits can be unwrapped consistently
+    /// without sniff heuristics.
+    pub response_blob_format: u8,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -380,6 +449,8 @@ impl Step {
             error: None,
             span_id: None,
             tool_name: None,
+            request_hash: None,
+            response_blob_format: 0,
         }
     }
 }

@@ -1809,7 +1809,7 @@ dependencies = [
 
 [[package]]
 name = "rewind-assert"
-version = "0.12.17"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1824,7 +1824,7 @@ dependencies = [
 
 [[package]]
 name = "rewind-cli"
-version = "0.12.17"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1851,7 +1851,7 @@ dependencies = [
 
 [[package]]
 name = "rewind-eval"
-version = "0.12.17"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1866,7 +1866,7 @@ dependencies = [
 
 [[package]]
 name = "rewind-mcp"
-version = "0.12.17"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "rewind-assert",
@@ -1884,7 +1884,7 @@ dependencies = [
 
 [[package]]
 name = "rewind-otel"
-version = "0.12.17"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1909,7 +1909,7 @@ dependencies = [
 
 [[package]]
 name = "rewind-proxy"
-version = "0.12.17"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1917,7 +1917,6 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
- "regex",
  "reqwest",
  "rewind-store",
  "serde",
@@ -1932,7 +1931,7 @@ dependencies = [
 
 [[package]]
 name = "rewind-replay"
-version = "0.12.17"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1949,11 +1948,12 @@ dependencies = [
 
 [[package]]
 name = "rewind-store"
-version = "0.12.17"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "chrono",
  "libc",
+ "regex",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1966,7 +1966,7 @@ dependencies = [
 
 [[package]]
 name = "rewind-tui"
-version = "0.12.17"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1984,7 +1984,7 @@ dependencies = [
 
 [[package]]
 name = "rewind-web"
-version = "0.12.17"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "axum",
