@@ -120,22 +120,24 @@ pub struct Step {
     pub request_hash: Option<String>,
     /// Step 0.3: discriminator for the `response_blob` payload format.
     ///
-    /// `0` = `FORMAT_NAKED_LEGACY` — naked JSON body. Used by:
-    ///   - **Pre-migration rows** (column DEFAULT 0); back-compat with
-    ///     v0.12.x data written before the envelope existed.
-    ///   - **Explicit-API record paths** (`record_llm_call`,
-    ///     `record_tool_call` in `crates/rewind-web/src/api.rs`): the SDK
-    ///     caller hands us a parsed JSON `Value`, so there's no HTTP
-    ///     status/headers to wrap — persisting naked is the natural fit.
-    ///   - **Hooks ingest path** (`crates/rewind-otel/src/ingest.rs`):
-    ///     OTel spans don't carry HTTP envelopes either.
-    ///   - **Transcript import** (`crates/rewind-web/src/transcript.rs`):
-    ///     synthesizes steps from Claude Code transcripts, no HTTP source.
+    /// **`0` = `FORMAT_NAKED_LEGACY`** — naked JSON body. Used by:
+    ///
+    /// - Pre-migration rows (column DEFAULT 0); back-compat with v0.12.x
+    ///   data written before the envelope existed.
+    /// - Explicit-API record paths (`record_llm_call`, `record_tool_call`
+    ///   in `crates/rewind-web/src/api.rs`): the SDK caller hands us a
+    ///   parsed JSON `Value`, so there's no HTTP status/headers to wrap —
+    ///   persisting naked is the natural fit.
+    /// - Hooks ingest path (`crates/rewind-otel/src/ingest.rs`): OTel
+    ///   spans don't carry HTTP envelopes either.
+    /// - Transcript import (`crates/rewind-web/src/transcript.rs`):
+    ///   synthesizes steps from Claude Code transcripts, no HTTP source.
+    ///
     /// On read, `ResponseEnvelope::from_blob_bytes` decodes a format-0
     /// blob as `{status: 200, headers: [], body: <raw bytes>}` so the
     /// downstream code sees the same envelope shape as a real HTTP capture.
     ///
-    /// `1` = `FORMAT_ENVELOPE_V1` — `ResponseEnvelope` (status code +
+    /// **`1` = `FORMAT_ENVELOPE_V1`** — `ResponseEnvelope` (status code +
     /// scrubbed headers + body). Used **only** by the proxy record path
     /// (`handle_buffered_response` / `handle_streaming_response` in
     /// `crates/rewind-proxy/src/lib.rs`), which has the full HTTP wire
