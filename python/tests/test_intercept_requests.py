@@ -14,12 +14,17 @@ import unittest
 from typing import Any
 from unittest.mock import patch
 
-import requests
-from requests.adapters import HTTPAdapter
-from requests.models import Response
+import pytest
 
-from rewind_agent.intercept import _flow, _savings
-from rewind_agent.intercept.requests_adapter import (
+# Skip the module when requests isn't installed. See test_intercept_httpx.py
+# for the rationale (optional dep; CI installs it; importorskip is the
+# fallback for stripped dev envs).
+requests = pytest.importorskip("requests")
+from requests.adapters import HTTPAdapter  # noqa: E402
+from requests.models import Response  # noqa: E402
+
+from rewind_agent.intercept import _flow, _savings  # noqa: E402
+from rewind_agent.intercept.requests_adapter import (  # noqa: E402
     is_patched,
     patch_requests_sessions,
     unpatch_requests_sessions,

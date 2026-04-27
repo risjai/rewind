@@ -64,19 +64,19 @@ logger = logging.getLogger(__name__)
 # isn't installed, the patch function below is a no-op so
 # ``intercept.install()`` works in environments where the user only
 # uses requests or aiohttp.
+#
+# IMPORTANT: this module must be IMPORTABLE without httpx installed.
+# The Python SDK has no httpx dependency by default; users opt in by
+# installing httpx separately. So everything httpx-typed (transport
+# subclasses, ByteStream synthesizers) is lazily defined inside the
+# patch function below, not at module level. Module-level classes
+# that subclass ``httpx.ByteStream`` would raise NameError at import
+# time when httpx is absent — exactly the failure mode CI hit on PR #149.
 try:
-    import httpx
-    from httpx import (
-        AsyncByteStream,
-        AsyncHTTPTransport,
-        ByteStream,
-        HTTPTransport,
-        Request,
-        Response,
-    )
+    import httpx  # noqa: F401  — used via attribute access in patch fn
 
     HTTPX_AVAILABLE = True
-except ImportError:  # pragma: no cover — exercised in env-detection tests
+except ImportError:  # pragma: no cover — environment-detection path
     HTTPX_AVAILABLE = False
 
 
@@ -87,54 +87,100 @@ _ORIGINAL_ASYNC_CLIENT_INIT = None
 _PATCHED = False
 
 
-# ── Sync transport ─────────────────────────────────────────────────
+# ── Lazy class factory ─────────────────────────────────────────────
+#
+# Transport subclasses + ByteStream synthesizers are constructed inside
+# this factory the first time ``patch_httpx_clients`` runs. They MUST
+# NOT be defined at module level because their parent classes
+# (``httpx.HTTPTransport``, ``httpx.ByteStream`` etc.) are conditional
+# imports — defining a subclass at module level would raise NameError
+# when httpx isn't installed, breaking ``import rewind_agent.intercept``
+# in environments where the user only has requests or aiohttp.
 
 
-def _make_sync_transport_class(predicates: Predicates) -> Any:
-    """Build a sync transport subclass bound to the given predicates.
+def _build_transport_classes(predicates: Predicates) -> tuple[Any, Any]:
+    """Construct (sync_transport_class, async_transport_class) bound to
+    the given predicates.
 
-    We close over ``predicates`` so the patched ``Client.__init__`` can
-    swap in a fresh class per ``install()`` call without polluting a
-    module-level singleton. This matters in tests that install with
-    different predicates back-to-back.
+    Importing httpx at function entry rather than module level keeps
+    this module importable without httpx. AssertionError if called when
+    ``HTTPX_AVAILABLE`` is False (caller's responsibility to gate).
     """
+    if not HTTPX_AVAILABLE:
+        raise AssertionError(
+            "_build_transport_classes called without httpx — caller must "
+            "check HTTPX_AVAILABLE first"
+        )
+    # Re-import locally; ``import httpx`` at module level set the flag
+    # but didn't expose the symbols we need here.
+    import httpx as _httpx
+    from rewind_agent.intercept._core import iter_synthetic_sse_chunks
 
-    class RewindHTTPTransport(HTTPTransport):  # type: ignore[misc, valid-type]
+    # ── ByteStream subclasses (sync + async) ─────────────────────
+    #
+    # httpx exposes two ByteStream protocols. Our subclasses emit one
+    # SSE event + [DONE] sentinel from a buffered cached body.
+
+    class _SyntheticSSEByteStream(_httpx.ByteStream):  # type: ignore[misc]
+        """Sync ByteStream emitting `data: …\\n\\ndata: [DONE]\\n\\n` chunks."""
+
+        def __init__(self, body: bytes) -> None:
+            self._chunks = tuple(iter_synthetic_sse_chunks(body))
+            # ByteStream.__init__ takes content bytes; we pass empty
+            # because our overridden __iter__ owns the stream state.
+            super().__init__(b"")
+
+        def __iter__(self):  # type: ignore[no-untyped-def]
+            yield from self._chunks
+
+    class _AsyncSyntheticSSEByteStream(_httpx.AsyncByteStream):  # type: ignore[misc]
+        """Async counterpart. AsyncByteStream is an abstract protocol with
+        no constructor — calling super().__init__(b"") fails on
+        object.__init__'s arg-count check, so we skip it.
+        """
+
+        def __init__(self, body: bytes) -> None:
+            self._chunks = tuple(iter_synthetic_sse_chunks(body))
+
+        async def __aiter__(self):  # type: ignore[no-untyped-def]
+            for chunk in self._chunks:
+                yield chunk
+
+        async def aclose(self) -> None:
+            return None
+
+    # ── Sync transport ───────────────────────────────────────────
+
+    class RewindHTTPTransport(_httpx.HTTPTransport):  # type: ignore[misc]
         """``httpx.HTTPTransport`` subclass that runs every request through
-        :func:`._flow.handle_intercepted_sync`.
-
-        On cache hit, returns a synthetic ``httpx.Response`` built from the
-        cached body without ever calling the inner transport. On cache
-        miss, delegates to ``super().handle_request`` (which is the same
-        as a vanilla ``HTTPTransport``).
+        :func:`._flow.handle_intercepted_sync`. Cache hit → synthetic
+        Response built from cached body. Cache miss → delegate to
+        ``super().handle_request`` (or to ``self._inner`` when the user
+        supplied their own transport).
         """
 
         def __init__(self, *args: Any, _inner: Any = None, **kwargs: Any) -> None:
-            # If the user passed their own transport via the patched
-            # Client.__init__, it's threaded through ``_inner`` and we
-            # delegate to it. Otherwise fall back to our own default
-            # transport behavior (super().handle_request).
             self._inner = _inner
             super().__init__(*args, **kwargs)
 
-        def handle_request(self, request: Request) -> Response:
+        def handle_request(self, request: Any) -> Any:
             req = _build_rewind_request(request, sync=True)
 
-            def live() -> Response:
+            def live() -> Any:
                 if self._inner is not None:
                     return self._inner.handle_request(request)
                 return super(RewindHTTPTransport, self).handle_request(request)
 
-            def synth_buffered(body: bytes, headers: dict[str, str]) -> Response:
-                return Response(
+            def synth_buffered(body: bytes, headers: dict[str, str]) -> Any:
+                return _httpx.Response(
                     status_code=200,
                     headers=headers,
-                    stream=ByteStream(body),
+                    stream=_httpx.ByteStream(body),
                     request=request,
                 )
 
-            def synth_streaming(body: bytes, headers: dict[str, str]) -> Response:
-                return Response(
+            def synth_streaming(body: bytes, headers: dict[str, str]) -> Any:
+                return _httpx.Response(
                     status_code=200,
                     headers=headers,
                     stream=_SyntheticSSEByteStream(body),
@@ -150,42 +196,35 @@ def _make_sync_transport_class(predicates: Predicates) -> Any:
                 is_streaming=req.stream,
             )
 
-    return RewindHTTPTransport
+    # ── Async transport ──────────────────────────────────────────
 
-
-# ── Async transport ────────────────────────────────────────────────
-
-
-def _make_async_transport_class(predicates: Predicates) -> Any:
-    """Async counterpart of :func:`_make_sync_transport_class`."""
-
-    class RewindAsyncHTTPTransport(AsyncHTTPTransport):  # type: ignore[misc, valid-type]
+    class RewindAsyncHTTPTransport(_httpx.AsyncHTTPTransport):  # type: ignore[misc]
         """``httpx.AsyncHTTPTransport`` subclass for async clients."""
 
         def __init__(self, *args: Any, _inner: Any = None, **kwargs: Any) -> None:
             self._inner = _inner
             super().__init__(*args, **kwargs)
 
-        async def handle_async_request(self, request: Request) -> Response:
+        async def handle_async_request(self, request: Any) -> Any:
             req = _build_rewind_request(request, sync=False)
 
-            async def live() -> Response:
+            async def live() -> Any:
                 if self._inner is not None:
                     return await self._inner.handle_async_request(request)
                 return await super(
                     RewindAsyncHTTPTransport, self
                 ).handle_async_request(request)
 
-            def synth_buffered(body: bytes, headers: dict[str, str]) -> Response:
-                return Response(
+            def synth_buffered(body: bytes, headers: dict[str, str]) -> Any:
+                return _httpx.Response(
                     status_code=200,
                     headers=headers,
-                    stream=ByteStream(body),
+                    stream=_httpx.ByteStream(body),
                     request=request,
                 )
 
-            def synth_streaming(body: bytes, headers: dict[str, str]) -> Response:
-                return Response(
+            def synth_streaming(body: bytes, headers: dict[str, str]) -> Any:
+                return _httpx.Response(
                     status_code=200,
                     headers=headers,
                     stream=_AsyncSyntheticSSEByteStream(body),
@@ -201,68 +240,13 @@ def _make_async_transport_class(predicates: Predicates) -> Any:
                 is_streaming=req.stream,
             )
 
-    return RewindAsyncHTTPTransport
-
-
-# ── Synthetic SSE byte streams ─────────────────────────────────────
-#
-# ByteStream / AsyncByteStream protocols require __iter__ / __aiter__.
-# We can't reuse iter_synthetic_sse_chunks directly because httpx
-# expects a *class* implementing the protocol, and Generators can be
-# consumed only once — leading to subtle bugs if httpx replays the
-# stream (it doesn't today, but defensive). Wrap as a class.
-
-
-class _SyntheticSSEByteStream(ByteStream):  # type: ignore[misc, valid-type]
-    """Sync ByteStream that emits one SSE event + [DONE] sentinel.
-
-    httpx calls ``__iter__`` once per response, but the wrapped data is
-    immutable bytes so re-iteration would just emit the same chunks
-    again — defensive, not relied upon.
-    """
-
-    def __init__(self, body: bytes) -> None:
-        from rewind_agent.intercept._core import iter_synthetic_sse_chunks
-
-        # Materialize chunks now; trivial in size and saves a re-import
-        # per iteration.
-        self._chunks = tuple(iter_synthetic_sse_chunks(body))
-        # ByteStream expects a content arg; supply an empty bytes here
-        # so the parent class is happy. Our overridden __iter__ ignores
-        # the parent's stream state.
-        super().__init__(b"")
-
-    def __iter__(self):  # type: ignore[no-untyped-def]
-        yield from self._chunks
-
-
-class _AsyncSyntheticSSEByteStream(AsyncByteStream):  # type: ignore[misc, valid-type]
-    """Async counterpart for httpx async clients.
-
-    Unlike sync :class:`ByteStream` (which has an ``__init__(content: bytes)``),
-    httpx's :class:`AsyncByteStream` is an abstract protocol with no
-    constructor — calling ``super().__init__(b"")`` fails with ``object``'s
-    "takes exactly one argument" error. We omit the super call.
-    """
-
-    def __init__(self, body: bytes) -> None:
-        from rewind_agent.intercept._core import iter_synthetic_sse_chunks
-
-        self._chunks = tuple(iter_synthetic_sse_chunks(body))
-
-    async def __aiter__(self):  # type: ignore[no-untyped-def]
-        for chunk in self._chunks:
-            yield chunk
-
-    async def aclose(self) -> None:
-        # No resources to release; chunks are owned by self.
-        return None
+    return RewindHTTPTransport, RewindAsyncHTTPTransport
 
 
 # ── Request normalization ──────────────────────────────────────────
 
 
-def _build_rewind_request(request: Request, *, sync: bool) -> RewindRequest:
+def _build_rewind_request(request: Any, *, sync: bool) -> RewindRequest:
     """Convert an ``httpx.Request`` to a :class:`RewindRequest`.
 
     Headers are lowercased to match the predicate contract. Body is
@@ -340,12 +324,16 @@ def patch_httpx_clients(predicates: Predicates | None = None) -> None:
     if _PATCHED:
         return
 
-    preds = predicates if predicates is not None else DefaultPredicates()
-    rewind_sync_transport = _make_sync_transport_class(preds)
-    rewind_async_transport = _make_async_transport_class(preds)
+    # Lazy import of httpx — module-level import succeeded (we got
+    # past the HTTPX_AVAILABLE check), but importing again here makes
+    # the local reference explicit for the patch logic below.
+    import httpx as _httpx
 
-    _ORIGINAL_CLIENT_INIT = httpx.Client.__init__
-    _ORIGINAL_ASYNC_CLIENT_INIT = httpx.AsyncClient.__init__
+    preds = predicates if predicates is not None else DefaultPredicates()
+    rewind_sync_transport, rewind_async_transport = _build_transport_classes(preds)
+
+    _ORIGINAL_CLIENT_INIT = _httpx.Client.__init__
+    _ORIGINAL_ASYNC_CLIENT_INIT = _httpx.AsyncClient.__init__
 
     original_client_init = _ORIGINAL_CLIENT_INIT
     original_async_client_init = _ORIGINAL_ASYNC_CLIENT_INIT

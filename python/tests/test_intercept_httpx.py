@@ -26,10 +26,20 @@ import unittest
 from typing import Any
 from unittest.mock import patch
 
-import httpx
+import pytest
 
-from rewind_agent.intercept import _flow, _savings
-from rewind_agent.intercept.httpx_transport import (
+# Skip the entire module when httpx isn't installed. The Python SDK
+# treats httpx as an optional dep — users without an httpx-based agent
+# never need it. CI installs httpx so these tests actually run; this
+# pytest.importorskip is the fallback for dev envs (e.g. a contributor
+# stripping the test deps to debug a different layer).
+httpx = pytest.importorskip("httpx")
+
+# Imports below intentionally come after importorskip (ruff E402 ok'd
+# via noqa) — collecting these imports without httpx would trigger
+# the same NameError the gate is preventing.
+from rewind_agent.intercept import _flow, _savings  # noqa: E402
+from rewind_agent.intercept.httpx_transport import (  # noqa: E402
     is_patched,
     patch_httpx_clients,
     unpatch_httpx_clients,

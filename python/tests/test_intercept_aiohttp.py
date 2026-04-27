@@ -19,10 +19,15 @@ import unittest
 from typing import Any
 from unittest.mock import patch
 
-import aiohttp
+import pytest
 
-from rewind_agent.intercept import _flow, _savings
-from rewind_agent.intercept.aiohttp_middleware import (
+# Skip module when aiohttp isn't installed. See test_intercept_httpx.py
+# for the rationale.
+aiohttp = pytest.importorskip("aiohttp")
+
+# Imports after importorskip — see test_intercept_httpx.py for rationale.
+from rewind_agent.intercept import _flow, _savings  # noqa: E402
+from rewind_agent.intercept.aiohttp_middleware import (  # noqa: E402
     _SyntheticClientResponse,
     is_patched,
     patch_aiohttp_sessions,
