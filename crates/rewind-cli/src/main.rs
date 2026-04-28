@@ -246,6 +246,12 @@ enum Commands {
         action: HooksAction,
     },
 
+    /// Manage replay-job runners (Phase 3 commit 10/13)
+    Runners {
+        #[command(subcommand)]
+        action: RunnersAction,
+    },
+
     /// Export recorded sessions to external systems
     #[command(name = "export")]
     Export {
@@ -669,6 +675,53 @@ enum HooksAction {
     },
 }
 
+#[derive(Subcommand)]
+enum RunnersAction {
+    /// List registered runners
+    List {
+        /// Rewind server URL
+        #[arg(long, env = "REWIND_URL", default_value = "http://127.0.0.1:4800")]
+        rewind_url: String,
+        /// Bearer auth token (defaults to REWIND_AUTH_TOKEN)
+        #[arg(long, env = "REWIND_AUTH_TOKEN")]
+        token: Option<String>,
+    },
+
+    /// Register a new runner. Returns the raw auth token ONCE.
+    Add {
+        /// Friendly name (1-100 chars)
+        #[arg(short, long)]
+        name: String,
+        /// Webhook URL the dispatcher will POST to (must be public-routable)
+        #[arg(short, long)]
+        webhook_url: String,
+        #[arg(long, env = "REWIND_URL", default_value = "http://127.0.0.1:4800")]
+        rewind_url: String,
+        #[arg(long, env = "REWIND_AUTH_TOKEN")]
+        token: Option<String>,
+    },
+
+    /// Remove a runner by id. Refuses if non-terminal jobs exist.
+    Remove {
+        /// Runner id (uuid)
+        id: String,
+        #[arg(long, env = "REWIND_URL", default_value = "http://127.0.0.1:4800")]
+        rewind_url: String,
+        #[arg(long, env = "REWIND_AUTH_TOKEN")]
+        token: Option<String>,
+    },
+
+    /// Rotate the auth token for a runner. Refuses if non-terminal jobs exist.
+    RegenerateToken {
+        /// Runner id (uuid)
+        id: String,
+        #[arg(long, env = "REWIND_URL", default_value = "http://127.0.0.1:4800")]
+        rewind_url: String,
+        #[arg(long, env = "REWIND_AUTH_TOKEN")]
+        token: Option<String>,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -732,6 +785,18 @@ async fn main() -> Result<()> {
             HooksAction::Install { port } => cmd_hooks_install(port).await,
             HooksAction::Uninstall => cmd_hooks_uninstall(),
             HooksAction::Status { port } => cmd_hooks_status(port).await,
+        },
+        Commands::Runners { action } => match action {
+            RunnersAction::List { rewind_url, token } => cmd_runners_list(rewind_url, token).await,
+            RunnersAction::Add { name, webhook_url, rewind_url, token } => {
+                cmd_runners_add(name, webhook_url, rewind_url, token).await
+            }
+            RunnersAction::Remove { id, rewind_url, token } => {
+                cmd_runners_remove(id, rewind_url, token).await
+            }
+            RunnersAction::RegenerateToken { id, rewind_url, token } => {
+                cmd_runners_regenerate_token(id, rewind_url, token).await
+            }
         },
         Commands::Export { action } => match action {
             ExportAction::Otel(args) => cmd_export_otel(args).await,
@@ -3170,6 +3235,185 @@ async fn cmd_hooks_status(port: u16) -> Result<()> {
         println!();
     }
 
+    Ok(())
+}
+
+// ── Runners CLI (Phase 3 commit 10/13) ────────────────────────
+
+fn runner_client_with_token(token: Option<String>) -> Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(15));
+    if let Some(t) = token {
+        let mut headers = reqwest::header::HeaderMap::new();
+        let val = format!("Bearer {t}").parse().context("invalid bearer token")?;
+        headers.insert(reqwest::header::AUTHORIZATION, val);
+        builder = builder.default_headers(headers);
+    }
+    builder.build().context("failed to build HTTP client")
+}
+
+async fn cmd_runners_list(rewind_url: String, token: Option<String>) -> Result<()> {
+    let client = runner_client_with_token(token)?;
+    let url = format!("{}/api/runners", rewind_url.trim_end_matches('/'));
+    let resp = client.get(&url).send().await.context("GET /api/runners")?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        bail!("server returned {status}: {body}");
+    }
+    let runners: Vec<serde_json::Value> = resp.json().await.context("parse JSON")?;
+    if runners.is_empty() {
+        println!("{}", "No runners registered.".dimmed());
+        println!();
+        println!(
+            "  Register one with: {}",
+            "rewind runners add --name <n> --webhook-url <url>".green()
+        );
+        return Ok(());
+    }
+    println!(
+        "{}  {} {}",
+        "⏪ Rewind".cyan().bold(),
+        "Runners:".dimmed(),
+        format!("{} registered", runners.len()).yellow().bold()
+    );
+    println!();
+    for r in &runners {
+        let id = r["id"].as_str().unwrap_or("?");
+        let name = r["name"].as_str().unwrap_or("?");
+        let mode = r["mode"].as_str().unwrap_or("?");
+        let status = r["status"].as_str().unwrap_or("?");
+        let preview = r["auth_token_preview"].as_str().unwrap_or("?");
+        let webhook = r["webhook_url"].as_str().unwrap_or("(none)");
+        let last_seen = r["last_seen_at"].as_str().unwrap_or("never");
+        println!(
+            "  {}  {}",
+            name.green().bold(),
+            format!("({})", short_id_safe(id)).dimmed()
+        );
+        println!(
+            "    {}: {}    {}: {}",
+            "mode".dimmed(),
+            mode.cyan(),
+            "status".dimmed(),
+            colorize_status(status)
+        );
+        println!("    {}: {}", "webhook".dimmed(), webhook);
+        println!(
+            "    {}: {}    {}: {}",
+            "token".dimmed(),
+            preview,
+            "last seen".dimmed(),
+            last_seen
+        );
+        println!();
+    }
+    Ok(())
+}
+
+fn short_id_safe(s: &str) -> String {
+    s.chars().take(8).collect()
+}
+
+fn colorize_status(s: &str) -> colored::ColoredString {
+    match s {
+        "active" => s.green(),
+        "disabled" => s.red(),
+        "stale" => s.yellow(),
+        _ => s.normal(),
+    }
+}
+
+async fn cmd_runners_add(
+    name: String,
+    webhook_url: String,
+    rewind_url: String,
+    token: Option<String>,
+) -> Result<()> {
+    let client = runner_client_with_token(token)?;
+    let url = format!("{}/api/runners", rewind_url.trim_end_matches('/'));
+    let body = serde_json::json!({
+        "name": name,
+        "mode": "webhook",
+        "webhook_url": webhook_url,
+    });
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .context("POST /api/runners")?;
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({}));
+    if !status.is_success() {
+        let err = body["error"].as_str().unwrap_or("unknown error");
+        bail!("server returned {status}: {err}");
+    }
+    let id = body["runner"]["id"].as_str().unwrap_or("?");
+    let raw = body["raw_token"].as_str().unwrap_or("?");
+    println!("{}  {}", "✓".green().bold(), "Runner registered.".green());
+    println!();
+    println!("  {}: {}", "id".dimmed(), id.cyan());
+    println!("  {}: {}", "name".dimmed(), name.green());
+    println!("  {}: {}", "webhook".dimmed(), webhook_url);
+    println!();
+    println!("  {} {}", "RAW AUTH TOKEN:".yellow().bold(), raw.bold());
+    println!("  {}", "Save this token now. It cannot be retrieved after this response.".yellow());
+    println!();
+    println!(
+        "  Use it in your runner with: {}",
+        format!("export REWIND_RUNNER_TOKEN='{raw}'").green()
+    );
+    Ok(())
+}
+
+async fn cmd_runners_remove(
+    id: String,
+    rewind_url: String,
+    token: Option<String>,
+) -> Result<()> {
+    let client = runner_client_with_token(token)?;
+    let url = format!("{}/api/runners/{id}", rewind_url.trim_end_matches('/'));
+    let resp = client.delete(&url).send().await.context("DELETE /api/runners/{id}")?;
+    let status = resp.status();
+    if status == reqwest::StatusCode::NO_CONTENT {
+        println!("{}  Runner {} removed.", "✓".green().bold(), id.cyan());
+        return Ok(());
+    }
+    let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({}));
+    let err = body["error"].as_str().unwrap_or("unknown error");
+    if status == reqwest::StatusCode::CONFLICT {
+        bail!("removal blocked: {err}");
+    }
+    bail!("server returned {status}: {err}");
+}
+
+async fn cmd_runners_regenerate_token(
+    id: String,
+    rewind_url: String,
+    token: Option<String>,
+) -> Result<()> {
+    let client = runner_client_with_token(token)?;
+    let url = format!(
+        "{}/api/runners/{id}/regenerate-token",
+        rewind_url.trim_end_matches('/')
+    );
+    let resp = client
+        .post(&url)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .context("POST /api/runners/{id}/regenerate-token")?;
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({}));
+    if !status.is_success() {
+        let err = body["error"].as_str().unwrap_or("unknown error");
+        bail!("server returned {status}: {err}");
+    }
+    let raw = body["raw_token"].as_str().unwrap_or("?");
+    println!("{}  Token rotated.", "✓".green().bold());
+    println!();
+    println!("  {} {}", "NEW AUTH TOKEN:".yellow().bold(), raw.bold());
+    println!("  {}", "Save this token now. The old token has been invalidated.".yellow());
     Ok(())
 }
 
