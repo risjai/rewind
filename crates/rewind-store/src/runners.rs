@@ -681,6 +681,39 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Mark a `dispatched` job as `errored` from the dispatch path
+    /// (review #154 round 2 follow-up).
+    ///
+    /// Stricter than `advance_replay_job_state` because it ONLY
+    /// matches rows currently in `dispatched`. Used by the
+    /// dispatcher's apply_outcome failure branch so a fast runner
+    /// that already emitted `started` (transitioning the row to
+    /// `in_progress`) isn't overwritten by a later HTTP-error
+    /// transition. The general advance helper's
+    /// `WHERE state NOT IN ('completed', 'errored')` guard would
+    /// otherwise match the in_progress row and corrupt the state.
+    ///
+    /// Returns `true` if the row was updated, `false` if no row
+    /// matched (job missing OR already in `in_progress`/terminal).
+    pub fn mark_dispatched_job_as_errored(
+        &self,
+        id: &str,
+        error_message: &str,
+        error_stage: &str,
+    ) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let n = self.conn.execute(
+            "UPDATE replay_jobs
+             SET state = 'errored',
+                 error_message = ?1,
+                 error_stage = ?2,
+                 completed_at = ?3
+             WHERE id = ?4 AND state = 'dispatched'",
+            params![error_message, error_stage, now, id],
+        )?;
+        Ok(n > 0)
+    }
+
     /// Atomically record an event AND apply the state/progress/lease
     /// update it implies. Single transaction; full state-machine
     /// guarded in SQL.

@@ -361,6 +361,71 @@ async fn create_replay_job_response_state_is_dispatched_not_pending() {
     );
 }
 
+/// Defensive regression for the round-2 follow-up: the failure-path
+/// `dispatched → errored` transition must NOT clobber an
+/// `in_progress` job whose runner already raced through `started`
+/// before the dispatcher's HTTP call returned. Uses the strict
+/// `mark_dispatched_job_as_errored` helper so the UPDATE is a no-op
+/// on non-`dispatched` rows.
+#[tokio::test]
+async fn failed_dispatch_does_not_clobber_already_in_progress_job() {
+    use rewind_store::ReplayJob;
+    let (_api, _callbacks, store, _tmp) = setup();
+    let (webhook_url, _rx) = spawn_runner_stub_accepting().await;
+    let (runner_id, _raw) = register_runner(&store, &webhook_url);
+    let (session_id, _, ctx_id) = seed_session_and_context(&store);
+
+    // Manually insert an in_progress job (simulates: pre-spawn
+    // advanced to dispatched, runner immediately emitted started,
+    // SQL guard accepted the started → in_progress transition,
+    // then the dispatch HTTP call failed and apply_outcome ran).
+    let job_id = {
+        let s = store.lock().unwrap();
+        let job = ReplayJob {
+            id: Uuid::new_v4().to_string(),
+            runner_id: Some(runner_id.clone()),
+            session_id: session_id.clone(),
+            replay_context_id: Some(ctx_id.clone()),
+            state: ReplayJobState::InProgress, // ← already started!
+            error_message: None,
+            error_stage: None,
+            created_at: Utc::now(),
+            dispatched_at: Some(Utc::now()),
+            started_at: Some(Utc::now()),
+            completed_at: None,
+            dispatch_deadline_at: Some(Utc::now() + chrono::Duration::seconds(60)),
+            lease_expires_at: Some(Utc::now() + chrono::Duration::seconds(300)),
+            progress_step: 1,
+            progress_total: Some(5),
+        };
+        let id = job.id.clone();
+        s.create_replay_job(&job).unwrap();
+        id
+    };
+
+    // Simulate the failure-path apply_outcome firing.
+    let updated = {
+        let s = store.lock().unwrap();
+        s.mark_dispatched_job_as_errored(
+            &job_id,
+            "fake dispatch HTTP error after runner started",
+            "dispatch",
+        )
+        .unwrap()
+    };
+    assert!(
+        !updated,
+        "mark_dispatched_job_as_errored must be a no-op on in_progress rows"
+    );
+
+    // Confirm the job is still in_progress with started_at intact.
+    let s = store.lock().unwrap();
+    let after = s.get_replay_job(&job_id).unwrap().unwrap();
+    assert_eq!(after.state, ReplayJobState::InProgress);
+    assert!(after.started_at.is_some());
+    assert!(after.error_message.is_none());
+}
+
 /// Pre-fix race scenario simulation: a runner that posts `started`
 /// the moment it receives the dispatch must NOT be rejected by the
 /// state machine. The pre-spawn transition guarantees the job is

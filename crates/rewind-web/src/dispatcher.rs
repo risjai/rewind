@@ -61,7 +61,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use hmac::{Hmac, Mac};
-use rewind_store::{ReplayJob, ReplayJobState, Runner, Store};
+use rewind_store::{ReplayJob, Runner, Store};
 use sha2::Sha256;
 
 use crate::crypto::CryptoBox;
@@ -336,19 +336,17 @@ impl Dispatcher {
             }
             DispatchOutcome::Errored(msg) => {
                 // Dispatched → Errored (legal per the state machine).
-                // If a `started` event slipped in between the pre-
-                // spawn transition and this branch, the job is
-                // already in_progress — the SQL guard refuses the
-                // errored transition (returns false), and the run
-                // proceeds. That's correct: the runner DID start, so
-                // the dispatch was effectively successful even
-                // though we observed an HTTP error.
-                store.advance_replay_job_state(
-                    job_id,
-                    ReplayJobState::Errored,
-                    Some(msg),
-                    Some("dispatch"),
-                )?;
+                // Use the strict `mark_dispatched_job_as_errored`
+                // helper rather than `advance_replay_job_state`
+                // because the latter matches `in_progress` rows
+                // too — we'd corrupt state if a fast runner emitted
+                // `started` between the pre-spawn transition and
+                // this branch (the run is genuinely in progress
+                // even though we observed an HTTP error). The
+                // strict helper's `WHERE state = 'dispatched'`
+                // makes the failure-path UPDATE a no-op when the
+                // runner has already started.
+                store.mark_dispatched_job_as_errored(job_id, msg, "dispatch")?;
                 Ok(())
             }
         }
