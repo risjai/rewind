@@ -58,7 +58,7 @@
 
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use chrono::Utc;
 use hmac::{Hmac, Mac};
 use rewind_store::{ReplayJob, ReplayJobState, Runner, Store};
@@ -129,25 +129,29 @@ impl Dispatcher {
         })
     }
 
-    /// Dispatch a single job. On success, transitions the job to
-    /// `dispatched`; on any error, transitions to `errored` with
-    /// stage `"dispatch"`.
-    ///
-    /// Returns `Ok(())` whenever the state transition lands cleanly,
-    /// regardless of whether the dispatch *succeeded*. The error
-    /// path is a state transition (not a Rust `Err`), so the caller
-    /// (typically a tokio::spawn from the HTTP create-job handler)
-    /// can fire-and-forget without unwrapping. Real `Err` only on
-    /// store/lock failures that prevent recording the outcome.
-    pub async fn dispatch(&self, runner: &Runner, job: &ReplayJob, store: &Store) -> Result<()> {
-        let webhook_url = runner
-            .webhook_url
-            .as_deref()
-            .ok_or_else(|| anyhow!("runner {} has no webhook_url (polling not implemented)", runner.id))?;
-        let replay_context_id = job
-            .replay_context_id
-            .as_deref()
-            .ok_or_else(|| anyhow!("job {} has null replay_context_id (cannot dispatch)", job.id))?;
+    /// Outcome of a dispatch attempt. The dispatcher is now pure
+    /// (no store handle) so the async HTTP work doesn't have to hold
+    /// a `MutexGuard<Store>` across an `.await`. Caller applies the
+    /// outcome via [`Self::apply_outcome`].
+    pub async fn dispatch(&self, runner: &Runner, job: &ReplayJob) -> DispatchOutcome {
+        let webhook_url = match runner.webhook_url.as_deref() {
+            Some(u) => u,
+            None => {
+                return DispatchOutcome::Errored(format!(
+                    "runner {} has no webhook_url (polling not implemented)",
+                    runner.id
+                ));
+            }
+        };
+        let replay_context_id = match job.replay_context_id.as_deref() {
+            Some(c) => c,
+            None => {
+                return DispatchOutcome::Errored(format!(
+                    "job {} has null replay_context_id (cannot dispatch)",
+                    job.id
+                ));
+            }
+        };
 
         // 1. Decrypt the runner's auth token (lives only inside
         //    SensitiveString; dropped at end of scope).
@@ -161,13 +165,9 @@ impl Dispatcher {
                     "dispatcher: token decrypt failed for runner {}: {e}",
                     runner.id
                 );
-                store.advance_replay_job_state(
-                    &job.id,
-                    ReplayJobState::Errored,
-                    Some("token decrypt failed (server misconfig)"),
-                    Some("dispatch"),
-                )?;
-                return Ok(());
+                return DispatchOutcome::Errored(
+                    "token decrypt failed (server misconfig)".to_string(),
+                );
             }
         };
 
@@ -178,13 +178,21 @@ impl Dispatcher {
             replay_context_id,
             base_url: &self.base_url,
         };
-        let body_bytes = serde_json::to_vec(&body)?;
+        let body_bytes = match serde_json::to_vec(&body) {
+            Ok(b) => b,
+            Err(e) => {
+                return DispatchOutcome::Errored(format!("body serialization: {e}"));
+            }
+        };
         let signature = compute_signature(raw_token.expose().as_bytes(), &job.id, &body_bytes);
 
         // 3. POST. Single attempt with timeout — runners must reply
         //    within 5s. The reaper handles dispatch_deadline_at if
         //    the runner accepts the request but never emits Started.
-        tracing::info!("dispatching job {} to runner {} ({})", job.id, runner.id, webhook_url);
+        tracing::info!(
+            "dispatching job {} to runner {} ({})",
+            job.id, runner.id, webhook_url
+        );
         let resp = match self
             .client
             .post(webhook_url)
@@ -197,17 +205,8 @@ impl Dispatcher {
         {
             Ok(r) => r,
             Err(e) => {
-                tracing::warn!(
-                    "dispatcher: HTTP error dispatching job {}: {e}",
-                    job.id
-                );
-                store.advance_replay_job_state(
-                    &job.id,
-                    ReplayJobState::Errored,
-                    Some(&format!("dispatch HTTP error: {e}")),
-                    Some("dispatch"),
-                )?;
-                return Ok(());
+                tracing::warn!("dispatcher: HTTP error dispatching job {}: {e}", job.id);
+                return DispatchOutcome::Errored(format!("dispatch HTTP error: {e}"));
             }
         };
 
@@ -221,37 +220,71 @@ impl Dispatcher {
                 job.id,
                 text.chars().take(200).collect::<String>()
             );
-            store.advance_replay_job_state(
-                &job.id,
-                ReplayJobState::Errored,
-                Some(&format!("runner returned HTTP {status}")),
-                Some("dispatch"),
-            )?;
-            return Ok(());
+            return DispatchOutcome::Errored(format!("runner returned HTTP {status}"));
         }
 
-        // 4. Success: pending → dispatched. Schedule deadline + lease.
+        // 4. Success: caller handles state transition + deadline/lease.
         let now = Utc::now();
-        let dispatched_ok = store.advance_replay_job_state(
-            &job.id,
-            ReplayJobState::Dispatched,
-            None,
-            None,
-        )?;
-        if dispatched_ok {
-            // Set dispatch_deadline_at + lease_expires_at via direct
-            // store helper (extend_replay_job_lease + a deadline-set
-            // helper). For simplicity in this commit, we set both via
-            // the dispatcher's lease helper which extends from the
-            // current dispatched_at timestamp.
-            let dispatch_deadline = now + chrono::Duration::seconds(DISPATCH_DEADLINE_SECS);
-            let lease = now + chrono::Duration::seconds(INITIAL_LEASE_SECS);
-            // set_dispatch_deadline_and_lease is added in the Store helper.
-            store.set_dispatch_deadline_and_lease(&job.id, dispatch_deadline, lease)?;
-            store.touch_runner_last_seen(&runner.id)?;
+        DispatchOutcome::Dispatched {
+            dispatch_deadline_at: now + chrono::Duration::seconds(DISPATCH_DEADLINE_SECS),
+            lease_expires_at: now + chrono::Duration::seconds(INITIAL_LEASE_SECS),
+            runner_id: runner.id.clone(),
         }
-        Ok(())
     }
+
+    /// Apply a [`DispatchOutcome`] to a job: writes the state
+    /// transition + deadline/lease (success) OR errored row (failure).
+    /// Synchronous — caller holds the Store lock while invoking.
+    pub fn apply_outcome(
+        outcome: &DispatchOutcome,
+        job_id: &str,
+        store: &Store,
+    ) -> Result<()> {
+        match outcome {
+            DispatchOutcome::Dispatched {
+                dispatch_deadline_at,
+                lease_expires_at,
+                runner_id,
+            } => {
+                let advanced = store.advance_replay_job_state(
+                    job_id,
+                    ReplayJobState::Dispatched,
+                    None,
+                    None,
+                )?;
+                if advanced {
+                    store.set_dispatch_deadline_and_lease(
+                        job_id,
+                        *dispatch_deadline_at,
+                        *lease_expires_at,
+                    )?;
+                    let _ = store.touch_runner_last_seen(runner_id);
+                }
+                Ok(())
+            }
+            DispatchOutcome::Errored(msg) => {
+                store.advance_replay_job_state(
+                    job_id,
+                    ReplayJobState::Errored,
+                    Some(msg),
+                    Some("dispatch"),
+                )?;
+                Ok(())
+            }
+        }
+    }
+}
+
+/// What `dispatch()` decided. Caller applies it via
+/// [`Dispatcher::apply_outcome`].
+#[derive(Debug, Clone)]
+pub enum DispatchOutcome {
+    Dispatched {
+        dispatch_deadline_at: chrono::DateTime<Utc>,
+        lease_expires_at: chrono::DateTime<Utc>,
+        runner_id: String,
+    },
+    Errored(String),
 }
 
 // ──────────────────────────────────────────────────────────────────

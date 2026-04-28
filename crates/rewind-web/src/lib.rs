@@ -445,8 +445,15 @@ impl WebServer {
                 auth::auth_middleware,
             ));
 
+        // Phase 3 commit 6: runner-callback route mounts OUTSIDE the
+        // bearer middleware. Runners authenticate via X-Rewind-Runner-Auth
+        // header inside the handler instead.
+        let runner_callbacks = runners::runner_callback_routes()
+            .with_state(self.state.clone());
+
         let app = Router::new()
             .route("/_rewind/health", axum::routing::get(rewind_health))
+            .merge(runner_callbacks)
             .merge(protected);
 
         if self.dev_mode {

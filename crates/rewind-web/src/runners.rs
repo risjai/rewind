@@ -37,20 +37,26 @@
 
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::Json,
     routing::{get, post},
     Router,
 };
-use rewind_store::{Runner, RunnerMode, RunnerStatus};
+use chrono::Utc;
+use rewind_replay::ReplayEngine;
+use rewind_store::{
+    ReplayJob, ReplayJobEvent, ReplayJobEventType, ReplayJobState, Runner, RunnerMode,
+    RunnerStatus,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::crypto::{self, CryptoBox};
-use crate::AppState;
+use crate::{AppState, StoreEvent};
 
-/// Build the runners sub-router. Caller should `.nest("/api", ...)`
-/// it alongside the existing `api::routes`.
+/// Build the runners + replay-job-create sub-router (bearer-protected).
+/// Caller should `.nest("/api", ...)` it alongside the existing
+/// `api::routes`.
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/runners", get(list_runners).post(register_runner))
@@ -62,6 +68,29 @@ pub fn routes() -> Router<AppState> {
             "/runners/{id}/regenerate-token",
             post(regenerate_token),
         )
+        // Phase 3 commit 6: dashboard initiates a replay job for a
+        // session. Bearer-protected (dashboard action).
+        .route(
+            "/sessions/{sid}/replay-jobs",
+            post(create_replay_job).get(list_replay_jobs_for_session),
+        )
+        .route(
+            "/replay-jobs/{id}",
+            get(get_replay_job).delete(cancel_replay_job_handler),
+        )
+}
+
+/// Runner-callback routes mount OUTSIDE the bearer-auth middleware
+/// because runners authenticate with `X-Rewind-Runner-Auth` and may
+/// not even know the operator's bearer token. The handler enforces
+/// its own auth + ownership check.
+///
+/// Mounted at the top-level router in [`crate::WebServer::build_router`].
+pub fn runner_callback_routes() -> Router<AppState> {
+    Router::new().route(
+        "/api/replay-jobs/{id}/events",
+        post(post_replay_job_event),
+    )
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -438,4 +467,502 @@ async fn regenerate_token(
         raw_token: raw_token.expose().to_string(),
         raw_token_warning: "Save this token now. It cannot be retrieved after this response.",
     }))
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Phase 3 commit 6: Replay job dispatch + event ingestion
+// ──────────────────────────────────────────────────────────────────
+
+/// Dispatch endpoint shape A: server creates fork + replay context
+/// + replay job atomically.
+///
+/// Used by the dashboard "Run replay" button when the operator
+/// clicks on a session step.
+#[derive(Debug, Deserialize)]
+pub struct CreateReplayJobShapeA {
+    pub runner_id: String,
+    pub source_timeline_id: String,
+    pub at_step: u32,
+    #[serde(default)]
+    pub strict_match: bool,
+}
+
+/// Dispatch endpoint shape B: caller already has a replay context
+/// (e.g. CLI or programmatic clients). Server validates ownership
+/// and that the cursor isn't already in use.
+#[derive(Debug, Deserialize)]
+pub struct CreateReplayJobShapeB {
+    pub runner_id: String,
+    pub replay_context_id: String,
+}
+
+/// Dual-shape request body. `serde(untagged)` picks based on which
+/// fields are present.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum CreateReplayJobRequest {
+    CreateAndDispatch(CreateReplayJobShapeA),
+    ReuseContext(CreateReplayJobShapeB),
+}
+
+#[derive(Debug, Serialize)]
+pub struct CreateReplayJobResponse {
+    pub job_id: String,
+    pub replay_context_id: String,
+    /// Present when the server created a fresh fork timeline (shape A).
+    /// Null when the caller supplied an existing replay_context (shape B).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fork_timeline_id: Option<String>,
+    pub state: String,
+    /// Echoed back so the dashboard knows when the runner must reply.
+    pub dispatch_deadline_at: Option<String>,
+}
+
+/// `POST /api/sessions/{sid}/replay-jobs`
+async fn create_replay_job(
+    State(state): State<AppState>,
+    Path(sid): Path<String>,
+    Json(req): Json<CreateReplayJobRequest>,
+) -> Result<(StatusCode, Json<CreateReplayJobResponse>), (StatusCode, Json<ErrorBody>)> {
+    let dispatcher = state
+        .dispatcher
+        .clone()
+        .ok_or_else(|| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorBody {
+                    error: format!(
+                        "{} env var is not set; replay-job dispatch unavailable.",
+                        crypto::KEY_ENV_VAR
+                    ),
+                }),
+            )
+        })?;
+
+    // 1. Resolve session, runner, and replay-context (creating fork+
+    //    context if shape A). All store work in a single lock scope
+    //    so we don't race with deletions between checks.
+    let (job, runner, fork_timeline_id) = {
+        let store = state
+            .store
+            .lock()
+            .map_err(|e| internal(format!("store lock: {e}")))?;
+        let session = store
+            .get_session(&sid)
+            .map_err(internal)?
+            .ok_or_else(|| not_found("session"))?;
+
+        let (runner_id, replay_context_id, fork_timeline_id) = match req {
+            CreateReplayJobRequest::CreateAndDispatch(a) => {
+                // Validate runner.
+                let runner = store
+                    .get_runner(&a.runner_id)
+                    .map_err(internal)?
+                    .ok_or_else(|| not_found("runner"))?;
+                if !matches!(runner.status, RunnerStatus::Active) {
+                    return Err(conflict(format!(
+                        "runner {} is in status {:?}; cannot dispatch",
+                        runner.id, runner.status
+                    )));
+                }
+                // Validate timeline + at_step + create fork.
+                let timelines = store.get_timelines(&session.id).map_err(internal)?;
+                if !timelines.iter().any(|t| t.id == a.source_timeline_id) {
+                    return Err(bad_request(format!(
+                        "source_timeline_id {} not found in session {}",
+                        a.source_timeline_id, session.id
+                    )));
+                }
+                let engine = ReplayEngine::new(&store);
+                let fork = engine
+                    .fork(
+                        &session.id,
+                        &a.source_timeline_id,
+                        a.at_step,
+                        &format!("replay-{}", &Uuid::new_v4().to_string()[..8]),
+                    )
+                    .map_err(|e| bad_request(format!("fork failed: {e}")))?;
+                let ctx_id = Uuid::new_v4().to_string();
+                store
+                    .create_replay_context(&ctx_id, &session.id, &fork.id, a.at_step)
+                    .map_err(internal)?;
+                (a.runner_id, ctx_id, Some(fork.id))
+            }
+            CreateReplayJobRequest::ReuseContext(b) => {
+                let runner = store
+                    .get_runner(&b.runner_id)
+                    .map_err(internal)?
+                    .ok_or_else(|| not_found("runner"))?;
+                if !matches!(runner.status, RunnerStatus::Active) {
+                    return Err(conflict(format!(
+                        "runner {} is in status {:?}; cannot dispatch",
+                        runner.id, runner.status
+                    )));
+                }
+                // Validate context belongs to this session and isn't
+                // already being consumed by another in-flight job.
+                let ctx = store
+                    .get_replay_context(&b.replay_context_id)
+                    .map_err(internal)?
+                    .ok_or_else(|| not_found("replay_context"))?;
+                if ctx.session_id != session.id {
+                    return Err(bad_request(format!(
+                        "replay_context {} belongs to session {}, not {}",
+                        b.replay_context_id, ctx.session_id, session.id
+                    )));
+                }
+                let in_flight = store
+                    .count_in_flight_jobs_for_replay_context(&b.replay_context_id)
+                    .map_err(internal)?;
+                if in_flight > 0 {
+                    return Err(conflict(format!(
+                        "replay_context {} already has {in_flight} in-flight job(s); \
+                         finish or cancel them before dispatching a new one",
+                        b.replay_context_id
+                    )));
+                }
+                (b.runner_id, b.replay_context_id, None)
+            }
+        };
+
+        // 2. Insert the job (state=pending; FK-validated by commit 3).
+        let runner = store
+            .get_runner(&runner_id)
+            .map_err(internal)?
+            .ok_or_else(|| not_found("runner"))?;
+        let job = ReplayJob {
+            id: Uuid::new_v4().to_string(),
+            runner_id: Some(runner_id.clone()),
+            session_id: session.id.clone(),
+            replay_context_id: Some(replay_context_id),
+            state: ReplayJobState::Pending,
+            error_message: None,
+            error_stage: None,
+            created_at: Utc::now(),
+            dispatched_at: None,
+            started_at: None,
+            completed_at: None,
+            dispatch_deadline_at: None,
+            lease_expires_at: None,
+            progress_step: 0,
+            progress_total: None,
+        };
+        store.create_replay_job(&job).map_err(internal)?;
+        (job, runner, fork_timeline_id)
+    };
+
+    // 3. Fire the dispatcher in the background. The handler returns
+    //    immediately with the job id; progress flows over the
+    //    WebSocket as state changes.
+    // Fire dispatcher in the background. The dispatcher is pure
+    // (returns a DispatchOutcome) so the async HTTP doesn't hold
+    // a MutexGuard across await — we apply the outcome inside a
+    // briefly-held lock after the network call settles.
+    let job_clone = job.clone();
+    let runner_clone = runner.clone();
+    let store_arc = state.store.clone();
+    let event_tx = state.event_tx.clone();
+    tokio::spawn(async move {
+        let outcome = dispatcher.dispatch(&runner_clone, &job_clone).await;
+        let after = {
+            let store = match store_arc.lock() {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("dispatch spawn: store lock poisoned: {e}");
+                    return;
+                }
+            };
+            if let Err(e) = crate::dispatcher::Dispatcher::apply_outcome(
+                &outcome,
+                &job_clone.id,
+                &store,
+            ) {
+                tracing::error!("dispatch spawn: apply_outcome failed: {e}");
+                return;
+            }
+            store.get_replay_job(&job_clone.id).ok().flatten()
+        };
+        if let Some(after) = after {
+            let _ = event_tx.send(StoreEvent::ReplayJobUpdated {
+                job_id: after.id.clone(),
+                session_id: after.session_id.clone(),
+                state: after.state.as_str().to_string(),
+                progress_step: Some(after.progress_step),
+                progress_total: after.progress_total,
+                error_message: after.error_message.clone(),
+                error_stage: after.error_stage.clone(),
+            });
+        }
+    });
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(CreateReplayJobResponse {
+            job_id: job.id.clone(),
+            replay_context_id: job.replay_context_id.clone().unwrap_or_default(),
+            fork_timeline_id,
+            state: "pending".to_string(),
+            dispatch_deadline_at: job.dispatch_deadline_at.map(|t| t.to_rfc3339()),
+        }),
+    ))
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReplayJobView {
+    pub id: String,
+    pub runner_id: Option<String>,
+    pub session_id: String,
+    pub replay_context_id: Option<String>,
+    pub state: String,
+    pub error_message: Option<String>,
+    pub error_stage: Option<String>,
+    pub progress_step: u32,
+    pub progress_total: Option<u32>,
+    pub created_at: String,
+    pub dispatched_at: Option<String>,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+    pub dispatch_deadline_at: Option<String>,
+    pub lease_expires_at: Option<String>,
+}
+
+impl From<ReplayJob> for ReplayJobView {
+    fn from(j: ReplayJob) -> Self {
+        Self {
+            id: j.id,
+            runner_id: j.runner_id,
+            session_id: j.session_id,
+            replay_context_id: j.replay_context_id,
+            state: j.state.as_str().to_string(),
+            error_message: j.error_message,
+            error_stage: j.error_stage,
+            progress_step: j.progress_step,
+            progress_total: j.progress_total,
+            created_at: j.created_at.to_rfc3339(),
+            dispatched_at: j.dispatched_at.map(|t| t.to_rfc3339()),
+            started_at: j.started_at.map(|t| t.to_rfc3339()),
+            completed_at: j.completed_at.map(|t| t.to_rfc3339()),
+            dispatch_deadline_at: j.dispatch_deadline_at.map(|t| t.to_rfc3339()),
+            lease_expires_at: j.lease_expires_at.map(|t| t.to_rfc3339()),
+        }
+    }
+}
+
+/// `GET /api/sessions/{sid}/replay-jobs` — list jobs for a session.
+async fn list_replay_jobs_for_session(
+    State(state): State<AppState>,
+    Path(sid): Path<String>,
+) -> Result<Json<Vec<ReplayJobView>>, (StatusCode, Json<ErrorBody>)> {
+    let store = state
+        .store
+        .lock()
+        .map_err(|e| internal(format!("store lock: {e}")))?;
+    let _ = 100u32; // limit hint preserved for future pagination
+    let jobs = store
+        .list_replay_jobs_by_session(&sid)
+        .map_err(internal)?;
+    Ok(Json(jobs.into_iter().map(ReplayJobView::from).collect()))
+}
+
+/// `GET /api/replay-jobs/{id}` — fetch a single replay job.
+async fn get_replay_job(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<ReplayJobView>, (StatusCode, Json<ErrorBody>)> {
+    let store = state
+        .store
+        .lock()
+        .map_err(|e| internal(format!("store lock: {e}")))?;
+    let job = store
+        .get_replay_job(&id)
+        .map_err(internal)?
+        .ok_or_else(|| not_found("replay_job"))?;
+    Ok(Json(job.into()))
+}
+
+/// `DELETE /api/replay-jobs/{id}` — operator cancel (forces the job
+/// into `errored` with stage `"cancelled"`). v1 cancellation is
+/// fire-and-forget: the runner is not notified; if it later posts
+/// progress events they'll bounce off the terminal-state guard.
+async fn cancel_replay_job_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
+    let store = state
+        .store
+        .lock()
+        .map_err(|e| internal(format!("store lock: {e}")))?;
+    let advanced = store
+        .advance_replay_job_state(
+            &id,
+            ReplayJobState::Errored,
+            Some("cancelled by operator"),
+            Some("cancelled"),
+        )
+        .map_err(internal)?;
+    if !advanced {
+        return Err(not_found("replay_job (or already terminal)"));
+    }
+    if let Ok(Some(job)) = store.get_replay_job(&id) {
+        let _ = state.event_tx.send(StoreEvent::ReplayJobUpdated {
+            job_id: job.id,
+            session_id: job.session_id,
+            state: "errored".to_string(),
+            progress_step: Some(job.progress_step),
+            progress_total: job.progress_total,
+            error_message: Some("cancelled by operator".to_string()),
+            error_stage: Some("cancelled".to_string()),
+        });
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Runner-callback: POST /api/replay-jobs/{id}/events
+// (mounted OUTSIDE the bearer-auth middleware; uses
+// X-Rewind-Runner-Auth + ownership check.)
+// ──────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct PostReplayJobEventRequest {
+    pub event_type: ReplayJobEventType,
+    pub step_number: Option<u32>,
+    pub progress_total: Option<u32>,
+    pub payload: Option<serde_json::Value>,
+    pub error_message: Option<String>,
+    pub error_stage: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PostReplayJobEventResponse {
+    pub accepted: bool,
+    /// Present when the event was rejected (terminal state, illegal
+    /// transition, ownership mismatch). Helps runners tell "you got
+    /// here too late" from "you sent garbage".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub state: String,
+}
+
+const RUNNER_AUTH_HEADER: &str = "X-Rewind-Runner-Auth";
+
+async fn post_replay_job_event(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+    headers: HeaderMap,
+    Json(req): Json<PostReplayJobEventRequest>,
+) -> Result<(StatusCode, Json<PostReplayJobEventResponse>), (StatusCode, Json<ErrorBody>)> {
+    // 1. Extract runner-auth header.
+    let supplied_token = headers
+        .get(RUNNER_AUTH_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorBody {
+                    error: format!("missing {RUNNER_AUTH_HEADER} header"),
+                }),
+            )
+        })?;
+    let supplied_hash = crypto::hash_runner_token(supplied_token);
+
+    // 2. Look up runner by hash, verify ownership, and apply the event
+    //    atomically.
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|e| internal(format!("store lock: {e}")))?;
+
+    let runner = store
+        .get_runner_by_auth_hash(&supplied_hash)
+        .map_err(internal)?
+        .ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorBody {
+                    error: format!("invalid {RUNNER_AUTH_HEADER} token"),
+                }),
+            )
+        })?;
+
+    let job = store
+        .get_replay_job(&job_id)
+        .map_err(internal)?
+        .ok_or_else(|| not_found("replay_job"))?;
+
+    if job.runner_id.as_deref() != Some(runner.id.as_str()) {
+        // Runner can authenticate but doesn't own this job. Return
+        // 403 (not 404) so legitimate operators can debug runner
+        // misconfiguration.
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorBody {
+                error: "runner does not own this job".to_string(),
+            }),
+        ));
+    }
+
+    // Touch last_seen_at for runner liveness tracking.
+    let _ = store.touch_runner_last_seen(&runner.id);
+
+    // 3. Build event row + apply via atomic state-machine helper.
+    let event = ReplayJobEvent {
+        id: Uuid::new_v4().to_string(),
+        job_id: job.id.clone(),
+        event_type: req.event_type,
+        step_number: req.step_number,
+        payload: req
+            .payload
+            .as_ref()
+            .map(|v| serde_json::to_string(v).unwrap_or_default()),
+        created_at: Utc::now(),
+    };
+    let accepted = store
+        .record_replay_job_event_atomic(
+            &event,
+            req.progress_total,
+            req.error_message.as_deref(),
+            req.error_stage.as_deref(),
+            crate::dispatcher::INITIAL_LEASE_SECS,
+        )
+        .map_err(internal)?;
+
+    // 4. Re-read state for response + WebSocket broadcast.
+    let after = store
+        .get_replay_job(&job.id)
+        .map_err(internal)?
+        .unwrap_or(job);
+
+    let state_str = after.state.as_str().to_string();
+    let reason = if accepted {
+        None
+    } else {
+        Some("event rejected by state machine (terminal or illegal transition)".to_string())
+    };
+
+    if accepted {
+        let _ = state.event_tx.send(StoreEvent::ReplayJobUpdated {
+            job_id: after.id.clone(),
+            session_id: after.session_id.clone(),
+            state: state_str.clone(),
+            progress_step: Some(after.progress_step),
+            progress_total: after.progress_total,
+            error_message: after.error_message.clone(),
+            error_stage: after.error_stage.clone(),
+        });
+    }
+
+    let status = if accepted {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::CONFLICT
+    };
+    Ok((
+        status,
+        Json(PostReplayJobEventResponse {
+            accepted,
+            reason,
+            state: state_str,
+        }),
+    ))
 }

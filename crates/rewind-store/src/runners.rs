@@ -400,6 +400,21 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// Count non-terminal jobs that reference this replay context.
+    /// **Phase 3 commit 6** uses this to enforce one-job-per-context
+    /// for shape-B job creation: the cursor would otherwise be a
+    /// hot-spot if two runners advanced it concurrently.
+    pub fn count_in_flight_jobs_for_replay_context(&self, replay_context_id: &str) -> Result<u32> {
+        let n: u32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM replay_jobs
+             WHERE replay_context_id = ?1
+               AND state NOT IN ('completed', 'errored')",
+            params![replay_context_id],
+            |row| row.get(0),
+        )?;
+        Ok(n)
+    }
+
     /// Count non-terminal jobs (`pending`, `dispatched`, `in_progress`)
     /// owned by this runner.
     ///
