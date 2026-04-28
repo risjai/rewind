@@ -500,6 +500,48 @@ async fn shape_a_strict_match_true_sets_replay_context_strict_flag() {
 }
 
 #[tokio::test]
+async fn shape_a_replay_context_starts_cursor_at_recording_step_one() {
+    // Regression: the dispatcher used to seed the replay context with
+    // from_step = at_step. Combined with peek_next_replay_step
+    // returning current_step + 1, that meant the agent's first cache
+    // lookup targeted recorded step at_step + 1 — skipping the
+    // inherited prefix in the cache and forcing a live re-run that
+    // showed up as "diverges at step N" in the dashboard diff. Ray
+    // Serve runners restart the agent from scratch (they can't
+    // fast-forward the ReAct loop), so the replay context cursor
+    // must always begin at recorded step #1 regardless of the
+    // user-chosen fork point.
+    let (api, _callbacks, store, _tmp) = setup();
+    let (webhook_url, _rx) = spawn_runner_stub_accepting().await;
+    let (runner_id, _raw) = register_runner(&store, &webhook_url);
+    let (session_id, root_timeline_id) = seed_session_with_step(&store);
+
+    let (status, body) = json_post(
+        api.clone(),
+        &format!("/api/sessions/{session_id}/replay-jobs"),
+        json!({
+            "runner_id": runner_id,
+            "source_timeline_id": root_timeline_id,
+            "at_step": 1,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "body: {body:?}");
+
+    let ctx_id = body["replay_context_id"].as_str().unwrap();
+    let s = store.lock().unwrap();
+    let ctx = s.get_replay_context(ctx_id).unwrap().unwrap();
+    assert_eq!(
+        ctx.from_step, 0,
+        "from_step must always be 0 — the agent re-runs from scratch and the cache lookup must target recorded step #1 on the first call. at_step controls the FORK point only.",
+    );
+    assert_eq!(
+        ctx.current_step, 0,
+        "fresh context should not have advanced its cursor",
+    );
+}
+
+#[tokio::test]
 async fn shape_a_strict_match_omitted_defaults_to_warn_only() {
     let (api, _callbacks, store, _tmp) = setup();
     let (webhook_url, _rx) = spawn_runner_stub_accepting().await;
