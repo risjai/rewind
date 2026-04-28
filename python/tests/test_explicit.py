@@ -24,15 +24,29 @@ class MockRewindHandler(BaseHTTPRequestHandler):
     sessions = {}
     replay_cursor = 0
     recorded_steps = []
+    # Maps client_session_key -> (sid, tid). Mirrors the real server's
+    # idempotent /sessions/start so tests can assert that a repeat
+    # ensure_session for the same conversation_id reuses the session.
+    sessions_by_client_key: dict = {}
+    start_request_log: list = []
 
     def do_POST(self):
         content_length = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.rfile.read(content_length)) if content_length else {}
 
         if self.path == "/api/sessions/start":
+            MockRewindHandler.start_request_log.append(body)
+            client_key = body.get("client_session_key")
+            if client_key and client_key in MockRewindHandler.sessions_by_client_key:
+                sid, tid = MockRewindHandler.sessions_by_client_key[client_key]
+                # Real server returns 200 (not 201) on dedup hit.
+                self._respond(200, {"session_id": sid, "root_timeline_id": tid})
+                return
             sid = f"test-session-{len(self.sessions)}"
             tid = f"test-timeline-{len(self.sessions)}"
             MockRewindHandler.sessions[sid] = {"timeline_id": tid}
+            if client_key:
+                MockRewindHandler.sessions_by_client_key[client_key] = (sid, tid)
             self._respond(201, {"session_id": sid, "root_timeline_id": tid})
 
         elif self.path.endswith("/end"):
@@ -122,6 +136,8 @@ def _reset_mock():
     MockRewindHandler.sessions = {}
     MockRewindHandler.replay_cursor = 0
     MockRewindHandler.recorded_steps = []
+    MockRewindHandler.sessions_by_client_key = {}
+    MockRewindHandler.start_request_log = []
 
 
 class TestExplicitClient(unittest.TestCase):
@@ -389,6 +405,44 @@ class TestEnsureSession(unittest.TestCase):
         sid = _session_id.get()
         self.assertIsNotNone(sid)
         self.assertIn("conv-1", self.client._session_cache)
+
+    def test_ensure_session_sends_client_session_key(self):
+        """SDK must pass conversation_id as client_session_key so the
+        server can dedup across replicas. Without this header field,
+        the multi-replica fix on the server is moot."""
+        self.client.ensure_session("conv-key-1", name="test-agent")
+        self.assertEqual(len(MockRewindHandler.start_request_log), 1)
+        body = MockRewindHandler.start_request_log[0]
+        self.assertEqual(
+            body.get("client_session_key"),
+            "conv-key-1",
+            f"expected client_session_key='conv-key-1' in start request, got {body}",
+        )
+
+    def test_ensure_session_dedups_across_clients_via_server_key(self):
+        """Two ExplicitClient instances (simulating two Ray Serve
+        replicas) hitting the same server with the same conversation
+        id must end up with the same session_id, even though their
+        local caches are independent."""
+        from rewind_agent.explicit import ExplicitClient
+        client_b = ExplicitClient(self.client.base_url)
+
+        self.client.ensure_session("conv-shared")
+        sid_a = _session_id.get()
+
+        # Simulate a second replica: its cache is empty, but the
+        # server's idempotency on client_session_key returns the
+        # session created by client A.
+        _session_id.set(None)
+        client_b.ensure_session("conv-shared")
+        sid_b = _session_id.get()
+
+        self.assertEqual(sid_a, sid_b, "both replicas must converge on the same session")
+        self.assertEqual(
+            len(MockRewindHandler.sessions),
+            1,
+            "server must have created exactly one session for the shared conversation_id",
+        )
 
     def test_ensure_session_reuses_on_second_call(self):
         self.client.ensure_session("conv-1")

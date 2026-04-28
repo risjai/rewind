@@ -219,6 +219,7 @@ pub fn ingest_trace_request(
         metadata,
         thread_id: None,
         thread_ordinal: None,
+        client_session_key: None,
     };
 
     store.create_session(&session)?;
@@ -918,6 +919,7 @@ mod tests {
             metadata: serde_json::json!({}),
             thread_id: None,
             thread_ordinal: None,
+            client_session_key: None,
         };
         store.create_session(&session).unwrap();
 

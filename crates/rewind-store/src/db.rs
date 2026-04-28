@@ -328,6 +328,17 @@ impl Store {
 
         // v0.6 migrations: hooks integration — session source and step tool_name
         let _ = self.conn.execute("ALTER TABLE sessions ADD COLUMN source TEXT NOT NULL DEFAULT 'proxy'", []);
+        // Idempotent session creation: callers pass a stable key (e.g.
+        // a conversation_id) so a second /sessions/start with the same
+        // key returns the existing row instead of creating a duplicate.
+        // Closes the multi-replica race where each runner-process kept
+        // its own in-memory _session_cache.
+        let _ = self.conn.execute("ALTER TABLE sessions ADD COLUMN client_session_key TEXT", []);
+        let _ = self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_client_session_key \
+             ON sessions(client_session_key) WHERE client_session_key IS NOT NULL",
+            [],
+        );
         let _ = self.conn.execute("ALTER TABLE steps ADD COLUMN tool_name TEXT", []);
         let _ = self.conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_steps_session_tool ON steps(session_id, tool_name)");
 
@@ -497,8 +508,8 @@ impl Store {
 
     pub fn create_session(&self, session: &Session) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO sessions (id, name, created_at, updated_at, status, source, total_steps, total_tokens, metadata, thread_id, thread_ordinal)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT INTO sessions (id, name, created_at, updated_at, status, source, total_steps, total_tokens, metadata, thread_id, thread_ordinal, client_session_key)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 session.id,
                 session.name,
@@ -511,9 +522,32 @@ impl Store {
                 session.metadata.to_string(),
                 session.thread_id,
                 session.thread_ordinal,
+                session.client_session_key,
             ],
         )?;
         Ok(())
+    }
+
+    /// Look up a session by its idempotency key.
+    ///
+    /// Returns `Ok(None)` when no session has ever been created with
+    /// this key. Callers pair this with [`create_session`] to
+    /// implement the "find-or-create" pattern needed by multi-replica
+    /// runners; the unique index on `client_session_key` ensures a
+    /// concurrent insert from another process collapses cleanly via a
+    /// `SQLITE_CONSTRAINT_UNIQUE` error the caller can re-resolve
+    /// with a follow-up lookup.
+    pub fn get_session_by_client_key(&self, client_key: &str) -> Result<Option<Session>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, created_at, updated_at, status, source, total_steps, total_tokens, metadata, thread_id, thread_ordinal, client_session_key
+             FROM sessions WHERE client_session_key = ?1 LIMIT 1",
+        )?;
+        let mut rows = stmt.query(params![client_key])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(Self::row_to_session(row)?))
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn update_session_stats(&self, session_id: &str, steps: u32, tokens: u64) -> Result<()> {
@@ -576,7 +610,7 @@ impl Store {
 
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, created_at, updated_at, status, source, total_steps, total_tokens, metadata, thread_id, thread_ordinal
+            "SELECT id, name, created_at, updated_at, status, source, total_steps, total_tokens, metadata, thread_id, thread_ordinal, client_session_key
              FROM sessions ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([], Self::row_to_session)?;
@@ -585,7 +619,7 @@ impl Store {
 
     pub fn get_session(&self, session_id: &str) -> Result<Option<Session>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, created_at, updated_at, status, source, total_steps, total_tokens, metadata, thread_id, thread_ordinal
+            "SELECT id, name, created_at, updated_at, status, source, total_steps, total_tokens, metadata, thread_id, thread_ordinal, client_session_key
              FROM sessions WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(params![session_id], Self::row_to_session)?;
@@ -1388,6 +1422,11 @@ impl Store {
             metadata: serde_json::from_str(&row.get::<_, String>(8)?).unwrap_or_default(),
             thread_id: row.get(9)?,
             thread_ordinal: row.get(10)?,
+            // Optional column added in v0.14.x. Tolerate older rows
+            // where the column is NULL or the SELECT was written
+            // before client_session_key existed (caller-side index
+            // out-of-range comes back as NULL via try_get).
+            client_session_key: row.get::<_, Option<String>>(11).ok().flatten(),
         })
     }
 
@@ -1999,7 +2038,7 @@ impl Store {
 
     pub fn get_sessions_by_thread(&self, thread_id: &str) -> Result<Vec<Session>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, created_at, updated_at, status, source, total_steps, total_tokens, metadata, thread_id, thread_ordinal
+            "SELECT id, name, created_at, updated_at, status, source, total_steps, total_tokens, metadata, thread_id, thread_ordinal, client_session_key
              FROM sessions WHERE thread_id = ?1 ORDER BY thread_ordinal, created_at",
         )?;
         let rows = stmt.query_map(params![thread_id], Self::row_to_session)?;
@@ -2199,6 +2238,7 @@ mod tests {
             metadata: serde_json::json!({}),
             thread_id: None,
             thread_ordinal: None,
+            client_session_key: None,
         };
         store.create_session(&session).unwrap();
     }
@@ -2277,6 +2317,7 @@ mod tests {
             metadata: serde_json::json!({}),
             thread_id: None,
             thread_ordinal: None,
+            client_session_key: None,
         };
         store.create_session(&session).unwrap();
         let timeline = Timeline::new_root(&session.id);
@@ -2380,6 +2421,7 @@ mod tests {
                 metadata: serde_json::json!({}),
                 thread_id: None,
                 thread_ordinal: None,
+                client_session_key: None,
             };
             store.create_session(&session).unwrap();
             let timeline = Timeline::new_root(&session.id);
@@ -2492,6 +2534,7 @@ mod tests {
             metadata: serde_json::json!({}),
             thread_id: None,
             thread_ordinal: None,
+            client_session_key: None,
         };
         store.create_session(&session).unwrap();
         let timeline = Timeline::new_root(&session.id);

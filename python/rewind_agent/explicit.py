@@ -217,6 +217,17 @@ class ExplicitClient:
         First call for a conversation_id creates a new session and caches the mapping.
         Subsequent calls reuse the cached session. Sets contextvars internally.
         Cache entries evict after 2 hours of inactivity.
+
+        **Multi-replica safety (v0.15.1+):** the call passes
+        ``conversation_id`` as the server-side ``client_session_key``
+        so two ExplicitClient instances in different processes (Ray
+        Serve replicas, autoscaling worker pools) that both miss
+        their local cache for the same conversation collapse to a
+        single Rewind session on the server. The server returns
+        ``200 OK`` for the second-and-subsequent callers (instead of
+        ``201 CREATED``) and hands back the existing session/root
+        timeline ids — same shape as a fresh creation, so callers
+        don't need to branch on the status code.
         """
         now = time.monotonic()
         self._evict_stale_sessions(now)
@@ -231,6 +242,7 @@ class ExplicitClient:
         session_name = name or f"session-{conversation_id[:8]}"
         result = self._post("/sessions/start", {
             "name": session_name,
+            "client_session_key": conversation_id,
             **({"metadata": metadata} if metadata else {}),
         })
         if result is None:

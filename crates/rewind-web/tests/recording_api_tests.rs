@@ -126,6 +126,89 @@ async fn test_start_session() {
 }
 
 #[tokio::test]
+async fn test_start_session_idempotent_returns_existing() {
+    // Multi-replica runners need /sessions/start to be idempotent on
+    // a stable client_session_key so two POSTs from different replicas
+    // for the same conversation_id resolve to ONE rewind session.
+    let (app, store, _tmp) = setup();
+
+    let (status1, body1) = post_json(&app, "/api/sessions/start", json!({
+        "name": "ray-agent-conv-1",
+        "client_session_key": "conv-1",
+        "metadata": {"question": "What clusters are running?"}
+    })).await;
+    assert_eq!(status1, StatusCode::CREATED, "first call creates");
+    let sid1 = body1["session_id"].as_str().unwrap();
+    let tid1 = body1["root_timeline_id"].as_str().unwrap();
+
+    // Second call with the same key — different name/metadata to prove
+    // the server returns the EXISTING row rather than a freshly-built one.
+    let (status2, body2) = post_json(&app, "/api/sessions/start", json!({
+        "name": "would-be-different",
+        "client_session_key": "conv-1",
+        "metadata": {"question": "ignored"}
+    })).await;
+    assert_eq!(status2, StatusCode::OK, "duplicate returns 200, not 201");
+    assert_eq!(body2["session_id"].as_str().unwrap(), sid1, "same session id");
+    assert_eq!(body2["root_timeline_id"].as_str().unwrap(), tid1, "same root timeline id");
+
+    // No duplicate row was inserted.
+    let s = store.lock().unwrap();
+    let all = s.list_sessions().unwrap();
+    let matching: Vec<_> = all
+        .iter()
+        .filter(|x| x.client_session_key.as_deref() == Some("conv-1"))
+        .collect();
+    assert_eq!(matching.len(), 1, "exactly one row keyed to conv-1");
+    assert_eq!(matching[0].name, "ray-agent-conv-1", "first writer wins on name");
+    assert_eq!(
+        matching[0].metadata.get("question").and_then(|v| v.as_str()),
+        Some("What clusters are running?"),
+        "first writer wins on metadata too",
+    );
+}
+
+#[tokio::test]
+async fn test_start_session_distinct_keys_create_distinct_sessions() {
+    let (app, _store, _tmp) = setup();
+
+    let (s1, b1) = post_json(&app, "/api/sessions/start", json!({
+        "name": "a",
+        "client_session_key": "key-A"
+    })).await;
+    let (s2, b2) = post_json(&app, "/api/sessions/start", json!({
+        "name": "b",
+        "client_session_key": "key-B"
+    })).await;
+
+    assert_eq!(s1, StatusCode::CREATED);
+    assert_eq!(s2, StatusCode::CREATED);
+    assert_ne!(b1["session_id"], b2["session_id"]);
+}
+
+#[tokio::test]
+async fn test_start_session_without_key_creates_new_each_time() {
+    // Backward compat: callers that don't pass client_session_key get
+    // the original create-every-time behavior. Two POSTs with the
+    // same name but no key produce two distinct sessions.
+    let (app, _store, _tmp) = setup();
+
+    let (s1, b1) = post_json(&app, "/api/sessions/start", json!({
+        "name": "no-key-session"
+    })).await;
+    let (s2, b2) = post_json(&app, "/api/sessions/start", json!({
+        "name": "no-key-session"
+    })).await;
+
+    assert_eq!(s1, StatusCode::CREATED);
+    assert_eq!(s2, StatusCode::CREATED);
+    assert_ne!(
+        b1["session_id"], b2["session_id"],
+        "no key supplied -> server creates fresh session each call",
+    );
+}
+
+#[tokio::test]
 async fn test_end_session() {
     let (app, _store, _tmp) = setup();
 

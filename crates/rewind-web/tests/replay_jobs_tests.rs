@@ -594,6 +594,7 @@ fn seed_session_with_step(store: &Arc<Mutex<Store>>) -> (String, String) {
         metadata: serde_json::json!({}),
         thread_id: None,
         thread_ordinal: None,
+        client_session_key: None,
     };
     let timeline = Timeline::new_root(&session.id);
     s.create_session(&session).unwrap();

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rewind-mcp"
-version = "0.13.0"
+version = "0.13.1"
 description = "MCP server for Rewind — the time-travel debugger for AI agents."
 readme = "README.md"
 license = "MIT"

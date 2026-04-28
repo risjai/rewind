@@ -226,6 +226,7 @@ mod tests {
             metadata: serde_json::json!({}),
             thread_id: None,
             thread_ordinal: None,
+            client_session_key: None,
         };
 
         let tl = Timeline::new_root(&session.id);

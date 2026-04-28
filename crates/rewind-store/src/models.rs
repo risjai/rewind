@@ -15,6 +15,17 @@ pub struct Session {
     pub metadata: serde_json::Value,
     pub thread_id: Option<String>,
     pub thread_ordinal: Option<u32>,
+    /// Caller-supplied stable key for idempotent session creation.
+    ///
+    /// When set, two `/sessions/start` requests carrying the same key
+    /// resolve to the SAME session — the server returns the existing
+    /// row instead of inserting a duplicate. Closes the multi-replica
+    /// race where each runner-process keeps its own in-process
+    /// `_session_cache` and creates a fresh session on cache miss.
+    ///
+    /// Database invariant: `UNIQUE WHERE client_session_key IS NOT
+    /// NULL` so concurrent inserts collapse via the constraint.
+    pub client_session_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -348,6 +359,7 @@ impl Session {
             metadata: serde_json::json!({}),
             thread_id: None,
             thread_ordinal: None,
+            client_session_key: None,
         }
     }
 }
