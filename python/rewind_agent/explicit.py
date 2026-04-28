@@ -566,6 +566,33 @@ class ExplicitClient:
             self._delete(f"/replay-contexts/{ctx_id}")
             _replay_context_id.set(None)
 
+    def attach_replay_context(self, session_id: str, replay_context_id: str) -> None:
+        """Attach to a *pre-existing* replay context.
+
+        **Phase 3 commit 9 (resolves review HIGH #4 from the plan):**
+        :meth:`start_replay` *creates* a fresh replay context; runners
+        receive an *existing* one in their dispatch payload and must
+        attach to it without creating a duplicate. This method sets
+        the contextvars so subsequent recorder/intercept lookups
+        target the supplied context.
+
+        Use this in runner code receiving a dispatch webhook:
+
+        .. code-block:: python
+
+            client = ExplicitClient(base_url=os.environ["REWIND_URL"])
+            client.attach_replay_context(
+                session_id=payload["session_id"],
+                replay_context_id=payload["replay_context_id"],
+            )
+            # Subsequent intercept.install() / cached_llm_call() calls
+            # will look up against this context.
+
+        Note: no server round-trip — the context already exists.
+        """
+        _session_id.set(session_id)
+        _replay_context_id.set(replay_context_id)
+
     def replay_from_iteration(
         self, session_id: str, iteration: int,
         *, timeline_id: str | None = None,
