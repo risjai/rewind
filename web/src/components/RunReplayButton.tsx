@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Play, Loader2, CheckCircle2, AlertCircle } from 'lucide-react'
+import { Play, Loader2, CheckCircle2, AlertCircle, Rocket, X } from 'lucide-react'
 import { api } from '@/lib/api'
 import { useReplayJob } from '@/hooks/use-replay-job'
 
@@ -100,44 +100,71 @@ export function ReplayJobModal({
     onClose()
   }
 
+  // Disable close affordances mid-dispatch so the user can't drop
+  // an in-flight job by accident. The Job-progress view has its own
+  // explicit Close button; the modal still closes from any state via
+  // the JobProgressView once the job reaches a terminal state.
+  const closeDisabled = isDispatching
+
   return (
     <div
-      className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4"
-      onClick={handleClose}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Run replay on a registered runner"
+      className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4"
+      onClick={() => {
+        if (!closeDisabled) handleClose()
+      }}
     >
       <div
-        className="bg-neutral-900 border border-neutral-700 rounded-lg p-5 w-full max-w-lg space-y-4"
+        className="relative bg-neutral-900 border border-neutral-700 rounded-xl shadow-2xl w-full max-w-lg mx-4"
         onClick={(e) => e.stopPropagation()}
       >
-        <h2 className="text-base font-semibold text-neutral-200">
-          Run replay
-        </h2>
-        <p className="text-xs text-neutral-500">
-          Forks at step {atStep} on the selected timeline and
-          dispatches a replay job to a registered runner. Progress
-          streams here live via WebSocket.
-        </p>
-
-        {isLoading ? (
-          <div className="text-center py-6 text-neutral-500 text-sm">
-            Loading runners...
+        <div className="flex items-center justify-between px-5 py-4 border-b border-neutral-800">
+          <div className="flex items-center gap-2">
+            <Rocket size={16} className="text-emerald-400" />
+            <h3 className="text-sm font-semibold text-neutral-200">
+              Run replay from step #{atStep}
+            </h3>
           </div>
-        ) : activeRunners.length === 0 ? (
-          <NoRunnersFallback sessionId={sessionId} atStep={atStep} />
-        ) : !job ? (
-          <RunnerPickForm
-            runners={activeRunners}
-            runnerId={runnerId}
-            onRunnerChange={setRunnerId}
-            strictMatch={strictMatch}
-            onStrictMatchChange={setStrictMatch}
-            onSubmit={submit}
-            isDispatching={isDispatching}
-            error={dispatchError?.message ?? null}
-          />
-        ) : (
-          <JobProgressView job={job} onClose={handleClose} />
-        )}
+          <button
+            onClick={handleClose}
+            disabled={closeDisabled}
+            aria-label="Close"
+            className="text-neutral-500 hover:text-neutral-300 transition-colors disabled:opacity-50"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="px-5 py-4 space-y-4">
+          <p className="text-xs text-neutral-500">
+            Forks at step {atStep} on the selected timeline and
+            dispatches a replay job to a registered runner. Progress
+            streams here live via WebSocket.
+          </p>
+
+          {isLoading ? (
+            <div className="text-center py-6 text-neutral-500 text-sm">
+              Loading runners...
+            </div>
+          ) : activeRunners.length === 0 ? (
+            <NoRunnersFallback sessionId={sessionId} atStep={atStep} />
+          ) : !job ? (
+            <RunnerPickForm
+              runners={activeRunners}
+              runnerId={runnerId}
+              onRunnerChange={setRunnerId}
+              strictMatch={strictMatch}
+              onStrictMatchChange={setStrictMatch}
+              onSubmit={submit}
+              isDispatching={isDispatching}
+              error={dispatchError?.message ?? null}
+            />
+          ) : (
+            <JobProgressView job={job} onClose={handleClose} />
+          )}
+        </div>
       </div>
     </div>
   )

@@ -1,6 +1,6 @@
 import { useMemo, useRef, useCallback, useReducer, useEffect, useState } from 'react'
 import { cn, formatDuration, formatTokens } from '@/lib/utils'
-import { Brain, Wrench, ClipboardList, MessageSquare, Radio, GitBranch, Play } from 'lucide-react'
+import { Brain, Wrench, ClipboardList, MessageSquare, Radio, GitBranch, Play, Rocket } from 'lucide-react'
 import type { SpanResponse, StepResponse, Session } from '@/types/api'
 
 // --- Lane building logic (exported for testing) ---
@@ -303,8 +303,7 @@ export function ActivityTimeline({
   isCursor,
   onFork,
   onReplay,
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- forwarded API surface; UI integration in a follow-up commit
-  onRunReplay: _onRunReplay,
+  onRunReplay,
 }: ActivityTimelineProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const laneAreaRef = useRef<HTMLDivElement>(null)
@@ -669,7 +668,7 @@ export function ActivityTimeline({
                             </span>
                           )}
                         </button>
-                        {(onFork || onReplay) && (
+                        {(onFork || onReplay || onRunReplay) && (
                           // Overlay sits INSIDE the bar wrapper (within lane bounds) so it
                           // isn't clipped by `overflow-hidden` on the bar-area and swim-lane
                           // containers. `group-focus-within` reveals it for keyboard users.
@@ -692,6 +691,16 @@ export function ActivityTimeline({
                                 className="flex items-center gap-0.5 px-1 py-0.5 rounded text-[9px] bg-cyan-950/95 text-cyan-300 border border-cyan-800/60 hover:bg-cyan-900/95 focus:outline-none focus:ring-1 focus:ring-cyan-500 transition-colors"
                               >
                                 <Play size={9} />
+                              </button>
+                            )}
+                            {onRunReplay && (
+                              <button
+                                onClick={() => onRunReplay(step)}
+                                aria-label={`Run replay from step ${step.step_number} on a registered runner`}
+                                title={`Run replay from step ${step.step_number} on a registered runner (Phase 3 dispatch)`}
+                                className="flex items-center gap-0.5 px-1 py-0.5 rounded text-[9px] bg-emerald-950/95 text-emerald-300 border border-emerald-800/60 hover:bg-emerald-900/95 focus:outline-none focus:ring-1 focus:ring-emerald-500 transition-colors"
+                              >
+                                <Rocket size={9} />
                               </button>
                             )}
                           </div>

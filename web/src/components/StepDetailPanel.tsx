@@ -2,13 +2,14 @@ import { useQuery } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { cn, formatDuration, formatTokens } from '@/lib/utils'
 import { useState } from 'react'
-import { MessageSquare, FileJson, FileOutput, AlertTriangle, GitBranch, Play } from 'lucide-react'
+import { MessageSquare, FileJson, FileOutput, AlertTriangle, GitBranch, Play, Rocket } from 'lucide-react'
 import { JsonTree } from './JsonTree'
 import { ForkModal } from './ForkModal'
 import { ReplaySetupModal } from './ReplaySetupModal'
+import { ReplayJobModal } from './RunReplayButton'
 
 type Tab = 'context' | 'request' | 'response'
-type ModalMode = 'fork' | 'replay' | null
+type ModalMode = 'fork' | 'replay' | 'runReplay' | null
 
 export function StepDetailPanel({ stepId }: { stepId: string }) {
   const [tab, setTab] = useState<Tab | null>(null)
@@ -57,6 +58,13 @@ export function StepDetailPanel({ stepId }: { stepId: string }) {
             >
               <Play size={11} /> Set up replay…
             </button>
+            <button
+              onClick={() => setModalMode('runReplay')}
+              title={`Dispatch this replay to a registered runner (e.g. ray-agent). Re-executes the agent against the recorded LLM cache; new steps land on a fresh fork timeline.`}
+              className="flex items-center gap-1 text-[11px] text-emerald-400 hover:text-emerald-300 border border-emerald-900/50 hover:border-emerald-700 bg-emerald-950/20 hover:bg-emerald-950/40 px-2 py-0.5 rounded-md transition-colors"
+            >
+              <Rocket size={11} /> Run replay
+            </button>
           </div>
         </div>
         <div className="flex items-center gap-4 text-xs text-neutral-500">
@@ -103,6 +111,14 @@ export function StepDetailPanel({ stepId }: { stepId: string }) {
           sessionId={step.session_id}
           timelineId={step.timeline_id}
           atStep={step.step_number}
+        />
+      )}
+      {modalMode === 'runReplay' && (
+        <ReplayJobModal
+          sessionId={step.session_id}
+          sourceTimelineId={step.timeline_id}
+          atStep={step.step_number}
+          onClose={() => setModalMode(null)}
         />
       )}
     </div>

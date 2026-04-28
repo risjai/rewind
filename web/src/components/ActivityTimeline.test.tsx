@@ -691,4 +691,56 @@ describe('ActivityTimeline fork/replay bar affordance (Phase 3)', () => {
     expect(onSelectStep).not.toHaveBeenCalled()
     expect(onFork).not.toHaveBeenCalled()
   })
+
+  it('invokes onRunReplay with the correct step without triggering onSelectStep', () => {
+    // Phase 3 dispatch button — distinct from onReplay (legacy CLI flow).
+    // The presence of an onRunReplay handler should render a third
+    // action button per step that fires only that callback.
+    const onFork = vi.fn()
+    const onReplay = vi.fn()
+    const onRunReplay = vi.fn()
+    const onSelectStep = vi.fn()
+    render(
+      <ActivityTimeline
+        spans={[spanWithSteps]}
+        steps={steps}
+        session={session}
+        selectedStepId={null}
+        onSelectStep={onSelectStep}
+        onFork={onFork}
+        onReplay={onReplay}
+        onRunReplay={onRunReplay}
+      />
+    )
+    const runReplayBtn = screen.getByRole('button', {
+      name: /run replay from step 1 on a registered runner/i,
+    })
+    fireEvent.click(runReplayBtn)
+    expect(onRunReplay).toHaveBeenCalledTimes(1)
+    expect(onRunReplay).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'a', step_number: 1 }),
+    )
+    expect(onSelectStep).not.toHaveBeenCalled()
+    expect(onFork).not.toHaveBeenCalled()
+    expect(onReplay).not.toHaveBeenCalled()
+  })
+
+  it('does not render the run-replay button when onRunReplay is not provided', () => {
+    const onFork = vi.fn()
+    const onReplay = vi.fn()
+    render(
+      <ActivityTimeline
+        spans={[spanWithSteps]}
+        steps={steps}
+        session={session}
+        selectedStepId={null}
+        onSelectStep={() => {}}
+        onFork={onFork}
+        onReplay={onReplay}
+      />
+    )
+    expect(
+      screen.queryByRole('button', { name: /run replay from step/i }),
+    ).toBeNull()
+  })
 })
