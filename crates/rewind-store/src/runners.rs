@@ -360,6 +360,25 @@ impl Store {
         Ok(())
     }
 
+    /// Count non-terminal jobs (`pending`, `dispatched`, `in_progress`)
+    /// owned by this runner.
+    ///
+    /// **Used by review #153 HIGH 3 + MEDIUM 4:** the HTTP layer
+    /// uses this to refuse `DELETE /api/runners/{id}` and
+    /// `POST /api/runners/{id}/regenerate-token` while in-flight
+    /// jobs would be orphaned (deletion → null `runner_id`,
+    /// rotation → in-flight callbacks fail auth).
+    pub fn count_active_jobs_for_runner(&self, runner_id: &str) -> Result<u32> {
+        let n: u32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM replay_jobs
+             WHERE runner_id = ?1
+               AND state NOT IN ('completed', 'errored')",
+            params![runner_id],
+            |row| row.get(0),
+        )?;
+        Ok(n)
+    }
+
     /// Rotate a runner's auth token. Replaces the encrypted token,
     /// nonce, hash, and preview atomically. Returns `true` if a row
     /// was updated, `false` if the id doesn't exist.

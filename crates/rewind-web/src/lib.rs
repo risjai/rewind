@@ -102,17 +102,34 @@ pub struct WebServer {
     auth_disabled: bool,
 }
 
+/// Read `REWIND_RUNNER_SECRET_KEY` and build the [`crypto::CryptoBox`].
+///
+/// **Review #153 MEDIUM 5 — fail-fast on misconfig:** if the env var
+/// is *unset*, returns `None` (runner endpoints will 503 with a clear
+/// bootstrap error). If the env var is *set but malformed* (bad
+/// base64, wrong key length), this **panics at startup** with an
+/// operator-actionable message rather than silently booting a server
+/// whose runner registry can never dispatch.
+///
+/// This matches the docstring on `crypto::CryptoBox::from_env`
+/// ("operator misconfig — fail loud at startup"). Previously the
+/// caller logged-and-swallowed, which made the failure invisible
+/// until the first `/api/runners` 503.
+fn bootstrap_crypto() -> Option<crypto::CryptoBox> {
+    match crypto::CryptoBox::from_env() {
+        Ok(maybe) => maybe,
+        Err(e) => panic!(
+            "FATAL: {} is set but malformed: {e}\n\
+             Generate a fresh key with `openssl rand -base64 32` and set it via the env var.",
+            crypto::KEY_ENV_VAR
+        ),
+    }
+}
+
 impl WebServer {
     pub fn new(store: Arc<Mutex<Store>>, event_tx: broadcast::Sender<StoreEvent>) -> Self {
         let otel_config = OtelConfig::from_env();
-        let crypto = crypto::CryptoBox::from_env().unwrap_or_else(|e| {
-            // Misconfigured key (set but malformed) is a hard error at
-            // startup so operators see it instead of every /api/runners
-            // call returning 500. Unset key returns Ok(None) and falls
-            // through to None (endpoints will 503 with bootstrap msg).
-            tracing::error!("REWIND_RUNNER_SECRET_KEY is set but malformed: {e}");
-            None
-        });
+        let crypto = bootstrap_crypto();
         WebServer {
             state: AppState {
                 store,
@@ -130,10 +147,7 @@ impl WebServer {
     pub fn new_standalone(store: Store) -> Self {
         let (event_tx, _) = broadcast::channel(256);
         let otel_config = OtelConfig::from_env();
-        let crypto = crypto::CryptoBox::from_env().unwrap_or_else(|e| {
-            tracing::error!("REWIND_RUNNER_SECRET_KEY is set but malformed: {e}");
-            None
-        });
+        let crypto = bootstrap_crypto();
         WebServer {
             state: AppState {
                 store: Arc::new(Mutex::new(store)),

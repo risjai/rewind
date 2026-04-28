@@ -143,25 +143,49 @@ fn validate_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_webhook_url(mode: RunnerMode, url: Option<&str>) -> Result<Option<String>, String> {
-    match (mode, url) {
-        (RunnerMode::Webhook, Some(u)) => {
-            let u = u.trim();
-            if !u.starts_with("http://") && !u.starts_with("https://") {
-                return Err("webhook_url must be http:// or https://".into());
-            }
-            // Reject obvious junk (no host).
-            if u == "http://" || u == "https://" {
-                return Err("webhook_url is missing a host".into());
-            }
-            Ok(Some(u.to_string()))
-        }
-        (RunnerMode::Webhook, None) => Err("webhook_url is required for mode=webhook".into()),
-        (RunnerMode::Polling, Some(_)) => {
-            Err("webhook_url must be omitted for mode=polling".into())
-        }
-        (RunnerMode::Polling, None) => Ok(None),
+/// Validate the (mode, webhook_url) tuple at registration time.
+///
+/// **Review #153 HIGH 1:** `mode = polling` is rejected with a 400.
+/// The Phase 3 plan defers pull-based runners to v3.1 — there is no
+/// polling worker in the current dispatcher path, so accepting a
+/// polling registration would silently create a runner that can
+/// never receive jobs. The schema column accepts `polling` for
+/// future-compat, but the API surface refuses it until commit-N
+/// (v3.1) ships the polling worker.
+///
+/// **Review #153 HIGH 2:** SSRF validation on `webhook_url` is
+/// performed by the caller via [`url_guard::validate_export_endpoint`]
+/// after this function returns the trimmed URL. We additionally
+/// reject userinfo (`http://user:pass@host/...`) here because
+/// `url_guard` doesn't enforce that.
+fn validate_webhook_url(mode: RunnerMode, url: Option<&str>) -> Result<String, String> {
+    if matches!(mode, RunnerMode::Polling) {
+        return Err(
+            "polling mode is not implemented in v1; only mode=webhook is accepted. \
+             Pull-based runners are tracked for v3.1."
+                .into(),
+        );
     }
+    let u = url
+        .ok_or_else(|| "webhook_url is required for mode=webhook".to_string())?
+        .trim();
+    if !u.starts_with("http://") && !u.starts_with("https://") {
+        return Err("webhook_url must be http:// or https://".into());
+    }
+    if u == "http://" || u == "https://" {
+        return Err("webhook_url is missing a host".into());
+    }
+    let parsed = url::Url::parse(u).map_err(|e| format!("webhook_url is malformed: {e}"))?;
+    // Reject embedded credentials — no legitimate webhook target uses
+    // basic-auth-style URLs, and they're a known SSRF/credential-leak
+    // surface.
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("webhook_url must not contain userinfo (user:pass@...)".into());
+    }
+    if parsed.host_str().is_none() {
+        return Err("webhook_url is missing a host".into());
+    }
+    Ok(u.to_string())
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -215,6 +239,10 @@ fn not_found(what: &str) -> (StatusCode, Json<ErrorBody>) {
     )
 }
 
+fn conflict(msg: String) -> (StatusCode, Json<ErrorBody>) {
+    (StatusCode::CONFLICT, Json(ErrorBody { error: msg }))
+}
+
 // ──────────────────────────────────────────────────────────────────
 // Handlers
 // ──────────────────────────────────────────────────────────────────
@@ -242,6 +270,12 @@ async fn register_runner(
     let mode = req.mode.clone();
     let webhook_url = validate_webhook_url(mode, req.webhook_url.as_deref())
         .map_err(bad_request)?;
+    // Review #153 HIGH 2: SSRF guard — refuse webhook_url targets
+    // that resolve to loopback / private / link-local / metadata IPs.
+    // Reuses the same policy that gates `export_otel`.
+    crate::url_guard::validate_export_endpoint(&webhook_url)
+        .await
+        .map_err(bad_request)?;
 
     let raw_token = crypto::generate_runner_token();
     let nonce = CryptoBox::fresh_nonce();
@@ -253,7 +287,10 @@ async fn register_runner(
         id: Uuid::new_v4().to_string(),
         name: req.name.trim().to_string(),
         mode: req.mode,
-        webhook_url,
+        // Polling mode is rejected above (HIGH 1), so webhook_url is
+        // always Some(url). The schema column stays Option<String>
+        // for forward-compat when v3.1 ships polling.
+        webhook_url: Some(webhook_url),
         encrypted_token: encrypted,
         token_nonce: nonce.to_vec(),
         auth_token_hash: crypto::hash_runner_token(raw_token.expose()),
@@ -297,13 +334,18 @@ async fn get_runner(
 
 /// `DELETE /api/runners/{id}` — hard-delete the runner.
 ///
-/// The schema's `ON DELETE SET NULL` cascade nulls out
-/// `replay_jobs.runner_id` for any historical jobs that referenced
-/// this runner; those rows survive but render as "Runner deleted"
-/// in the dashboard. Active jobs (state ∈ {pending, dispatched,
-/// in_progress}) referencing this runner-id will see their FK
-/// nulled too — operators should drain in-flight jobs before
-/// removing a runner. (See review #152 round 2 for the FK rules.)
+/// **Review #153 MEDIUM 4 (active-jobs guard):** refuses deletion
+/// when the runner has non-terminal jobs (state ∈ {pending,
+/// dispatched, in_progress}). Returns `409 Conflict` with the count
+/// in the body; operators must drain in-flight jobs first (mark
+/// runner disabled + wait for them to settle, OR cancel them
+/// explicitly). Otherwise `ON DELETE SET NULL` would orphan the
+/// in-flight jobs (no dispatcher to send to, no auth surface for
+/// inbound events).
+///
+/// Historical / terminal jobs (`completed`, `errored`) survive the
+/// cascade with `runner_id` nulled out and render as "Runner
+/// deleted" in the dashboard. (Review #152 FK rules.)
 async fn remove_runner(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -312,6 +354,14 @@ async fn remove_runner(
         .store
         .lock()
         .map_err(|e| internal(format!("store lock: {e}")))?;
+    let active = store.count_active_jobs_for_runner(&id).map_err(internal)?;
+    if active > 0 {
+        return Err(conflict(format!(
+            "runner has {active} non-terminal job(s) (pending/dispatched/in_progress); \
+             drain or cancel them before deletion. Alternatively, mark the runner \
+             disabled to stop new dispatches and wait for active jobs to settle."
+        )));
+    }
     let removed = store.delete_runner(&id).map_err(internal)?;
     if removed {
         Ok(StatusCode::NO_CONTENT)
@@ -321,10 +371,16 @@ async fn remove_runner(
 }
 
 /// `POST /api/runners/{id}/regenerate-token` — rotate the runner's
-/// auth token. Returns the new raw token once. The old token's
-/// hash is invalidated immediately; in-flight dispatches will use
-/// the new token because signing happens at dispatch time, not at
-/// job-creation time.
+/// auth token. Returns the new raw token once.
+///
+/// **Review #153 HIGH 3 (active-jobs guard):** refuses rotation
+/// while in-flight jobs reference this runner. Returns `409 Conflict`
+/// with the count. The old `auth_token_hash` is invalidated
+/// immediately on rotation, which would break any in-flight
+/// runner→server callback signed with the old token (the runner
+/// already accepted the dispatch under it). Operator workflow:
+/// drain or cancel in-flight jobs, then rotate. Future v3.1 may
+/// add a token-grace list to allow lossless rotation.
 async fn regenerate_token(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -351,6 +407,16 @@ async fn regenerate_token(
             .get_runner(&id)
             .map_err(internal)?
             .ok_or_else(|| not_found("runner"))?;
+        // Active-jobs guard: see docstring above.
+        let active = store.count_active_jobs_for_runner(&id).map_err(internal)?;
+        if active > 0 {
+            return Err(conflict(format!(
+                "runner has {active} non-terminal job(s) (pending/dispatched/in_progress); \
+                 rotating now would invalidate the token bound to in-flight callbacks. \
+                 Drain or cancel them before rotating, or mark the runner disabled to \
+                 stop new dispatches and wait for active jobs to settle."
+            )));
+        }
         store
             .rotate_runner_token(
                 &id,
