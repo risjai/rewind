@@ -302,9 +302,19 @@ async fn register_runner(
     // Review #153 HIGH 2: SSRF guard — refuse webhook_url targets
     // that resolve to loopback / private / link-local / metadata IPs.
     // Reuses the same policy that gates `export_otel`.
-    crate::url_guard::validate_export_endpoint(&webhook_url)
-        .await
-        .map_err(bad_request)?;
+    //
+    // Dev/test escape hatch: REWIND_ALLOW_LOOPBACK_WEBHOOKS=1 bypasses
+    // the SSRF check. NEVER set this in production — any operator who
+    // can reach the dashboard could then dispatch webhooks at
+    // localhost / cloud-metadata IPs. Documented in docs/runners.md.
+    let bypass = std::env::var("REWIND_ALLOW_LOOPBACK_WEBHOOKS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if !bypass {
+        crate::url_guard::validate_export_endpoint(&webhook_url)
+            .await
+            .map_err(bad_request)?;
+    }
 
     let raw_token = crypto::generate_runner_token();
     let nonce = CryptoBox::fresh_nonce();
