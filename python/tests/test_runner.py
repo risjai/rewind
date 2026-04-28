@@ -537,24 +537,62 @@ def test_install_bootstraps_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """``intercept.install()`` reads REWIND_SESSION_ID +
     REWIND_REPLAY_CONTEXT_ID and attaches before patching.
     """
-    from rewind_agent.explicit import _replay_context_id, _session_id
+    from rewind_agent.explicit import _replay_context_id, _session_id, _timeline_id
     from rewind_agent.intercept import _install
 
     monkeypatch.setenv("REWIND_SESSION_ID", "boot-sess")
     monkeypatch.setenv("REWIND_REPLAY_CONTEXT_ID", "boot-ctx")
+    monkeypatch.delenv("REWIND_REPLAY_CONTEXT_TIMELINE_ID", raising=False)
     monkeypatch.setenv("REWIND_URL", "http://127.0.0.1:4800")
 
     _install._INSTALLED = False
     _session_id.set(None)
     _replay_context_id.set(None)
+    _timeline_id.set(None)
 
     try:
         _install._bootstrap_replay_context_from_env()
         assert _session_id.get() == "boot-sess"
         assert _replay_context_id.get() == "boot-ctx"
+        # Without REWIND_REPLAY_CONTEXT_TIMELINE_ID, _timeline_id
+        # stays unset (with a logged WARN — see the documented
+        # subprocess-bootstrap caveat).
+        assert _timeline_id.get() is None
     finally:
         _session_id.set(None)
         _replay_context_id.set(None)
+        _timeline_id.set(None)
+
+
+def test_install_bootstraps_with_timeline_id_from_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review #154 round 2: env-var bootstrap also honors
+    REWIND_REPLAY_CONTEXT_TIMELINE_ID. Subprocess-bootstrap paths
+    that previously left _timeline_id unset now propagate the fork
+    timeline so live cache misses record into the right place."""
+    from rewind_agent.explicit import _replay_context_id, _session_id, _timeline_id
+    from rewind_agent.intercept import _install
+
+    monkeypatch.setenv("REWIND_SESSION_ID", "boot-sess")
+    monkeypatch.setenv("REWIND_REPLAY_CONTEXT_ID", "boot-ctx")
+    monkeypatch.setenv("REWIND_REPLAY_CONTEXT_TIMELINE_ID", "boot-fork-tl")
+    monkeypatch.setenv("REWIND_URL", "http://127.0.0.1:4800")
+
+    _install._INSTALLED = False
+    _session_id.set(None)
+    _replay_context_id.set(None)
+    _timeline_id.set(None)
+
+    try:
+        _install._bootstrap_replay_context_from_env()
+        assert _session_id.get() == "boot-sess"
+        assert _replay_context_id.get() == "boot-ctx"
+        assert _timeline_id.get() == "boot-fork-tl"
+    finally:
+        _session_id.set(None)
+        _replay_context_id.set(None)
+        _timeline_id.set(None)
 
 
 def test_install_partial_env_logs_warning_and_skips(

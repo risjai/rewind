@@ -699,6 +699,29 @@ async fn create_replay_job(
             progress_total: None,
         };
         store.create_replay_job(&job).map_err(internal)?;
+        // Review #154 round 2 BLOCKER fix: transition pending →
+        // dispatched SYNCHRONOUSLY before spawning the dispatcher.
+        // Otherwise the runner can call back with `started` before
+        // the async dispatcher's apply_outcome flips state, and the
+        // state-machine guard from #152 round 2 rejects the
+        // `Pending → Started` transition as illegal — the runner
+        // sees a 409, the job sits in `pending` until the reaper
+        // marks it errored. By advancing state up front, the runner
+        // ALWAYS finds the job in `dispatched` when it tries to
+        // call back. If dispatch later fails, apply_outcome
+        // transitions dispatched → errored (legal startup-failure
+        // path). If `started` lands first (as it can with very
+        // fast runners), the apply_outcome failure transition will
+        // be a no-op (SQL guard refuses Dispatched→Errored when
+        // current state is in_progress) and the run proceeds.
+        store
+            .advance_replay_job_state(
+                &job.id,
+                ReplayJobState::Dispatched,
+                None,
+                None,
+            )
+            .map_err(internal)?;
         (job, runner, fork_timeline_id)
     };
 
@@ -761,7 +784,11 @@ async fn create_replay_job(
             job_id: job.id.clone(),
             replay_context_id: job.replay_context_id.clone().unwrap_or_default(),
             fork_timeline_id,
-            state: "pending".to_string(),
+            // Pre-spawn transition (review #154 round 2 BLOCKER fix)
+            // means the response always reports `dispatched` rather
+            // than the prior `pending`. Dashboard sees the "real"
+            // state immediately.
+            state: "dispatched".to_string(),
             dispatch_deadline_at: job.dispatch_deadline_at.map(|t| t.to_rfc3339()),
         }),
     ))

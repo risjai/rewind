@@ -204,7 +204,11 @@ async fn create_replay_job_shape_b_dispatches_to_runner_and_transitions_to_dispa
     .await;
     assert_eq!(status, StatusCode::ACCEPTED, "body: {body:?}");
     let job_id = body["job_id"].as_str().unwrap().to_string();
-    assert_eq!(body["state"], "pending");
+    // Review #154 round 2 BLOCKER fix: dispatch endpoint now
+    // transitions pending → dispatched synchronously before the
+    // tokio::spawn so runner callbacks always find the job in
+    // `dispatched` state. Pre-fix this asserted "pending".
+    assert_eq!(body["state"], "dispatched");
     assert_eq!(body["replay_context_id"], ctx_id);
     // Review #154 F2: shape B also returns the context's timeline id
     // (so the dashboard / SDK can resolve `_timeline_id` correctly).
@@ -224,20 +228,26 @@ async fn create_replay_job_shape_b_dispatches_to_runner_and_transitions_to_dispa
         .unwrap();
     assert!(sig.starts_with("sha256="), "signature header malformed: {sig}");
 
-    // After a brief wait, the job state should be dispatched.
-    for _ in 0..30 {
+    // Review #154 round 2: state is now flipped to Dispatched
+    // SYNCHRONOUSLY before tokio::spawn, so the snapshot already
+    // shows Dispatched. The deadline + lease are set asynchronously
+    // by apply_outcome AFTER the dispatcher's HTTP call settles —
+    // we wait for those instead of for the state transition itself.
+    // Increased the poll budget to absorb parallel-test contention.
+    for _ in 0..120 {
         let snapshot = {
             let s = store.lock().unwrap();
             s.get_replay_job(&job_id).unwrap().unwrap()
         };
-        if matches!(snapshot.state, ReplayJobState::Dispatched) {
-            assert!(snapshot.dispatch_deadline_at.is_some());
-            assert!(snapshot.lease_expires_at.is_some());
+        if matches!(snapshot.state, ReplayJobState::Dispatched)
+            && snapshot.dispatch_deadline_at.is_some()
+            && snapshot.lease_expires_at.is_some()
+        {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    panic!("job never reached Dispatched state");
+    panic!("dispatcher's apply_outcome never set deadline/lease");
 }
 
 #[tokio::test]
@@ -312,6 +322,84 @@ async fn create_replay_job_rejects_context_in_use() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert!(body["error"].as_str().unwrap().contains("in-flight"));
+}
+
+// ── Review #154 round 2: dispatch race ─────────────────────────
+
+/// Pre-fix: the dispatcher's apply_outcome flipped state pending→
+/// dispatched AFTER the HTTP POST returned. Fast runners that
+/// emitted `started` immediately on receiving the webhook would
+/// hit the state-machine guard from #152 round 2
+/// (Pending → Started is illegal) and the runner would see a 409.
+/// Post-fix: state is advanced to `dispatched` SYNCHRONOUSLY
+/// before the tokio::spawn, so the runner can call back at any
+/// time after receiving the webhook with the correct state visible.
+#[tokio::test]
+async fn create_replay_job_response_state_is_dispatched_not_pending() {
+    let (api, _callbacks, store, _tmp) = setup();
+    let (webhook_url, _rx) = spawn_runner_stub_accepting().await;
+    let (runner_id, _raw) = register_runner(&store, &webhook_url);
+    let (session_id, _, ctx_id) = seed_session_and_context(&store);
+
+    let (status, body) = json_post(
+        api,
+        &format!("/api/sessions/{session_id}/replay-jobs"),
+        json!({"runner_id": runner_id, "replay_context_id": ctx_id}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(body["state"], "dispatched", "pre-spawn transition not applied");
+
+    // The job in the store must be in dispatched state IMMEDIATELY
+    // after the response; no async wait required.
+    let s = store.lock().unwrap();
+    let job = s.get_replay_job(body["job_id"].as_str().unwrap()).unwrap().unwrap();
+    assert_eq!(
+        job.state,
+        rewind_store::ReplayJobState::Dispatched,
+        "store row must already be dispatched (race window closed)"
+    );
+}
+
+/// Pre-fix race scenario simulation: a runner that posts `started`
+/// the moment it receives the dispatch must NOT be rejected by the
+/// state machine. The pre-spawn transition guarantees the job is
+/// dispatched before the runner can possibly call back.
+#[tokio::test]
+async fn started_event_accepted_immediately_after_dispatch_response() {
+    let (api, callbacks, store, _tmp) = setup();
+    let (webhook_url, _rx) = spawn_runner_stub_accepting().await;
+    let (runner_id, raw) = register_runner(&store, &webhook_url);
+    let (session_id, _, ctx_id) = seed_session_and_context(&store);
+
+    let (status, body) = json_post(
+        api,
+        &format!("/api/sessions/{session_id}/replay-jobs"),
+        json!({"runner_id": runner_id, "replay_context_id": ctx_id}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let job_id = body["job_id"].as_str().unwrap().to_string();
+
+    // Race simulation: post `started` event IMMEDIATELY without
+    // waiting for the dispatcher's apply_outcome. Pre-fix this
+    // returned 409 (state was still pending). Post-fix this
+    // returns 202 (state is dispatched).
+    let (event_status, event_body) = json_post_with_header(
+        callbacks,
+        &format!("/api/replay-jobs/{job_id}/events"),
+        json!({"event_type": "started"}),
+        "X-Rewind-Runner-Auth",
+        &raw,
+    )
+    .await;
+    assert_eq!(
+        event_status,
+        StatusCode::ACCEPTED,
+        "started event must be accepted immediately (race fixed): body={event_body:?}"
+    );
+    assert_eq!(event_body["accepted"], true);
+    assert_eq!(event_body["state"], "in_progress");
 }
 
 // ── Review #154 F1: strict_match must propagate to the context ──
@@ -427,7 +515,7 @@ async fn shape_b_rejects_expired_context() {
 // Helper: session with one recorded step so Shape A's fork(at_step=1)
 // has something to fork from.
 fn seed_session_with_step(store: &Arc<Mutex<Store>>) -> (String, String) {
-    use rewind_store::{Session, SessionSource, SessionStatus, Step, StepStatus, StepType, Timeline};
+    use rewind_store::{Session, SessionSource, SessionStatus, Step, StepStatus, Timeline};
     let s = store.lock().unwrap();
     let session = Session {
         id: Uuid::new_v4().to_string(),

@@ -296,9 +296,22 @@ impl Dispatcher {
         }
     }
 
-    /// Apply a [`DispatchOutcome`] to a job: writes the state
-    /// transition + deadline/lease (success) OR errored row (failure).
-    /// Synchronous — caller holds the Store lock while invoking.
+    /// Apply a [`DispatchOutcome`] to a job: sets deadline/lease on
+    /// success or transitions to `errored` on failure.
+    ///
+    /// **Review #154 round 2 fix:** the caller now transitions
+    /// `pending → dispatched` SYNCHRONOUSLY before the dispatcher's
+    /// async work (see `runners::create_replay_job`). That closes
+    /// the race where the runner could call back with `started`
+    /// before the dispatcher's apply_outcome flipped state, which
+    /// the post-#152 strict state machine would reject as an illegal
+    /// `Pending → Started` transition. As a result, this function
+    /// no longer needs to handle the `Pending → Dispatched`
+    /// transition itself — it's already done. The success path here
+    /// only sets the deadline + lease on the (already-dispatched)
+    /// row; the failure path transitions `Dispatched → Errored`
+    /// which the SQL state guard accepts (Errored from Dispatched is
+    /// the documented startup-failure path from #152 round 2).
     pub fn apply_outcome(
         outcome: &DispatchOutcome,
         job_id: &str,
@@ -310,23 +323,26 @@ impl Dispatcher {
                 lease_expires_at,
                 runner_id,
             } => {
-                let advanced = store.advance_replay_job_state(
+                // State already advanced by the caller pre-spawn.
+                // We just set the deadline/lease and touch the
+                // runner liveness column.
+                store.set_dispatch_deadline_and_lease(
                     job_id,
-                    ReplayJobState::Dispatched,
-                    None,
-                    None,
+                    *dispatch_deadline_at,
+                    *lease_expires_at,
                 )?;
-                if advanced {
-                    store.set_dispatch_deadline_and_lease(
-                        job_id,
-                        *dispatch_deadline_at,
-                        *lease_expires_at,
-                    )?;
-                    let _ = store.touch_runner_last_seen(runner_id);
-                }
+                let _ = store.touch_runner_last_seen(runner_id);
                 Ok(())
             }
             DispatchOutcome::Errored(msg) => {
+                // Dispatched → Errored (legal per the state machine).
+                // If a `started` event slipped in between the pre-
+                // spawn transition and this branch, the job is
+                // already in_progress — the SQL guard refuses the
+                // errored transition (returns false), and the run
+                // proceeds. That's correct: the runner DID start, so
+                // the dispatch was effectively successful even
+                // though we observed an HTTP error.
                 store.advance_replay_job_state(
                     job_id,
                     ReplayJobState::Errored,

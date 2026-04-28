@@ -126,10 +126,29 @@ export REWIND_URL='https://rewind.your-company.example'
 ```
 
 Alternative: env-var bootstrap. If you spawn the runner subprocess
-with `REWIND_SESSION_ID` and `REWIND_REPLAY_CONTEXT_ID`,
-`intercept.install()` attaches automatically — no SDK calls needed
-in the subprocess body. Useful when the runner shells out to a
-separate agent script.
+with `REWIND_SESSION_ID`, `REWIND_REPLAY_CONTEXT_ID`, and
+`REWIND_REPLAY_CONTEXT_TIMELINE_ID`, `intercept.install()` attaches
+automatically — no SDK calls needed in the subprocess body. Useful
+when the runner shells out to a separate agent script.
+
+```bash
+# In the runner's webhook handler, when shelling out to a separate
+# agent script (e.g. an existing CLI binary):
+env_for_subprocess = {
+    **os.environ,
+    "REWIND_SESSION_ID": payload.session_id,
+    "REWIND_REPLAY_CONTEXT_ID": payload.replay_context_id,
+    "REWIND_REPLAY_CONTEXT_TIMELINE_ID": payload.replay_context_timeline_id,
+    "REWIND_URL": payload.base_url,
+}
+subprocess.run(["./my-agent"], env=env_for_subprocess)
+```
+
+`REWIND_REPLAY_CONTEXT_TIMELINE_ID` is recommended (review #154 round 2):
+without it, live cache misses during the replay won't have a defined
+recording target — they'd land in whatever timeline `_timeline_id`
+defaults to. Always pass the fork timeline id from the dispatch
+payload so live recordings stay in the fork.
 
 ---
 
