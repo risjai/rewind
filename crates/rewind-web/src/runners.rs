@@ -599,8 +599,27 @@ async fn create_replay_job(
                     )
                     .map_err(|e| bad_request(format!("fork failed: {e}")))?;
                 let ctx_id = Uuid::new_v4().to_string();
+                // Replay context cursor must start at the BEGINNING
+                // of the recording (from_step=0), not at a.at_step.
+                //
+                // Rationale: the runner re-executes the agent from
+                // scratch (it doesn't know how to "fast-forward" the
+                // ReAct loop to iteration N). On the agent's first
+                // LLM call, the cache lookup must hit recorded step
+                // #1 so the replay tracks the original deterministically.
+                //
+                // a.at_step is the FORK-point — it controls which
+                // pre-step prefix is *inherited* on the fork timeline,
+                // and where new (post-divergence) recordings get
+                // numbered. The two concepts were conflated in the
+                // initial Phase 3 wiring; with from_step=at_step, the
+                // first cache lookup targets recorded step at_step+1
+                // (or at_step+2 because peek returns current+1),
+                // skipping the inherited prefix in the cache and
+                // forcing a live re-run that produces "diverges at
+                // step N" artifacts in the diff view.
                 store
-                    .create_replay_context(&ctx_id, &session.id, &fork.id, a.at_step)
+                    .create_replay_context(&ctx_id, &session.id, &fork.id, 0)
                     .map_err(internal)?;
                 // Review #154 F1: apply strict_match if requested.
                 // create_replay_context defaults to warn-on-divergence;
