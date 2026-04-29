@@ -113,4 +113,4 @@ def import_from_langfuse(trace_id: str, **kwargs) -> str:
     return _import(trace_id, **kwargs)
 
 
-__version__ = "0.15.1"
+__version__ = "0.15.2"

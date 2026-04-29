@@ -193,6 +193,42 @@ The body accepts two shapes:
 
 Returns `202 Accepted` with `{job_id, replay_context_id, fork_timeline_id?, state, dispatch_deadline_at}`.
 
+### Dispatch wire format (server → runner)
+
+The dispatcher POSTs to the runner's webhook URL:
+
+```http
+POST <runner.webhook_url>
+Content-Type: application/json
+X-Rewind-Job-Id: <uuid>
+X-Rewind-Signature: sha256=<hex>
+X-Rewind-Timestamp: <unix-seconds>
+User-Agent: rewind-dispatcher/<version>
+
+{
+  "job_id": "<uuid>",
+  "session_id": "<uuid>",
+  "replay_context_id": "<uuid>",
+  "replay_context_timeline_id": "<uuid>",
+  "at_step": <u32>,
+  "base_url": "<rewind-server-base>"
+}
+```
+
+**`at_step`** (added v0.14.8) is the original fork-point of the replay-context's timeline — i.e. the step number the user clicked Run replay at. Distinct from the replay context's `from_step` (always `0`; the agent re-runs from scratch). Runners use it for **multi-turn replay**: when `at_step > 1`, the runner should fetch the source timeline's steps `1..at_step-1` from rewind, reconstruct conversation history, and invoke the agent at the right turn so edits to user messages in turn 2+ actually take effect. The current ray-agent runner doesn't yet consume this field — companion ray-agent PR adds the runner-side reconstruction.
+
+Older runner SDK versions (pre v0.14.8) tolerate the new field gracefully — Python's `from_envelope` ignores unknown keys, and the HMAC verification works against the raw `request.body` so the new field is part of the signed input on both ends.
+
+### Timeline-context contract (dashboard)
+
+All four step-action buttons in the dashboard — **Edit**, **Fork from here**, **Set up replay**, and **Run replay** — source their action from the user's *currently-selected* timeline, not the step's physical owner. The fallback chain is:
+
+```
+contextTimelineId = selectedTimelineId  ??  rootTimelineId  ??  step.timeline_id
+```
+
+This matters for inherited steps shown on a fork: clicking any of these buttons routes the action through the fork lineage, not the parent (often `main`). Combined with the dedup in `engine.get_full_timeline_steps` (v0.14.7+), the picker shows owned-over-inherited rows so the user clicks the right step in the first place, and the action lands on the right timeline.
+
 ---
 
 ## State machine

@@ -130,6 +130,34 @@ async fn spawn_runner_stub_accepting() -> (String, tokio::sync::mpsc::Receiver<a
     (format!("http://{addr}/wh"), rx)
 }
 
+/// Variant of `spawn_runner_stub_accepting` that ALSO captures the
+/// request body bytes. Used by tests that assert on dispatch payload
+/// fields (e.g. `at_step`).
+async fn spawn_runner_stub_capturing_body() -> (
+    String,
+    tokio::sync::mpsc::Receiver<(axum::http::HeaderMap, axum::body::Bytes)>,
+) {
+    let (tx, rx) = tokio::sync::mpsc::channel(8);
+    let app = axum::Router::new().route(
+        "/wh",
+        axum::routing::post(
+            move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+                let tx = tx.clone();
+                async move {
+                    let _ = tx.send((headers, body)).await;
+                    StatusCode::ACCEPTED
+                }
+            },
+        ),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}/wh"), rx)
+}
+
 async fn spawn_runner_stub_returning_500() -> String {
     let app = axum::Router::new().route(
         "/wh",
@@ -565,6 +593,94 @@ async fn shape_a_strict_match_omitted_defaults_to_warn_only() {
     assert!(!ctx.strict_match);
 }
 
+// ── 2026-04-29: dispatch payload carries `at_step` ──
+
+#[tokio::test]
+async fn dispatch_payload_carries_at_step() {
+    // Regression for the dev1 bug where the runner can't drive
+    // multi-turn replay because the dispatch payload doesn't tell it
+    // which conversation turn the user clicked on. The dispatcher now
+    // forwards the timeline's `fork_at_step` (= the `at_step` the
+    // user requested) so a future runner-side change can use it to
+    // reconstruct conversation history and replay from the right
+    // iteration. This test pins the wire-format guarantee end-to-end:
+    // POST shape A with at_step=4 → captured runner body has
+    // `"at_step": 4`.
+    let (api, _callbacks, store, _tmp) = setup();
+    let (webhook_url, mut rx) = spawn_runner_stub_capturing_body().await;
+    let (runner_id, _raw) = register_runner(&store, &webhook_url);
+    // Need >= 4 steps so a fork at_step=4 is valid.
+    let (session_id, root_timeline_id) = seed_session_with_n_steps(&store, 4);
+
+    let (status, _body) = json_post(
+        api,
+        &format!("/api/sessions/{session_id}/replay-jobs"),
+        json!({
+            "runner_id": runner_id,
+            "source_timeline_id": root_timeline_id,
+            "at_step": 4,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    let (_headers, body_bytes) =
+        tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+            .await
+            .expect("dispatcher must call the runner within 3s")
+            .expect("stub channel closed");
+    let body_json: Value = serde_json::from_slice(&body_bytes)
+        .expect("dispatch body must be valid JSON");
+    assert_eq!(
+        body_json["at_step"].as_u64(),
+        Some(4),
+        "dispatch payload must carry the user-clicked at_step (got: {body_json})"
+    );
+    // Sanity: the other fields the SDK already reads must still be present.
+    assert!(body_json["job_id"].is_string());
+    assert!(body_json["session_id"].is_string());
+    assert!(body_json["replay_context_id"].is_string());
+    assert!(body_json["replay_context_timeline_id"].is_string());
+    assert!(body_json["base_url"].is_string());
+}
+
+#[tokio::test]
+async fn dispatch_payload_at_step_for_reuse_context_reads_fork_at_step() {
+    // When dispatching against a pre-existing replay context (shape B),
+    // there's no `at_step` on the request body — but the dispatch
+    // payload still needs `at_step` so the runner can drive multi-turn
+    // replay. The handler reads it from the context's fork timeline's
+    // `fork_at_step` field. For root timelines (no parent) the
+    // fallback is 1.
+    let (api, _callbacks, store, _tmp) = setup();
+    let (webhook_url, mut rx) = spawn_runner_stub_capturing_body().await;
+    let (runner_id, _raw) = register_runner(&store, &webhook_url);
+    // seed_session_and_context creates a context against the ROOT
+    // timeline (parent_timeline_id=None, fork_at_step=None). The
+    // handler should default at_step to 1.
+    let (session_id, _root, ctx_id) = seed_session_and_context(&store);
+
+    let (status, _body) = json_post(
+        api,
+        &format!("/api/sessions/{session_id}/replay-jobs"),
+        json!({"runner_id": runner_id, "replay_context_id": ctx_id}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    let (_headers, body_bytes) =
+        tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+            .await
+            .expect("dispatcher must call the runner within 3s")
+            .expect("stub channel closed");
+    let body_json: Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(
+        body_json["at_step"].as_u64(),
+        Some(1),
+        "ReuseContext path: at_step falls back to 1 when timeline has no fork_at_step (got: {body_json})"
+    );
+}
+
 // ── Review #154 F3: Shape B cursor + TTL validation ──
 
 #[tokio::test]
@@ -622,6 +738,13 @@ async fn shape_b_rejects_expired_context() {
 // Helper: session with one recorded step so Shape A's fork(at_step=1)
 // has something to fork from.
 fn seed_session_with_step(store: &Arc<Mutex<Store>>) -> (String, String) {
+    seed_session_with_n_steps(store, 1)
+}
+
+/// Seed a session + root timeline + N owned LLM-call steps. Returns
+/// `(session_id, timeline_id)`. Used by tests that need a session
+/// with enough steps to fork at a meaningful at_step value.
+fn seed_session_with_n_steps(store: &Arc<Mutex<Store>>, n: u32) -> (String, String) {
     use rewind_store::{Session, SessionSource, SessionStatus, Step, StepStatus, Timeline};
     let s = store.lock().unwrap();
     let session = Session {
@@ -641,11 +764,13 @@ fn seed_session_with_step(store: &Arc<Mutex<Store>>) -> (String, String) {
     let timeline = Timeline::new_root(&session.id);
     s.create_session(&session).unwrap();
     s.create_timeline(&timeline).unwrap();
-    let mut step = Step::new_llm_call(&timeline.id, &session.id, 1, "stub-model");
-    step.status = StepStatus::Success;
-    step.duration_ms = 10;
-    s.create_step(&step).unwrap();
-    s.update_session_stats(&session.id, 1, 0).unwrap();
+    for i in 1..=n {
+        let mut step = Step::new_llm_call(&timeline.id, &session.id, i, "stub-model");
+        step.status = StepStatus::Success;
+        step.duration_ms = 10;
+        s.create_step(&step).unwrap();
+    }
+    s.update_session_stats(&session.id, n, 0).unwrap();
     (session.id, timeline.id)
 }
 

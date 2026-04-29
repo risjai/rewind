@@ -253,7 +253,7 @@ export function StepDetailPanel({ stepId }: { stepId: string }) {
           isOpen
           onClose={() => setModalMode(null)}
           sessionId={step.session_id}
-          timelineId={step.timeline_id}
+          timelineId={contextTimelineId}
           atStep={step.step_number}
         />
       )}
@@ -262,14 +262,14 @@ export function StepDetailPanel({ stepId }: { stepId: string }) {
           isOpen
           onClose={() => setModalMode(null)}
           sessionId={step.session_id}
-          timelineId={step.timeline_id}
+          timelineId={contextTimelineId}
           atStep={step.step_number}
         />
       )}
       {modalMode === 'runReplay' && (
         <ReplayJobModal
           sessionId={step.session_id}
-          sourceTimelineId={step.timeline_id}
+          sourceTimelineId={contextTimelineId}
           atStep={step.step_number}
           onClose={() => setModalMode(null)}
         />

@@ -142,6 +142,19 @@ class DispatchPayload:
     the replay context targets — runners pass it to
     ``ExplicitClient.attach_replay_context`` so live cache misses
     record into the fork.
+
+    **Added 2026-04-29:** ``at_step`` is the original fork-point of
+    the replay-context's timeline — i.e. the step number the user
+    clicked Run replay at in the dashboard. Distinct from the
+    replay-context's ``from_step`` (always 0 because the agent
+    re-runs from scratch). Runners use ``at_step`` to drive
+    multi-turn replay: when ``at_step > 1``, fetch the source
+    timeline's steps 1..at_step-1, reconstruct the conversation
+    history, and invoke the agent at the right turn so edits to
+    user messages in turn 2+ actually take effect.
+
+    Defaults to ``None`` for back-compat with older servers (pre
+    v0.14.8) that don't send the field.
     """
 
     job_id: str
@@ -149,6 +162,7 @@ class DispatchPayload:
     replay_context_id: str
     replay_context_timeline_id: str
     base_url: str
+    at_step: Optional[int] = None
 
     @classmethod
     def from_json(cls, body: dict[str, Any]) -> "DispatchPayload":
@@ -162,6 +176,10 @@ class DispatchPayload:
             # being set, with the documented consequence.
             replay_context_timeline_id=body.get("replay_context_timeline_id", ""),
             base_url=body["base_url"],
+            # Tolerate older servers (pre v0.14.8) that don't send
+            # at_step. Runners that depend on it for multi-turn
+            # replay should branch on `payload.at_step is not None`.
+            at_step=body.get("at_step"),
         )
 
 

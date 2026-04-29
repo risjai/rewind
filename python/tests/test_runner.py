@@ -349,6 +349,62 @@ def test_dispatch_payload_tolerates_missing_timeline_id_for_back_compat() -> Non
     assert payload.replay_context_timeline_id == ""
 
 
+def test_dispatch_payload_decodes_at_step() -> None:
+    """v0.14.8+ servers include `at_step` in the dispatch body — the
+    fork-point of the replay-context's timeline. Runners use it to
+    drive multi-turn replay (start the agent at the right turn so
+    edits to user messages in turn 2+ take effect)."""
+    body = {
+        "job_id": "j",
+        "session_id": "s",
+        "replay_context_id": "r",
+        "replay_context_timeline_id": "tl-fork",
+        "at_step": 4,
+        "base_url": "http://x.example",
+    }
+    payload = runner.DispatchPayload.from_json(body)
+    assert payload.at_step == 4
+
+
+def test_dispatch_payload_at_step_defaults_to_none_for_back_compat() -> None:
+    """Older servers (pre v0.14.8) don't send `at_step`. The SDK
+    decodes the body anyway; runners that need at_step branch on
+    `payload.at_step is not None` and fall back to single-turn
+    behavior when it's missing."""
+    body = {
+        "job_id": "j",
+        "session_id": "s",
+        "replay_context_id": "r",
+        "replay_context_timeline_id": "tl-fork",
+        "base_url": "http://x.example",
+    }
+    payload = runner.DispatchPayload.from_json(body)
+    assert payload.at_step is None
+
+
+def test_dispatch_payload_tolerates_extra_unknown_keys() -> None:
+    """Forward-compat: future server versions may add fields. Older
+    runner SDKs hitting newer servers must keep working — extra
+    keys in the body are ignored, not rejected. This pins the
+    contract that lets us add fields without breaking deployed
+    runners (no HMAC concern: the server signs the wire bytes;
+    the runner verifies against raw `request.body`, so extra
+    fields are part of the signed payload on both ends)."""
+    body = {
+        "job_id": "j",
+        "session_id": "s",
+        "replay_context_id": "r",
+        "replay_context_timeline_id": "tl-fork",
+        "at_step": 4,
+        "base_url": "http://x.example",
+        "future_field_added_in_v0_14_99": "ignored",
+        "another_future_field": {"nested": [1, 2, 3]},
+    }
+    payload = runner.DispatchPayload.from_json(body)
+    assert payload.job_id == "j"
+    assert payload.at_step == 4
+
+
 # ──────────────────────────────────────────────────────────────────
 # asgi_handler — end-to-end with a mocked event endpoint
 # ──────────────────────────────────────────────────────────────────

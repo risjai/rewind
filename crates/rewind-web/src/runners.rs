@@ -558,7 +558,7 @@ async fn create_replay_job(
     // 1. Resolve session, runner, and replay-context (creating fork+
     //    context if shape A). All store work in a single lock scope
     //    so we don't race with deletions between checks.
-    let (job, runner, fork_timeline_id) = {
+    let (job, runner, fork_timeline_id, at_step) = {
         let store = state
             .store
             .lock()
@@ -568,7 +568,7 @@ async fn create_replay_job(
             .map_err(internal)?
             .ok_or_else(|| not_found("session"))?;
 
-        let (runner_id, replay_context_id, fork_timeline_id) = match req {
+        let (runner_id, replay_context_id, fork_timeline_id, at_step) = match req {
             CreateReplayJobRequest::CreateAndDispatch(a) => {
                 // Validate runner.
                 let runner = store
@@ -631,7 +631,7 @@ async fn create_replay_job(
                         .set_replay_context_strict_match(&ctx_id, true)
                         .map_err(internal)?;
                 }
-                (a.runner_id, ctx_id, Some(fork.id))
+                (a.runner_id, ctx_id, Some(fork.id), a.at_step)
             }
             CreateReplayJobRequest::ReuseContext(b) => {
                 let runner = store
@@ -691,7 +691,21 @@ async fn create_replay_job(
                         b.replay_context_id
                     )));
                 }
-                (b.runner_id, b.replay_context_id, Some(ctx.timeline_id))
+                // Resolve at_step from the context's fork timeline. The
+                // dispatch payload carries the user-clicked step number
+                // so the runner can drive multi-turn replay; for
+                // ReuseContext that step is baked into the timeline's
+                // fork_at_step. Root timelines (parent_timeline_id =
+                // None) shouldn't reach here because contexts always
+                // target a fork; defensive fallback to 1.
+                let at_step = store
+                    .get_timelines(&session.id)
+                    .map_err(internal)?
+                    .iter()
+                    .find(|t| t.id == ctx.timeline_id)
+                    .and_then(|t| t.fork_at_step)
+                    .unwrap_or(1);
+                (b.runner_id, b.replay_context_id, Some(ctx.timeline_id), at_step)
             }
         };
 
@@ -741,7 +755,7 @@ async fn create_replay_job(
                 None,
             )
             .map_err(internal)?;
-        (job, runner, fork_timeline_id)
+        (job, runner, fork_timeline_id, at_step)
     };
 
     // 3. Fire the dispatcher in the background. The handler returns
@@ -762,9 +776,10 @@ async fn create_replay_job(
     let timeline_for_payload = fork_timeline_id
         .clone()
         .unwrap_or_default();
+    let at_step_for_payload = at_step;
     tokio::spawn(async move {
         let outcome = dispatcher
-            .dispatch(&runner_clone, &job_clone, &timeline_for_payload)
+            .dispatch(&runner_clone, &job_clone, &timeline_for_payload, at_step_for_payload)
             .await;
         let after = {
             let store = match store_arc.lock() {
