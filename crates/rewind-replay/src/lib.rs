@@ -109,11 +109,13 @@ impl<'a> ReplayEngine<'a> {
 
             // Insert parent (inherited) first, then own — HashMap::insert
             // returning the previous value gives us "owned overrides
-            // inherited at the same step_number" for free.
-            let mut by_step_number: HashMap<u32, Step> = parent_steps.into_iter()
-                .filter(|s| s.step_number <= fork_at)
-                .map(|s| (s.step_number, s))
-                .collect();
+            // inherited at the same step_number" for free. Pre-size the
+            // map to avoid rehash on long sessions (review #162 S3).
+            let cap = (fork_at as usize).saturating_add(own_steps.len());
+            let mut by_step_number: HashMap<u32, Step> = HashMap::with_capacity(cap);
+            for s in parent_steps.into_iter().filter(|s| s.step_number <= fork_at) {
+                by_step_number.insert(s.step_number, s);
+            }
             for s in own_steps {
                 by_step_number.insert(s.step_number, s);
             }
