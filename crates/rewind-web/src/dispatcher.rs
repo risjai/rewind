@@ -80,11 +80,14 @@ type HmacSha256 = Hmac<Sha256>;
 /// **`at_step`** (added 2026-04-29): the original fork-point of the
 /// replay-context's timeline (i.e. the step number the user clicked
 /// "Run replay" at in the dashboard). Distinct from the replay
-/// context's `from_step` which is always 0 (the agent re-runs from
-/// scratch). Runners use this to know which conversation turn the
-/// user wanted to start from — needed for multi-turn replay where
-/// edits to step #N's user message in turn 2+ should drive the
-/// agent at iteration N (companion ray-agent change).
+/// context's `from_step` which the `/api/sessions/{sid}/replay-jobs`
+/// handler hardcodes to 0 (see runners.rs `create_replay_job` —
+/// the agent re-runs the loop from scratch so the replay-lookup
+/// ordinal cursor must start at recorded step #1). Runners use
+/// `at_step` to know which conversation turn the user wanted to
+/// start from — needed for multi-turn replay where edits to
+/// step #N's user message in turn 2+ should drive the agent at
+/// iteration N (companion ray-agent change).
 #[derive(Debug, serde::Serialize)]
 struct DispatchBody<'a> {
     pub job_id: &'a str,
