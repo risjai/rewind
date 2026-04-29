@@ -1919,3 +1919,71 @@ async fn test_cascade_count_target_aware() {
     assert!(main_count > fork_count, "main should have more downstream than fork (main={main_count}, fork={fork_count})");
     assert!(!on_main, "cascade-count with target=fork should report on_main=false");
 }
+
+#[tokio::test]
+async fn test_patch_promote_cross_fork_mutation_blocked() {
+    let (app, store, _tmp) = setup();
+    let (sid, _root_tid) = seed_session(&app, 3).await;
+
+    let (_, fork_a) = post_json(&app, &format!("/api/sessions/{sid}/fork"), json!({
+        "at_step": 2, "label": "fork-a"
+    })).await;
+    let (_, fork_b) = post_json(&app, &format!("/api/sessions/{sid}/fork"), json!({
+        "at_step": 2, "label": "fork-b"
+    })).await;
+    let fork_a_tid = fork_a["fork_timeline_id"].as_str().unwrap();
+    let fork_b_tid = fork_b["fork_timeline_id"].as_str().unwrap();
+
+    seed_steps_on_timeline(&app, &sid, fork_a_tid, 1).await;
+    seed_steps_on_timeline(&app, &sid, fork_b_tid, 1).await;
+
+    let (_, fork_a_steps) = get_json(&app, &format!("/api/sessions/{sid}/steps?timeline={fork_a_tid}")).await;
+    let fork_a_owned = fork_a_steps.as_array().unwrap().iter()
+        .find(|s| s["timeline_id"].as_str().unwrap() == fork_a_tid)
+        .unwrap();
+    let fork_a_step_id = fork_a_owned["id"].as_str().unwrap();
+
+    let (status, body) = patch_json(&app, &format!("/api/steps/{fork_a_step_id}/edit"), json!({
+        "response_body": {"sentinel": "CROSS_FORK_MUTATION"},
+        "target_timeline_id": fork_b_tid
+    })).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST,
+        "cross-fork mutation must be blocked (got {status}: {body})");
+    let msg = body.get("raw").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(msg.contains("not visible"), "error should mention visibility: {msg}");
+
+    let s = store.lock().unwrap();
+    let (_, fork_b_steps_after) = {
+        drop(s);
+        get_json(&app, &format!("/api/sessions/{sid}/steps?timeline={fork_b_tid}")).await
+    };
+    let fork_b_owned = fork_b_steps_after.as_array().unwrap().iter()
+        .find(|s| s["timeline_id"].as_str().unwrap() == fork_b_tid)
+        .unwrap();
+    assert_ne!(
+        fork_b_owned.get("response_preview").and_then(|v| v.as_str()).unwrap_or(""),
+        "CROSS_FORK_MUTATION",
+        "fork_b's step should NOT have been overwritten"
+    );
+}
+
+#[tokio::test]
+async fn test_cascade_count_rejects_foreign_session_timeline() {
+    let (app, _store, _tmp) = setup();
+    let (sid1, _) = seed_session(&app, 3).await;
+    let (sid2, _) = seed_session(&app, 3).await;
+
+    let (_, steps1) = get_json(&app, &format!("/api/sessions/{sid1}/steps")).await;
+    let step1_id = steps1.as_array().unwrap()[0]["id"].as_str().unwrap();
+
+    let (_, session2) = get_json(&app, &format!("/api/sessions/{sid2}")).await;
+    let s2_root_tid = session2["timelines"].as_array().unwrap()[0]["id"].as_str().unwrap();
+
+    let (status, body) = get_json(&app, &format!(
+        "/api/steps/{step1_id}/cascade-count?target_timeline_id={s2_root_tid}"
+    )).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST,
+        "cross-session cascade-count should be rejected: {body}");
+}

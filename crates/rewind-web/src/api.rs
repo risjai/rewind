@@ -1666,12 +1666,12 @@ async fn patch_step(
             let engine = ReplayEngine::new(&store);
             let visible = engine.get_full_timeline_steps(effective_timeline, &step.session_id)
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-            if !visible.iter().any(|s| s.step_number == step.step_number) {
+            if !visible.iter().any(|s| s.id == step.id) {
                 return Err((StatusCode::BAD_REQUEST,
-                    format!("step #{} not visible on target timeline '{}' \
+                    format!("step '{}' (#{}) not visible on target timeline '{}' \
                         (this can happen on nested forks where the visibility \
                         check does not yet walk past the immediate parent)",
-                        step.step_number, effective_timeline)
+                        step.id, step.step_number, effective_timeline)
                 ));
             }
 
@@ -1725,6 +1725,28 @@ async fn cascade_count(
     let effective_timeline = q.target_timeline_id
         .as_deref()
         .unwrap_or(&step.timeline_id);
+
+    if effective_timeline != step.timeline_id {
+        let timelines = store.get_timelines(&step.session_id).map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
+        })?;
+        if !timelines.iter().any(|t| t.id == effective_timeline) {
+            return Err((StatusCode::BAD_REQUEST, format!(
+                "target_timeline_id '{}' not found in session '{}'",
+                effective_timeline, step.session_id
+            )));
+        }
+
+        let engine = ReplayEngine::new(&store);
+        let visible = engine.get_full_timeline_steps(effective_timeline, &step.session_id)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+        if !visible.iter().any(|s| s.id == step.id) {
+            return Err((StatusCode::BAD_REQUEST, format!(
+                "step '{}' not visible on target timeline '{}'",
+                step.id, effective_timeline
+            )));
+        }
+    }
 
     let count = store.count_steps_after(effective_timeline, step.step_number)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
