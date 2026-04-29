@@ -1730,3 +1730,192 @@ async fn test_fork_and_edit_step_inherited_step_below_fork_boundary() {
     let body_back: serde_json::Value = serde_json::from_slice(&resp_bytes).unwrap();
     assert_eq!(body_back, json!({"edit": "deep-inherited"}));
 }
+
+// ── Edit-on-selected-timeline (promote-and-mutate) ─────────
+
+#[tokio::test]
+async fn test_patch_promote_inherited_step() {
+    let (app, store, _tmp) = setup();
+    let (sid, _root_tid) = seed_session(&app, 5).await;
+
+    let (_, fork) = post_json(&app, &format!("/api/sessions/{sid}/fork"), json!({
+        "at_step": 3, "label": "promote-test"
+    })).await;
+    let fork_tid = fork["fork_timeline_id"].as_str().unwrap();
+
+    let (_, steps) = get_json(&app, &format!("/api/sessions/{sid}/steps")).await;
+    let main_step2_id = steps.as_array().unwrap()[1]["id"].as_str().unwrap();
+
+    let (status, body) = patch_json(&app, &format!("/api/steps/{main_step2_id}/edit"), json!({
+        "response_body": {"promoted": true},
+        "target_timeline_id": fork_tid
+    })).await;
+
+    assert_eq!(status, StatusCode::OK, "promote should succeed: {body}");
+    let resolved_id = body["resolved_step_id"].as_str().unwrap();
+    assert_ne!(resolved_id, main_step2_id, "promote creates a new owned step");
+
+    let s = store.lock().unwrap();
+    let promoted_step = s.get_step(resolved_id).unwrap().unwrap();
+    assert_eq!(promoted_step.timeline_id, fork_tid);
+    assert_eq!(promoted_step.step_number, 2);
+
+    let main_step = s.get_step(main_step2_id).unwrap().unwrap();
+    let main_resp = s.blobs.get(&main_step.response_blob).unwrap();
+    let main_body: serde_json::Value = serde_json::from_slice(&main_resp).unwrap();
+    assert!(!main_body.get("promoted").is_some(), "main step should be untouched");
+}
+
+#[tokio::test]
+async fn test_patch_promote_idempotent_re_edit() {
+    let (app, store, _tmp) = setup();
+    let (sid, _root_tid) = seed_session(&app, 3).await;
+
+    let (_, fork) = post_json(&app, &format!("/api/sessions/{sid}/fork"), json!({
+        "at_step": 2, "label": "idempotent-test"
+    })).await;
+    let fork_tid = fork["fork_timeline_id"].as_str().unwrap();
+
+    let (_, steps) = get_json(&app, &format!("/api/sessions/{sid}/steps")).await;
+    let main_step1_id = steps.as_array().unwrap()[0]["id"].as_str().unwrap();
+
+    let (s1, b1) = patch_json(&app, &format!("/api/steps/{main_step1_id}/edit"), json!({
+        "response_body": {"edit": 1}, "target_timeline_id": fork_tid
+    })).await;
+    assert_eq!(s1, StatusCode::OK);
+    let first_resolved = b1["resolved_step_id"].as_str().unwrap().to_string();
+
+    let (s2, b2) = patch_json(&app, &format!("/api/steps/{main_step1_id}/edit"), json!({
+        "response_body": {"edit": 2}, "target_timeline_id": fork_tid
+    })).await;
+    assert_eq!(s2, StatusCode::OK);
+    let second_resolved = b2["resolved_step_id"].as_str().unwrap().to_string();
+
+    assert_eq!(first_resolved, second_resolved, "re-edit should mutate the same owned step");
+}
+
+#[tokio::test]
+async fn test_patch_promote_visibility_400() {
+    let (app, _store, _tmp) = setup();
+    let (sid, _root_tid) = seed_session(&app, 5).await;
+
+    let (_, fork_a) = post_json(&app, &format!("/api/sessions/{sid}/fork"), json!({
+        "at_step": 2, "label": "fork-a"
+    })).await;
+    let (_, fork_b) = post_json(&app, &format!("/api/sessions/{sid}/fork"), json!({
+        "at_step": 4, "label": "fork-b"
+    })).await;
+    let fork_b_tid = fork_b["fork_timeline_id"].as_str().unwrap();
+
+    seed_steps_on_timeline(&app, &sid, fork_b_tid, 1).await;
+
+    let (_, fork_b_steps) = get_json(&app, &format!("/api/sessions/{sid}/steps?timeline={fork_b_tid}")).await;
+    let fork_b_step_id = fork_b_steps.as_array().unwrap().last().unwrap()["id"].as_str().unwrap();
+
+    let fork_a_tid = fork_a["fork_timeline_id"].as_str().unwrap();
+    let (status, body) = patch_json(&app, &format!("/api/steps/{fork_b_step_id}/edit"), json!({
+        "response_body": {"cross": true},
+        "target_timeline_id": fork_a_tid
+    })).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "cross-fork should fail: {body}");
+    let msg = body.get("raw").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(msg.contains("not visible"), "error should mention visibility: {msg}");
+}
+
+#[tokio::test]
+async fn test_patch_promote_main_protection_follows_target() {
+    let (app, _store, _tmp) = setup();
+    unsafe { std::env::remove_var("REWIND_ALLOW_MAIN_EDITS"); }
+
+    let (sid, root_tid) = seed_session(&app, 3).await;
+
+    let (_, fork) = post_json(&app, &format!("/api/sessions/{sid}/fork"), json!({
+        "at_step": 2, "label": "target-main-test"
+    })).await;
+    let fork_tid = fork["fork_timeline_id"].as_str().unwrap();
+
+    seed_steps_on_timeline(&app, &sid, fork_tid, 1).await;
+    let (_, fork_steps) = get_json(&app, &format!("/api/sessions/{sid}/steps?timeline={fork_tid}")).await;
+    let fork_owned_id = fork_steps.as_array().unwrap().last().unwrap()["id"].as_str().unwrap();
+
+    let (status, _) = patch_json(&app, &format!("/api/steps/{fork_owned_id}/edit"), json!({
+        "response_body": {"target_main": true},
+        "target_timeline_id": root_tid
+    })).await;
+    assert_eq!(status, StatusCode::CONFLICT, "targeting main should be blocked");
+
+    unsafe { std::env::set_var("REWIND_ALLOW_MAIN_EDITS", "true"); }
+    let (status2, _) = patch_json(&app, &format!("/api/steps/{fork_owned_id}/edit"), json!({
+        "response_body": {"target_main": true},
+        "target_timeline_id": root_tid
+    })).await;
+    assert_eq!(status2, StatusCode::OK, "targeting main with env bypass should succeed");
+    unsafe { std::env::remove_var("REWIND_ALLOW_MAIN_EDITS"); }
+}
+
+#[tokio::test]
+async fn test_patch_promote_preserves_step_type_and_tool_name() {
+    let (app, store, _tmp) = setup();
+
+    let (s, b) = post_json(&app, "/api/sessions/start", json!({"name": "tool-promote"})).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let sid = b["session_id"].as_str().unwrap().to_string();
+    let root_tid = b["root_timeline_id"].as_str().unwrap().to_string();
+
+    let (s2, _) = post_json(&app, &format!("/api/sessions/{sid}/tool-calls"), json!({
+        "tool_name": "get_pods",
+        "request_body": {"cluster": "dev1"},
+        "response_body": {"pods": ["a", "b"]},
+        "duration_ms": 50
+    })).await;
+    assert_eq!(s2, StatusCode::CREATED);
+
+    let (_, fork) = post_json(&app, &format!("/api/sessions/{sid}/fork"), json!({
+        "at_step": 1, "label": "tool-fork"
+    })).await;
+    let fork_tid = fork["fork_timeline_id"].as_str().unwrap();
+
+    let (_, steps) = get_json(&app, &format!("/api/sessions/{sid}/steps")).await;
+    let tool_step_id = steps.as_array().unwrap()[0]["id"].as_str().unwrap();
+
+    let (status, body) = patch_json(&app, &format!("/api/steps/{tool_step_id}/edit"), json!({
+        "response_body": {"pods": ["c"]},
+        "target_timeline_id": fork_tid
+    })).await;
+    assert_eq!(status, StatusCode::OK, "promote tool step: {body}");
+
+    let resolved_id = body["resolved_step_id"].as_str().unwrap();
+    let s = store.lock().unwrap();
+    let promoted = s.get_step(resolved_id).unwrap().unwrap();
+    assert_eq!(promoted.step_type, rewind_store::StepType::ToolCall, "step_type must be preserved");
+    assert_eq!(promoted.tool_name.as_deref(), Some("get_pods"), "tool_name must be preserved");
+}
+
+#[tokio::test]
+async fn test_cascade_count_target_aware() {
+    let (app, _store, _tmp) = setup();
+    let (sid, _root_tid) = seed_session(&app, 5).await;
+
+    let (_, fork) = post_json(&app, &format!("/api/sessions/{sid}/fork"), json!({
+        "at_step": 3, "label": "cascade-target"
+    })).await;
+    let fork_tid = fork["fork_timeline_id"].as_str().unwrap();
+
+    seed_steps_on_timeline(&app, &sid, fork_tid, 2).await;
+
+    let (_, steps) = get_json(&app, &format!("/api/sessions/{sid}/steps")).await;
+    let step2_id = steps.as_array().unwrap()[1]["id"].as_str().unwrap();
+
+    let (s1, b1) = get_json(&app, &format!("/api/steps/{step2_id}/cascade-count")).await;
+    assert_eq!(s1, StatusCode::OK);
+    let main_count = b1["deleted_downstream_count"].as_u64().unwrap();
+
+    let (s2, b2) = get_json(&app, &format!("/api/steps/{step2_id}/cascade-count?target_timeline_id={fork_tid}")).await;
+    assert_eq!(s2, StatusCode::OK);
+    let fork_count = b2["deleted_downstream_count"].as_u64().unwrap();
+    let on_main = b2["on_main"].as_bool().unwrap();
+
+    assert!(main_count > fork_count, "main should have more downstream than fork (main={main_count}, fork={fork_count})");
+    assert!(!on_main, "cascade-count with target=fork should report on_main=false");
+}

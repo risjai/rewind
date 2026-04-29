@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 
 use crate::blobs::BlobStore;
@@ -843,6 +843,92 @@ impl Store {
 
         tx.commit()?;
         Ok((step.timeline_id, step.step_number, step.session_id, deleted))
+    }
+
+    /// Promote an inherited step to an owned step on `target_timeline_id`,
+    /// apply blob edits, and cascade-delete downstream owned steps on the
+    /// target. If the target already owns a step at the same `step_number`,
+    /// the existing row is updated in place (idempotent re-edit). Otherwise
+    /// a new row is inserted with all metadata copied from `original`.
+    ///
+    /// Single SQLite transaction. Returns `(resolved_step_id, deleted_count)`.
+    pub fn upsert_step_on_timeline_and_cascade(
+        &self,
+        original: &Step,
+        target_timeline_id: &str,
+        request_body: Option<&[u8]>,
+        response_body: Option<&[u8]>,
+    ) -> Result<(String, u32)> {
+        let tx = self.conn.unchecked_transaction()?;
+
+        let req_blob_hash = match request_body {
+            Some(req) => self.blobs.put(req)?,
+            None => original.request_blob.clone(),
+        };
+        let resp_blob_hash = match response_body {
+            Some(resp) => self.blobs.put(resp)?,
+            None => original.response_blob.clone(),
+        };
+        let request_hash = match request_body {
+            Some(req) => Some(crate::normalize_and_hash(req)),
+            None => original.request_hash.clone(),
+        };
+
+        let existing: Option<String> = tx.query_row(
+            "SELECT id FROM steps WHERE timeline_id = ?1 AND step_number = ?2",
+            params![target_timeline_id, original.step_number],
+            |row| row.get(0),
+        ).optional()?;
+
+        let resolved_id = match existing {
+            Some(id) => {
+                tx.execute(
+                    "UPDATE steps SET request_blob = ?1, request_hash = ?2, \
+                     response_blob = ?3, response_blob_format = 0 WHERE id = ?4",
+                    params![req_blob_hash, request_hash, resp_blob_hash, id],
+                )?;
+                id
+            }
+            None => {
+                let new_id = uuid::Uuid::new_v4().to_string();
+                tx.execute(
+                    "INSERT INTO steps (id, timeline_id, session_id, step_number, \
+                     step_type, status, created_at, duration_ms, tokens_in, \
+                     tokens_out, model, request_blob, response_blob, error, \
+                     span_id, tool_name, request_hash, response_blob_format) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, \
+                             ?12, ?13, ?14, ?15, ?16, ?17, 0)",
+                    params![
+                        new_id,
+                        target_timeline_id,
+                        original.session_id,
+                        original.step_number,
+                        original.step_type.as_str(),
+                        original.status.as_str(),
+                        chrono::Utc::now().to_rfc3339(),
+                        original.duration_ms,
+                        original.tokens_in,
+                        original.tokens_out,
+                        original.model,
+                        req_blob_hash,
+                        resp_blob_hash,
+                        original.error,
+                        Option::<String>::None,
+                        original.tool_name,
+                        request_hash,
+                    ],
+                )?;
+                new_id
+            }
+        };
+
+        let deleted = tx.execute(
+            "DELETE FROM steps WHERE timeline_id = ?1 AND step_number > ?2",
+            params![target_timeline_id, original.step_number],
+        )? as u32;
+
+        tx.commit()?;
+        Ok((resolved_id, deleted))
     }
 
     /// Count steps that *would* be deleted by `delete_steps_after`.
