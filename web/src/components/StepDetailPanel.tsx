@@ -23,16 +23,26 @@ export function StepDetailPanel({ stepId }: { stepId: string }) {
   const [errorToastMsg, setErrorToastMsg] = useState<string | null>(null)
   const [originalText, setOriginalText] = useState('')
   const selectTimeline = useStore((s) => s.selectTimeline)
+  const selectedTimelineId = useStore((s) => s.selectedTimelineId)
 
   const { data: step, isLoading } = useQuery({
     queryKey: ['step-detail', stepId],
     queryFn: () => api.stepDetail(stepId),
   })
 
+  const { data: sessionForRoot } = useQuery({
+    queryKey: ['session', step?.session_id],
+    queryFn: () => api.session(step!.session_id),
+    enabled: !!step?.session_id,
+  })
+  const rootTimelineId = sessionForRoot?.timelines.find(t => t.parent_timeline_id === null)?.id
+  const contextTimelineId = selectedTimelineId ?? rootTimelineId ?? step?.timeline_id ?? ''
+
   const stepEdit = useStepEdit({
     stepId,
     sessionId: step?.session_id ?? '',
     timelineId: step?.timeline_id ?? '',
+    contextTimelineId,
   })
 
   const startEditing = useCallback((field: 'request' | 'response', data: unknown) => {

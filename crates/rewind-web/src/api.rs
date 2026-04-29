@@ -1585,11 +1585,20 @@ fn check_edit_blob_size(
 struct PatchStepRequest {
     request_body: Option<serde_json::Value>,
     response_body: Option<serde_json::Value>,
+    /// Apply the edit on this timeline instead of the step's physical
+    /// owner. For inherited steps shown on a fork, this promotes the
+    /// step to an owned step on the target. Defaults to the step's
+    /// own `timeline_id` (in-place edit, backward-compatible).
+    target_timeline_id: Option<String>,
 }
 
 #[derive(Serialize)]
 struct PatchStepResponse {
     step_id: String,
+    /// The step that actually carries the edited content. Differs from
+    /// `step_id` only when promote-and-mutate inserted a new owned
+    /// step on the target timeline.
+    resolved_step_id: String,
     deleted_downstream_count: u32,
 }
 
@@ -1616,11 +1625,15 @@ async fn patch_step(
         (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
     })?.ok_or_else(|| (StatusCode::NOT_FOUND, format!("Step not found: {id}")))?;
 
+    let effective_timeline = body.target_timeline_id
+        .as_deref()
+        .unwrap_or(&step.timeline_id);
+
     let allow_main = std::env::var("REWIND_ALLOW_MAIN_EDITS")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     if !allow_main {
-        let is_main = store.is_main_timeline(&step.timeline_id).map_err(|e| {
+        let is_main = store.is_main_timeline(effective_timeline).map_err(|e| {
             (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
         })?;
         if is_main {
@@ -1631,21 +1644,56 @@ async fn patch_step(
         }
     }
 
-    let (_timeline_id, _step_number, session_id, deleted) = store.update_step_blobs_and_cascade(
-        &id,
-        request_bytes.as_deref(),
-        response_bytes.as_deref(),
-    ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let (resolved_step_id, effective_tl, session_id, deleted) =
+        if effective_timeline == step.timeline_id {
+            let (tl, _sn, sid, del) = store.update_step_blobs_and_cascade(
+                &id,
+                request_bytes.as_deref(),
+                response_bytes.as_deref(),
+            ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+            (id.clone(), tl, sid, del)
+        } else {
+            let timelines = store.get_timelines(&step.session_id).map_err(|e| {
+                (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
+            })?;
+            if !timelines.iter().any(|t| t.id == effective_timeline) {
+                return Err((StatusCode::BAD_REQUEST, format!(
+                    "target_timeline_id '{}' not found in session '{}'",
+                    effective_timeline, step.session_id
+                )));
+            }
+
+            let engine = ReplayEngine::new(&store);
+            let visible = engine.get_full_timeline_steps(effective_timeline, &step.session_id)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+            if !visible.iter().any(|s| s.id == step.id) {
+                return Err((StatusCode::BAD_REQUEST,
+                    format!("step '{}' (#{}) not visible on target timeline '{}' \
+                        (this can happen on nested forks where the visibility \
+                        check does not yet walk past the immediate parent)",
+                        step.id, step.step_number, effective_timeline)
+                ));
+            }
+
+            let (resolved_id, del) = store.upsert_step_on_timeline_and_cascade(
+                &step,
+                effective_timeline,
+                request_bytes.as_deref(),
+                response_bytes.as_deref(),
+            ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+            (resolved_id, effective_timeline.to_string(), step.session_id.clone(), del)
+        };
 
     let _ = state.event_tx.send(StoreEvent::StepUpdated {
         session_id,
-        step_id: id.clone(),
-        timeline_id: step.timeline_id,
+        step_id: resolved_step_id.clone(),
+        timeline_id: effective_tl,
         deleted_count: deleted,
     });
 
     Ok(Json(PatchStepResponse {
         step_id: id,
+        resolved_step_id,
         deleted_downstream_count: deleted,
     }))
 }
@@ -1656,9 +1704,15 @@ struct CascadeCountResponse {
     on_main: bool,
 }
 
+#[derive(Deserialize)]
+struct CascadeCountQuery {
+    target_timeline_id: Option<String>,
+}
+
 async fn cascade_count(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(q): Query<CascadeCountQuery>,
 ) -> Result<Json<CascadeCountResponse>, (StatusCode, String)> {
     let store = state.store.lock().map_err(|e| {
         (StatusCode::INTERNAL_SERVER_ERROR, format!("Lock error: {e}"))
@@ -1668,9 +1722,35 @@ async fn cascade_count(
         (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
     })?.ok_or_else(|| (StatusCode::NOT_FOUND, format!("Step not found: {id}")))?;
 
-    let count = store.count_steps_after(&step.timeline_id, step.step_number)
+    let effective_timeline = q.target_timeline_id
+        .as_deref()
+        .unwrap_or(&step.timeline_id);
+
+    if effective_timeline != step.timeline_id {
+        let timelines = store.get_timelines(&step.session_id).map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
+        })?;
+        if !timelines.iter().any(|t| t.id == effective_timeline) {
+            return Err((StatusCode::BAD_REQUEST, format!(
+                "target_timeline_id '{}' not found in session '{}'",
+                effective_timeline, step.session_id
+            )));
+        }
+
+        let engine = ReplayEngine::new(&store);
+        let visible = engine.get_full_timeline_steps(effective_timeline, &step.session_id)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+        if !visible.iter().any(|s| s.id == step.id) {
+            return Err((StatusCode::BAD_REQUEST, format!(
+                "step '{}' not visible on target timeline '{}'",
+                step.id, effective_timeline
+            )));
+        }
+    }
+
+    let count = store.count_steps_after(effective_timeline, step.step_number)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-    let on_main = store.is_main_timeline(&step.timeline_id)
+    let on_main = store.is_main_timeline(effective_timeline)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     Ok(Json(CascadeCountResponse {

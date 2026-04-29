@@ -32,7 +32,7 @@ BINARY_NAME = "rewind"
 
 # The native CLI binary version — independent of the Python SDK version.
 # Update this when a new GitHub Release is published with new binaries.
-CLI_VERSION = "0.14.5"
+CLI_VERSION = "0.14.6"
 
 
 def _get_platform_key() -> str:

@@ -6,8 +6,9 @@ export function useStepEdit(params: {
   stepId: string
   sessionId: string
   timelineId: string
+  contextTimelineId: string
 }) {
-  const { stepId, sessionId, timelineId } = params
+  const { stepId, sessionId, timelineId, contextTimelineId } = params
   const queryClient = useQueryClient()
 
   const [confirmOpen, setConfirmOpen] = useState(false)
@@ -26,9 +27,11 @@ export function useStepEdit(params: {
     staleTime: 60_000,
   })
 
+  const promoted = contextTimelineId !== timelineId
+
   const { data: cascade, refetch: refetchCascade } = useQuery({
-    queryKey: ['cascade-count', stepId],
-    queryFn: () => api.cascadeCount(stepId),
+    queryKey: ['cascade-count', stepId, contextTimelineId],
+    queryFn: () => api.cascadeCount(stepId, promoted ? contextTimelineId : undefined),
     enabled: false,
   })
 
@@ -40,7 +43,7 @@ export function useStepEdit(params: {
   const allowMainEdits = health?.allow_main_edits ?? false
   const onMain = (() => {
     if (!sessionDetail) return false
-    const tl = sessionDetail.timelines.find((t) => t.id === timelineId)
+    const tl = sessionDetail.timelines.find((t) => t.id === contextTimelineId)
     return tl ? tl.parent_timeline_id === null : false
   })()
 
@@ -77,12 +80,20 @@ export function useStepEdit(params: {
       let result: { deleted_downstream_count: number }
 
       if (!onMain || allowMainEdits) {
-        const res = await api.patchStep(stepId, payload)
+        const res = await api.patchStep(stepId, {
+          ...payload,
+          ...(promoted ? { target_timeline_id: contextTimelineId } : {}),
+        })
         result = { deleted_downstream_count: res.deleted_downstream_count }
+
+        await queryClient.invalidateQueries({ queryKey: ['step-detail', stepId] })
+        if (res.resolved_step_id !== stepId) {
+          await queryClient.invalidateQueries({ queryKey: ['step-detail', res.resolved_step_id] })
+        }
       } else {
         const step = await api.stepDetail(stepId)
         const res = await api.forkAndEditStep(sessionId, {
-          source_timeline_id: timelineId,
+          source_timeline_id: contextTimelineId,
           at_step: step.step_number,
           ...payload,
         })
@@ -91,7 +102,6 @@ export function useStepEdit(params: {
         result = { deleted_downstream_count: 0 }
       }
 
-      await queryClient.invalidateQueries({ queryKey: ['step-detail', stepId] })
       await queryClient.invalidateQueries({ queryKey: ['session', sessionId] })
       await queryClient.invalidateQueries({ queryKey: ['timelines', sessionId] })
 
@@ -110,7 +120,9 @@ export function useStepEdit(params: {
     allowMainEdits,
     stepId,
     sessionId,
+    contextTimelineId,
     timelineId,
+    promoted,
     queryClient,
   ])
 

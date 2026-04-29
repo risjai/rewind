@@ -120,17 +120,19 @@ export const api = {
     del<DeleteTimelineResponse>(`/sessions/${sessionId}/timelines/${timelineId}`),
 
   // Step editing
-  patchStep: (stepId: string, body: { request_body?: unknown; response_body?: unknown }) =>
+  patchStep: (stepId: string, body: { request_body?: unknown; response_body?: unknown; target_timeline_id?: string }) =>
     request(`/steps/${stepId}/edit`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }).then(async (res) => {
       if (!res.ok) throw new Error(`API error ${res.status}: ${await res.text()}`)
-      return res.json() as Promise<{ step_id: string; deleted_downstream_count: number }>
+      return res.json() as Promise<{ step_id: string; resolved_step_id: string; deleted_downstream_count: number }>
     }),
-  cascadeCount: (stepId: string) =>
-    get<{ deleted_downstream_count: number; on_main: boolean }>(`/steps/${stepId}/cascade-count`),
+  cascadeCount: (stepId: string, targetTimelineId?: string) => {
+    const q = targetTimelineId ? `?target_timeline_id=${encodeURIComponent(targetTimelineId)}` : ''
+    return get<{ deleted_downstream_count: number; on_main: boolean }>(`/steps/${stepId}/cascade-count${q}`)
+  },
   forkAndEditStep: (sessionId: string, body: {
     source_timeline_id: string;
     at_step: number;
