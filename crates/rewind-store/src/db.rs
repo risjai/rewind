@@ -804,54 +804,45 @@ impl Store {
 
     // ── Step editing (step-edit-on-fork) ─────────────────────────
 
-    /// Update a step's request and/or response blobs in place.
+    /// Update a step's blobs + cascade-delete downstream steps, all in
+    /// one SQLite transaction. Rolls back on any failure (blob write,
+    /// SQL constraint, IO error).
     ///
-    /// When `request_body` is `Some`, the new bytes are stored in the blob
-    /// store and the step's `request_blob` + `request_hash` are updated.
-    /// When `response_body` is `Some`, the new bytes are stored and the
-    /// step's `response_blob` is updated. `response_blob_format` is
-    /// always set to `FORMAT_NAKED_LEGACY` (0) for edited blobs since
-    /// the caller provides a parsed JSON Value, not an HTTP envelope.
-    ///
-    /// Returns the step's `(timeline_id, step_number, session_id)` for
-    /// the caller to drive cascade-delete + event emission.
-    pub fn update_step_blobs(
+    /// Returns `(timeline_id, step_number, session_id, deleted_downstream_count)`.
+    pub fn update_step_blobs_and_cascade(
         &self,
         step_id: &str,
         request_body: Option<&[u8]>,
         response_body: Option<&[u8]>,
-    ) -> Result<(String, u32, String)> {
+    ) -> Result<(String, u32, String, u32)> {
         let step = self.get_step(step_id)?
             .ok_or_else(|| anyhow::anyhow!("step not found: {step_id}"))?;
+
+        let tx = self.conn.unchecked_transaction()?;
 
         if let Some(req) = request_body {
             let blob_hash = self.blobs.put(req)?;
             let canonical_hash = crate::normalize_and_hash(req);
-            self.conn.execute(
+            tx.execute(
                 "UPDATE steps SET request_blob = ?1, request_hash = ?2 WHERE id = ?3",
                 params![blob_hash, canonical_hash, step_id],
             )?;
         }
         if let Some(resp) = response_body {
             let blob_hash = self.blobs.put(resp)?;
-            self.conn.execute(
+            tx.execute(
                 "UPDATE steps SET response_blob = ?1, response_blob_format = 0 WHERE id = ?2",
                 params![blob_hash, step_id],
             )?;
         }
 
-        Ok((step.timeline_id, step.step_number, step.session_id))
-    }
-
-    /// Delete all steps on `timeline_id` with `step_number > after_step`.
-    /// Returns the number of rows deleted. Uses the `idx_steps_timeline`
-    /// index for O(log n) range scan.
-    pub fn delete_steps_after(&self, timeline_id: &str, after_step: u32) -> Result<u32> {
-        let deleted = self.conn.execute(
+        let deleted = tx.execute(
             "DELETE FROM steps WHERE timeline_id = ?1 AND step_number > ?2",
-            params![timeline_id, after_step],
-        )?;
-        Ok(deleted as u32)
+            params![step.timeline_id, step.step_number],
+        )? as u32;
+
+        tx.commit()?;
+        Ok((step.timeline_id, step.step_number, step.session_id, deleted))
     }
 
     /// Count steps that *would* be deleted by `delete_steps_after`.

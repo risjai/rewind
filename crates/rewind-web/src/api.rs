@@ -1556,6 +1556,31 @@ async fn fork_session(
 
 const MAX_EDIT_BLOB_SIZE: usize = 5 * 1024 * 1024; // 5 MB per blob
 
+fn serialize_edit_body(
+    value: &Option<serde_json::Value>,
+) -> Result<Option<Vec<u8>>, (StatusCode, String)> {
+    match value {
+        Some(v) => serde_json::to_vec(v)
+            .map(Some)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialize error: {e}"))),
+        None => Ok(None),
+    }
+}
+
+fn check_edit_blob_size(
+    bytes: &Option<Vec<u8>>,
+    field: &str,
+) -> Result<(), (StatusCode, String)> {
+    if let Some(b) = bytes {
+        if b.len() > MAX_EDIT_BLOB_SIZE {
+            return Err((StatusCode::PAYLOAD_TOO_LARGE, format!(
+                "{field} exceeds {MAX_EDIT_BLOB_SIZE} bytes"
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Deserialize)]
 struct PatchStepRequest {
     request_body: Option<serde_json::Value>,
@@ -1577,23 +1602,11 @@ async fn patch_step(
         return Err((StatusCode::BAD_REQUEST, "at least one of request_body or response_body must be provided".into()));
     }
 
-    let request_bytes = body.request_body.as_ref()
-        .map(|v| serde_json::to_vec(v).unwrap_or_default());
-    let response_bytes = body.response_body.as_ref()
-        .map(|v| serde_json::to_vec(v).unwrap_or_default());
+    let request_bytes = serialize_edit_body(&body.request_body)?;
+    let response_bytes = serialize_edit_body(&body.response_body)?;
 
-    if let Some(ref b) = request_bytes
-        && b.len() > MAX_EDIT_BLOB_SIZE {
-            return Err((StatusCode::PAYLOAD_TOO_LARGE, format!(
-                "request_body exceeds {MAX_EDIT_BLOB_SIZE} bytes"
-            )));
-        }
-    if let Some(ref b) = response_bytes
-        && b.len() > MAX_EDIT_BLOB_SIZE {
-            return Err((StatusCode::PAYLOAD_TOO_LARGE, format!(
-                "response_body exceeds {MAX_EDIT_BLOB_SIZE} bytes"
-            )));
-        }
+    check_edit_blob_size(&request_bytes, "request_body")?;
+    check_edit_blob_size(&response_bytes, "response_body")?;
 
     let store = state.store.lock().map_err(|e| {
         (StatusCode::INTERNAL_SERVER_ERROR, format!("Lock error: {e}"))
@@ -1618,14 +1631,11 @@ async fn patch_step(
         }
     }
 
-    let (_timeline_id, step_number, session_id) = store.update_step_blobs(
+    let (_timeline_id, _step_number, session_id, deleted) = store.update_step_blobs_and_cascade(
         &id,
         request_bytes.as_deref(),
         response_bytes.as_deref(),
     ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
-    let deleted = store.delete_steps_after(&step.timeline_id, step_number)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     let _ = state.event_tx.send(StoreEvent::StepUpdated {
         session_id,
@@ -1696,6 +1706,11 @@ async fn fork_and_edit_step(
         return Err((StatusCode::BAD_REQUEST, "cannot fork at step 0".into()));
     }
 
+    let request_bytes = serialize_edit_body(&body.request_body)?;
+    let response_bytes = serialize_edit_body(&body.response_body)?;
+    check_edit_blob_size(&request_bytes, "request_body")?;
+    check_edit_blob_size(&response_bytes, "response_body")?;
+
     let store = state.store.lock().map_err(|e| {
         (StatusCode::INTERNAL_SERVER_ERROR, format!("Lock error: {e}"))
     })?;
@@ -1721,22 +1736,28 @@ async fn fork_and_edit_step(
         )))?;
 
     let label = body.label.as_deref().unwrap_or("edited-fork");
-    let engine = ReplayEngine::new(&store);
-    let fork = engine.fork(&session.id, &body.source_timeline_id, body.at_step.saturating_sub(1), label)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("{e}")))?;
 
-    let request_bytes = body.request_body.as_ref()
-        .map(|v| serde_json::to_vec(v).unwrap_or_default());
-    let response_bytes = body.response_body.as_ref()
-        .map(|v| serde_json::to_vec(v).unwrap_or_default());
+    // at_step == 1 → fork inherits nothing (empty fork). engine.fork
+    // rejects at_step=0, so we create the timeline directly.
+    let fork = if body.at_step == 1 {
+        let tl = Timeline::new_fork(&session.id, &body.source_timeline_id, 0, label);
+        store.create_timeline(&tl).map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
+        })?;
+        tl
+    } else {
+        let engine = ReplayEngine::new(&store);
+        engine.fork(&session.id, &body.source_timeline_id, body.at_step - 1, label)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("{e}")))?
+    };
 
     let req_blob = if let Some(ref rb) = request_bytes {
-        store.blobs.put(rb).map_err(|e| (StatusCode::INSUFFICIENT_STORAGE, format!("Blob error: {e}")))?
+        store.blobs.put(rb).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Blob error: {e}")))?
     } else {
         original_step.request_blob.clone()
     };
     let resp_blob = if let Some(ref rb) = response_bytes {
-        store.blobs.put(rb).map_err(|e| (StatusCode::INSUFFICIENT_STORAGE, format!("Blob error: {e}")))?
+        store.blobs.put(rb).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Blob error: {e}")))?
     } else {
         original_step.response_blob.clone()
     };
@@ -1747,17 +1768,26 @@ async fn fork_and_edit_step(
         original_step.request_hash.clone()
     };
 
-    let mut new_step = Step::new_llm_call(&fork.id, &session.id, body.at_step, &original_step.model);
-    new_step.step_type = original_step.step_type;
-    new_step.status = original_step.status;
-    new_step.duration_ms = original_step.duration_ms;
-    new_step.tokens_in = original_step.tokens_in;
-    new_step.tokens_out = original_step.tokens_out;
-    new_step.request_blob = req_blob;
-    new_step.response_blob = resp_blob;
-    new_step.request_hash = request_hash;
-    new_step.tool_name = original_step.tool_name;
-    new_step.error = original_step.error;
+    let new_step = Step {
+        id: uuid::Uuid::new_v4().to_string(),
+        timeline_id: fork.id.clone(),
+        session_id: session.id.clone(),
+        step_number: body.at_step,
+        step_type: original_step.step_type,
+        status: original_step.status,
+        created_at: chrono::Utc::now(),
+        duration_ms: original_step.duration_ms,
+        tokens_in: original_step.tokens_in,
+        tokens_out: original_step.tokens_out,
+        model: original_step.model,
+        request_blob: req_blob,
+        response_blob: resp_blob,
+        error: original_step.error,
+        span_id: None,
+        tool_name: original_step.tool_name,
+        request_hash,
+        response_blob_format: 0,
+    };
 
     store.create_step(&new_step).map_err(|e| {
         (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))

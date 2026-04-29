@@ -8,6 +8,7 @@ import { ForkModal } from './ForkModal'
 import { ReplaySetupModal } from './ReplaySetupModal'
 import { ReplayJobModal } from './RunReplayButton'
 import { useStepEdit } from '@/hooks/use-step-edit'
+import { useStore } from '@/hooks/use-store'
 
 type Tab = 'context' | 'request' | 'response'
 type ModalMode = 'fork' | 'replay' | 'runReplay' | null
@@ -19,7 +20,9 @@ export function StepDetailPanel({ stepId }: { stepId: string }) {
   const [editorText, setEditorText] = useState('')
   const [parseError, setParseError] = useState<string | null>(null)
   const [toastMsg, setToastMsg] = useState<string | null>(null)
+  const [errorToastMsg, setErrorToastMsg] = useState<string | null>(null)
   const [originalText, setOriginalText] = useState('')
+  const selectTimeline = useStore((s) => s.selectTimeline)
 
   const { data: step, isLoading } = useQuery({
     queryKey: ['step-detail', stepId],
@@ -73,9 +76,12 @@ export function StepDetailPanel({ stepId }: { stepId: string }) {
           `Cleared ${result.deleted_downstream_count} step(s) after #${step.step_number}. Run replay to populate them.`,
         )
       }
+      if (stepEdit.autoForked && stepEdit.forkTimelineId) {
+        selectTimeline(stepEdit.forkTimelineId)
+      }
       cancelEditing()
     }
-  }, [stepEdit, step, cancelEditing])
+  }, [stepEdit, step, cancelEditing, selectTimeline])
 
   if (isLoading) {
     return <div className="flex items-center justify-center h-full text-neutral-500 text-sm">Loading step...</div>
@@ -224,8 +230,8 @@ export function StepDetailPanel({ stepId }: { stepId: string }) {
         />
       )}
 
-      {stepEdit.error && (
-        <Toast msg={stepEdit.error} onDismiss={() => {}} />
+      {(stepEdit.error || errorToastMsg) && (
+        <Toast msg={stepEdit.error || errorToastMsg || ''} onDismiss={() => setErrorToastMsg(null)} />
       )}
 
       {toastMsg && (
