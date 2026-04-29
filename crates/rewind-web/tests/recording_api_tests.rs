@@ -1677,12 +1677,56 @@ async fn test_fork_and_edit_step_inherited_step() {
     assert!(!new_step_id.is_empty());
 
     // The newly-created step lives on the new fork at step_number = at_step.
-    // (Note: the new fork's full-step view is currently incomplete for
-    // nested forks because `get_full_timeline_steps` only walks one
-    // parent level up — that's a separate bug worth its own fix. Here
-    // we assert the direct invariants of the edit itself.)
+    // Note: nested-fork inheritance via get_full_timeline_steps is still
+    // a known follow-up (only walks one parent level up), so this test
+    // asserts the direct invariants of the edit itself rather than the
+    // resulting fork's full step view.
     let s = _store.lock().unwrap();
     let new_step = s.get_step(new_step_id).unwrap().unwrap();
     assert_eq!(new_step.step_number, 2);
     assert_eq!(new_step.timeline_id, new_fork_tid);
+
+    // Roundtrip the response_body through the blob store to prove the
+    // edited bytes actually persisted (a future refactor that reused
+    // the original step's response_blob would otherwise pass the
+    // step_number / timeline_id checks above).
+    let resp_bytes = s.blobs.get(&new_step.response_blob).unwrap();
+    let body_back: serde_json::Value = serde_json::from_slice(&resp_bytes).unwrap();
+    assert_eq!(body_back, json!({"edit": "of-an-inherited-step"}));
+}
+
+#[tokio::test]
+async fn test_fork_and_edit_step_inherited_step_below_fork_boundary() {
+    // Reviewer S2: the original dev1 repro was editing step 3 of a
+    // fork created at step 5 — i.e. a step *well below* the fork
+    // boundary. The first inherited-step test exercised the boundary
+    // step (step 2 of a fork at step 2); this variant proves the
+    // union-view lookup also resolves steps from deeper in the
+    // inherited chain (step 2 of a fork at step 4).
+    let (app, _store, _tmp) = setup();
+    let (sid, _root_tid) = seed_session(&app, 5).await;
+
+    let (_, fork) = post_json(&app, &format!("/api/sessions/{sid}/fork"), json!({
+        "at_step": 4, "label": "deep-inherit-fork"
+    })).await;
+    let fork_tid = fork["fork_timeline_id"].as_str().unwrap();
+
+    let (status, body) = post_json(&app, &format!("/api/sessions/{sid}/fork-and-edit-step"), json!({
+        "source_timeline_id": fork_tid,
+        "at_step": 2,
+        "response_body": {"edit": "deep-inherited"},
+        "label": "edit-two-below-boundary"
+    })).await;
+
+    assert_eq!(
+        status, StatusCode::CREATED,
+        "fork-and-edit on a step well below the fork boundary should succeed (got: {body})"
+    );
+    let new_step_id = body["step_id"].as_str().unwrap();
+    let s = _store.lock().unwrap();
+    let new_step = s.get_step(new_step_id).unwrap().unwrap();
+    assert_eq!(new_step.step_number, 2);
+    let resp_bytes = s.blobs.get(&new_step.response_blob).unwrap();
+    let body_back: serde_json::Value = serde_json::from_slice(&resp_bytes).unwrap();
+    assert_eq!(body_back, json!({"edit": "deep-inherited"}));
 }
