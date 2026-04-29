@@ -36,6 +36,15 @@ pub enum StoreEvent {
         total_steps: u32,
         total_tokens: u64,
     },
+    /// Step editing: emitted after a PATCH /api/steps/{id} or
+    /// fork-and-edit-step mutates a step's blobs and cascade-deletes
+    /// downstream steps. WebSocket subscribers refresh the step list.
+    StepUpdated {
+        session_id: String,
+        step_id: String,
+        timeline_id: String,
+        deleted_count: u32,
+    },
     /// Phase 3 commit 5/6: replay job state/progress changes broadcast
     /// to subscribers (dashboard renders the "Run replay" modal).
     /// Emitted by the reaper (lease/dispatch expiry → `errored`),

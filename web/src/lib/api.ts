@@ -75,7 +75,7 @@ async function del<T>(path: string): Promise<T> {
 }
 
 export const api = {
-  health: () => get<{ status: string; version: string }>('/health'),
+  health: () => get<{ status: string; version: string; allow_main_edits: boolean }>('/health'),
   sessions: () => get<Session[]>('/sessions'),
   session: (id: string) => get<SessionDetail>(`/sessions/${id}`),
   sessionSteps: (id: string, timeline?: string) => {
@@ -118,6 +118,26 @@ export const api = {
     del<DeleteReplayContextResponse>(`/replay-contexts/${id}`),
   deleteTimeline: (sessionId: string, timelineId: string) =>
     del<DeleteTimelineResponse>(`/sessions/${sessionId}/timelines/${timelineId}`),
+
+  // Step editing
+  patchStep: (stepId: string, body: { request_body?: unknown; response_body?: unknown }) =>
+    request(`/steps/${stepId}/edit`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then(async (res) => {
+      if (!res.ok) throw new Error(`API error ${res.status}: ${await res.text()}`)
+      return res.json() as Promise<{ step_id: string; deleted_downstream_count: number }>
+    }),
+  cascadeCount: (stepId: string) =>
+    get<{ deleted_downstream_count: number; on_main: boolean }>(`/steps/${stepId}/cascade-count`),
+  forkAndEditStep: (sessionId: string, body: {
+    source_timeline_id: string;
+    at_step: number;
+    request_body?: unknown;
+    response_body?: unknown;
+    label?: string;
+  }) => post<{ fork_timeline_id: string; step_id: string }>(`/sessions/${sessionId}/fork-and-edit-step`, body),
 
   // Phase 3 commit 7/13: runner registry
   runners: () => get<RunnerView[]>('/runners'),

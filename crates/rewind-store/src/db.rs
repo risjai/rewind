@@ -802,6 +802,80 @@ impl Store {
         Ok(rows.next().transpose()?)
     }
 
+    // ── Step editing (step-edit-on-fork) ─────────────────────────
+
+    /// Update a step's request and/or response blobs in place.
+    ///
+    /// When `request_body` is `Some`, the new bytes are stored in the blob
+    /// store and the step's `request_blob` + `request_hash` are updated.
+    /// When `response_body` is `Some`, the new bytes are stored and the
+    /// step's `response_blob` is updated. `response_blob_format` is
+    /// always set to `FORMAT_NAKED_LEGACY` (0) for edited blobs since
+    /// the caller provides a parsed JSON Value, not an HTTP envelope.
+    ///
+    /// Returns the step's `(timeline_id, step_number, session_id)` for
+    /// the caller to drive cascade-delete + event emission.
+    pub fn update_step_blobs(
+        &self,
+        step_id: &str,
+        request_body: Option<&[u8]>,
+        response_body: Option<&[u8]>,
+    ) -> Result<(String, u32, String)> {
+        let step = self.get_step(step_id)?
+            .ok_or_else(|| anyhow::anyhow!("step not found: {step_id}"))?;
+
+        if let Some(req) = request_body {
+            let blob_hash = self.blobs.put(req)?;
+            let canonical_hash = crate::normalize_and_hash(req);
+            self.conn.execute(
+                "UPDATE steps SET request_blob = ?1, request_hash = ?2 WHERE id = ?3",
+                params![blob_hash, canonical_hash, step_id],
+            )?;
+        }
+        if let Some(resp) = response_body {
+            let blob_hash = self.blobs.put(resp)?;
+            self.conn.execute(
+                "UPDATE steps SET response_blob = ?1, response_blob_format = 0 WHERE id = ?2",
+                params![blob_hash, step_id],
+            )?;
+        }
+
+        Ok((step.timeline_id, step.step_number, step.session_id))
+    }
+
+    /// Delete all steps on `timeline_id` with `step_number > after_step`.
+    /// Returns the number of rows deleted. Uses the `idx_steps_timeline`
+    /// index for O(log n) range scan.
+    pub fn delete_steps_after(&self, timeline_id: &str, after_step: u32) -> Result<u32> {
+        let deleted = self.conn.execute(
+            "DELETE FROM steps WHERE timeline_id = ?1 AND step_number > ?2",
+            params![timeline_id, after_step],
+        )?;
+        Ok(deleted as u32)
+    }
+
+    /// Count steps that *would* be deleted by `delete_steps_after`.
+    /// Pure read for the dry-run / cascade-count endpoint.
+    pub fn count_steps_after(&self, timeline_id: &str, after_step: u32) -> Result<u32> {
+        let count: u32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM steps WHERE timeline_id = ?1 AND step_number > ?2",
+            params![timeline_id, after_step],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// Returns `true` when the timeline has no parent (i.e. it is the
+    /// root / "main" timeline for its session).
+    pub fn is_main_timeline(&self, timeline_id: &str) -> Result<bool> {
+        let is_main: bool = self.conn.query_row(
+            "SELECT parent_timeline_id IS NULL FROM timelines WHERE id = ?1",
+            params![timeline_id],
+            |row| row.get(0),
+        )?;
+        Ok(is_main)
+    }
+
     // ── Step 0.3 envelope-aware response readers ──────────────────
     //
     // These are the canonical helpers for reading a step's response body.

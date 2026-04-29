@@ -29,7 +29,7 @@ BINARY_NAME = "rewind-mcp"
 
 # Must match the Rust workspace version in Cargo.toml.
 # Update this when a new GitHub Release is published with new binaries.
-CLI_VERSION = "0.14.3"
+CLI_VERSION = "0.14.4"
 
 
 def _get_platform_key() -> str:

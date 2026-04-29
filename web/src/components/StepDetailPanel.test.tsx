@@ -11,6 +11,14 @@ import type { StepDetail } from '@/types/api'
 vi.mock('@/lib/api', () => ({
   api: {
     stepDetail: vi.fn(),
+    health: vi.fn().mockResolvedValue({ status: 'ok', version: '0.14.4', allow_main_edits: false }),
+    session: vi.fn().mockResolvedValue({
+      session: { id: 'sess-1', name: 'test', created_at: '', updated_at: '', status: 'Completed', total_steps: 4, total_tokens: 0, metadata: {} },
+      timelines: [{ id: 'tl-main', session_id: 'sess-1', parent_timeline_id: null, fork_at_step: null, created_at: '', label: 'main' }],
+    }),
+    cascadeCount: vi.fn().mockResolvedValue({ deleted_downstream_count: 2, on_main: true }),
+    patchStep: vi.fn().mockResolvedValue({ step_id: 'step-abc', deleted_downstream_count: 2 }),
+    forkAndEditStep: vi.fn().mockResolvedValue({ fork_timeline_id: 'tl-fork-1', step_id: 'step-new' }),
   },
 }))
 
@@ -129,5 +137,62 @@ describe('StepDetailPanel — Run replay button', () => {
     // tracks a single `modalMode` state.
     expect(screen.getAllByRole('dialog').length).toBe(1)
     expect(screen.getByRole('dialog').getAttribute('aria-label')).toBe('ReplayJobModal-stub')
+  })
+})
+
+describe('StepDetailPanel — Step editing', () => {
+  beforeEach(() => {
+    cleanup()
+    vi.mocked(api.stepDetail).mockResolvedValue(
+      makeStep({
+        request_body: { model: 'gpt-4o', messages: [{ role: 'user', content: 'hello' }] },
+        response_body: { choices: [{ message: { content: 'world' } }] },
+      }),
+    )
+  })
+
+  it('shows Edit pencil button on active Request tab when data exists', async () => {
+    renderWithClient(<StepDetailPanel stepId="step-abc" />)
+    expect(await screen.findByTitle(/edit request/i)).toBeTruthy()
+  })
+
+  it('opens editor with initial JSON on Edit click and Cancel returns to view', async () => {
+    renderWithClient(<StepDetailPanel stepId="step-abc" />)
+    fireEvent.click(await screen.findByTitle(/edit request/i))
+    expect(screen.getByRole('textbox')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }))
+    expect(screen.queryByRole('textbox')).toBeNull()
+  })
+
+  it('disables Save when JSON is invalid', async () => {
+    renderWithClient(<StepDetailPanel stepId="step-abc" />)
+    fireEvent.click(await screen.findByTitle(/edit request/i))
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: '{ invalid json' } })
+    const saveBtn = screen.getByRole('button', { name: /^save$/i })
+    expect(saveBtn.hasAttribute('disabled')).toBe(true)
+  })
+
+  it('disables Save when text has not changed', async () => {
+    renderWithClient(<StepDetailPanel stepId="step-abc" />)
+    fireEvent.click(await screen.findByTitle(/edit request/i))
+    const saveBtn = screen.getByRole('button', { name: /^save$/i })
+    expect(saveBtn.hasAttribute('disabled')).toBe(true)
+  })
+
+  it('enables Save when JSON is valid and text has changed', async () => {
+    renderWithClient(<StepDetailPanel stepId="step-abc" />)
+    fireEvent.click(await screen.findByTitle(/edit request/i))
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: '{"model":"gpt-4o-mini"}' } })
+    const saveBtn = screen.getByRole('button', { name: /^save$/i })
+    expect(saveBtn.hasAttribute('disabled')).toBe(false)
+  })
+
+  it('shows Edit pencil for Response tab too', async () => {
+    renderWithClient(<StepDetailPanel stepId="step-abc" />)
+    const respTab = await screen.findByText('Response')
+    fireEvent.click(respTab)
+    expect(screen.getByTitle(/edit response/i)).toBeTruthy()
   })
 })

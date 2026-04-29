@@ -1,12 +1,13 @@
 import { useQuery } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { cn, formatDuration, formatTokens } from '@/lib/utils'
-import { useState } from 'react'
-import { MessageSquare, FileJson, FileOutput, AlertTriangle, GitBranch, Play, Rocket } from 'lucide-react'
+import { useState, useEffect, useCallback } from 'react'
+import { MessageSquare, FileJson, FileOutput, AlertTriangle, GitBranch, Play, Rocket, Pencil } from 'lucide-react'
 import { JsonTree } from './JsonTree'
 import { ForkModal } from './ForkModal'
 import { ReplaySetupModal } from './ReplaySetupModal'
 import { ReplayJobModal } from './RunReplayButton'
+import { useStepEdit } from '@/hooks/use-step-edit'
 
 type Tab = 'context' | 'request' | 'response'
 type ModalMode = 'fork' | 'replay' | 'runReplay' | null
@@ -14,11 +15,67 @@ type ModalMode = 'fork' | 'replay' | 'runReplay' | null
 export function StepDetailPanel({ stepId }: { stepId: string }) {
   const [tab, setTab] = useState<Tab | null>(null)
   const [modalMode, setModalMode] = useState<ModalMode>(null)
+  const [editing, setEditing] = useState<'request' | 'response' | null>(null)
+  const [editorText, setEditorText] = useState('')
+  const [parseError, setParseError] = useState<string | null>(null)
+  const [toastMsg, setToastMsg] = useState<string | null>(null)
+  const [originalText, setOriginalText] = useState('')
 
   const { data: step, isLoading } = useQuery({
     queryKey: ['step-detail', stepId],
     queryFn: () => api.stepDetail(stepId),
   })
+
+  const stepEdit = useStepEdit({
+    stepId,
+    sessionId: step?.session_id ?? '',
+    timelineId: step?.timeline_id ?? '',
+  })
+
+  const startEditing = useCallback((field: 'request' | 'response', data: unknown) => {
+    const text = JSON.stringify(data, null, 2)
+    setEditing(field)
+    setEditorText(text)
+    setOriginalText(text)
+    setParseError(null)
+  }, [])
+
+  const cancelEditing = useCallback(() => {
+    setEditing(null)
+    setEditorText('')
+    setOriginalText('')
+    setParseError(null)
+  }, [])
+
+  const handleEditorChange = useCallback((value: string) => {
+    setEditorText(value)
+    try {
+      JSON.parse(value)
+      setParseError(null)
+    } catch (e) {
+      setParseError(e instanceof Error ? e.message : 'Invalid JSON')
+    }
+  }, [])
+
+  const textChanged = editorText !== originalText
+  const canSave = !parseError && textChanged
+
+  const handleSaveClick = useCallback(() => {
+    if (!editing || !canSave) return
+    stepEdit.openConfirm(editing, editorText)
+  }, [editing, canSave, editorText, stepEdit])
+
+  const handleConfirm = useCallback(async () => {
+    const result = await stepEdit.save()
+    if (result) {
+      if (result.deleted_downstream_count > 0 && step) {
+        setToastMsg(
+          `Cleared ${result.deleted_downstream_count} step(s) after #${step.step_number}. Run replay to populate them.`,
+        )
+      }
+      cancelEditing()
+    }
+  }, [stepEdit, step, cancelEditing])
 
   if (isLoading) {
     return <div className="flex items-center justify-center h-full text-neutral-500 text-sm">Loading step...</div>
@@ -30,6 +87,32 @@ export function StepDetailPanel({ stepId }: { stepId: string }) {
   // Default tab: 'context' for LLM calls (have messages), 'request' for hook steps
   const isHookStep = step.step_type === 'user_prompt' || step.step_type === 'hook_event' || (!step.messages && step.request_body)
   const activeTab = tab ?? (isHookStep ? 'request' : 'context')
+
+  // Derive confirm modal copy
+  const confirmProps = (() => {
+    if (stepEdit.onMain && !stepEdit.allowMainEdits) {
+      return {
+        title: 'Create fork and edit',
+        body: 'Main timelines are protected. Saving will create a fork and switch you there.',
+        confirmLabel: 'Fork & save',
+        variant: 'default' as const,
+      }
+    }
+    if (stepEdit.onMain && stepEdit.allowMainEdits) {
+      return {
+        title: 'Edit main timeline (destructive)',
+        body: `This will mutate the original recording AND delete ${stepEdit.cascadeCount} downstream step(s). This cannot be undone.`,
+        confirmLabel: 'Save destructively',
+        variant: 'destructive' as const,
+      }
+    }
+    return {
+      title: 'Save edit',
+      body: `This will save the new JSON and clear ${stepEdit.cascadeCount} downstream step(s). Run replay afterwards.`,
+      confirmLabel: 'Save',
+      variant: 'default' as const,
+    }
+  })()
 
   return (
     <div className="flex flex-col h-full">
@@ -84,16 +167,70 @@ export function StepDetailPanel({ stepId }: { stepId: string }) {
       {/* Tabs */}
       <div className="flex border-b border-neutral-800">
         <TabButton icon={MessageSquare} label="Context Window" active={activeTab === 'context'} onClick={() => setTab('context')} />
-        <TabButton icon={FileJson} label="Request" active={activeTab === 'request'} onClick={() => setTab('request')} />
-        <TabButton icon={FileOutput} label="Response" active={activeTab === 'response'} onClick={() => setTab('response')} />
+        <TabButton icon={FileJson} label="Request" active={activeTab === 'request'} onClick={() => setTab('request')}
+          editButton={step.request_body != null && editing !== 'request'
+            ? () => startEditing('request', step.request_body)
+            : undefined}
+        />
+        <TabButton icon={FileOutput} label="Response" active={activeTab === 'response'} onClick={() => setTab('response')}
+          editButton={step.response_body != null && editing !== 'response'
+            ? () => startEditing('response', step.response_body)
+            : undefined}
+        />
       </div>
 
       {/* Tab content */}
       <div className="flex-1 overflow-auto scrollbar-thin">
         {activeTab === 'context' && <ContextWindowView messages={step.messages} />}
-        {activeTab === 'request' && <JsonView data={step.request_body} label="Request" />}
-        {activeTab === 'response' && <JsonView data={step.response_body} label="Response" />}
+        {activeTab === 'request' && (
+          editing === 'request' ? (
+            <JsonEditor
+              text={editorText}
+              onChange={handleEditorChange}
+              parseError={parseError}
+              canSave={canSave}
+              onSave={handleSaveClick}
+              onCancel={cancelEditing}
+            />
+          ) : (
+            <JsonView data={step.request_body} label="Request" />
+          )
+        )}
+        {activeTab === 'response' && (
+          editing === 'response' ? (
+            <JsonEditor
+              text={editorText}
+              onChange={handleEditorChange}
+              parseError={parseError}
+              canSave={canSave}
+              onSave={handleSaveClick}
+              onCancel={cancelEditing}
+            />
+          ) : (
+            <JsonView data={step.response_body} label="Response" />
+          )
+        )}
       </div>
+
+      {stepEdit.confirmOpen && (
+        <ConfirmModal
+          title={confirmProps.title}
+          body={confirmProps.body}
+          confirmLabel={confirmProps.confirmLabel}
+          variant={confirmProps.variant}
+          onConfirm={handleConfirm}
+          onCancel={stepEdit.cancelConfirm}
+          isSubmitting={stepEdit.isMutating}
+        />
+      )}
+
+      {stepEdit.error && (
+        <Toast msg={stepEdit.error} onDismiss={() => {}} />
+      )}
+
+      {toastMsg && (
+        <Toast msg={toastMsg} onDismiss={() => setToastMsg(null)} />
+      )}
 
       {modalMode === 'fork' && (
         <ForkModal
@@ -125,20 +262,33 @@ export function StepDetailPanel({ stepId }: { stepId: string }) {
   )
 }
 
-function TabButton({ icon: Icon, label, active, onClick }: { icon: React.ComponentType<{ size?: number }>; label: string; active: boolean; onClick: () => void }) {
+function TabButton({ icon: Icon, label, active, onClick, editButton }: {
+  icon: React.ComponentType<{ size?: number }>; label: string; active: boolean; onClick: () => void; editButton?: () => void
+}) {
   return (
-    <button
-      onClick={onClick}
-      className={cn(
-        'flex items-center gap-1.5 px-4 py-2.5 text-xs font-medium border-b-2 transition-colors',
-        active
-          ? 'border-cyan-400 text-cyan-300'
-          : 'border-transparent text-neutral-500 hover:text-neutral-300 hover:border-neutral-700'
+    <div className="flex items-center">
+      <button
+        onClick={onClick}
+        className={cn(
+          'flex items-center gap-1.5 px-4 py-2.5 text-xs font-medium border-b-2 transition-colors',
+          active
+            ? 'border-cyan-400 text-cyan-300'
+            : 'border-transparent text-neutral-500 hover:text-neutral-300 hover:border-neutral-700'
+        )}
+      >
+        <Icon size={13} />
+        {label}
+      </button>
+      {editButton && active && (
+        <button
+          onClick={editButton}
+          title={`Edit ${label}`}
+          className="p-1 text-neutral-500 hover:text-cyan-300 transition-colors"
+        >
+          <Pencil size={12} />
+        </button>
       )}
-    >
-      <Icon size={13} />
-      {label}
-    </button>
+    </div>
   )
 }
 
@@ -198,3 +348,85 @@ function JsonView({ data, label }: { data: unknown | null; label: string }) {
     </div>
   )
 }
+
+function JsonEditor({ text, onChange, parseError, canSave, onSave, onCancel }: {
+  text: string; onChange: (v: string) => void; parseError: string | null
+  canSave: boolean; onSave: () => void; onCancel: () => void
+}) {
+  return (
+    <div className="flex flex-col h-full">
+      <textarea
+        value={text}
+        onChange={(e) => onChange(e.target.value)}
+        className="flex-1 w-full bg-neutral-950 text-neutral-200 font-mono text-xs p-4 resize-none outline-none border-none"
+        spellCheck={false}
+      />
+      {parseError && (
+        <div className="px-4 py-1.5 text-xs text-red-400 bg-red-950/30 border-t border-red-900/50">
+          {parseError}
+        </div>
+      )}
+      <div className="flex items-center gap-2 px-4 py-2 border-t border-neutral-800">
+        <button
+          onClick={onSave}
+          disabled={!canSave}
+          className={cn(
+            'px-3 py-1.5 text-xs rounded-md font-medium transition-colors',
+            canSave
+              ? 'bg-cyan-600 hover:bg-cyan-500 text-white'
+              : 'bg-neutral-800 text-neutral-600 cursor-not-allowed'
+          )}
+        >
+          Save
+        </button>
+        <button
+          onClick={onCancel}
+          className="px-3 py-1.5 text-xs text-neutral-400 hover:text-neutral-200 border border-neutral-700 rounded-md transition-colors"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function ConfirmModal({ title, body, confirmLabel, variant, onConfirm, onCancel, isSubmitting }: {
+  title: string; body: string; confirmLabel: string; variant: 'default' | 'destructive'
+  onConfirm: () => void; onCancel: () => void; isSubmitting: boolean
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" role="dialog" aria-label={title}>
+      <div className="bg-neutral-900 border border-neutral-700 rounded-xl p-6 max-w-md w-full shadow-2xl">
+        <h3 className="text-base font-semibold text-neutral-100 mb-2">{title}</h3>
+        <p className="text-sm text-neutral-400 mb-6">{body}</p>
+        <div className="flex gap-3 justify-end">
+          <button onClick={onCancel} disabled={isSubmitting} className="px-4 py-2 text-sm text-neutral-400 hover:text-neutral-200 border border-neutral-700 rounded-lg transition-colors">
+            Cancel
+          </button>
+          <button onClick={onConfirm} disabled={isSubmitting} className={cn(
+            'px-4 py-2 text-sm rounded-lg transition-colors font-medium',
+            variant === 'destructive'
+              ? 'bg-red-600 hover:bg-red-500 text-white'
+              : 'bg-cyan-600 hover:bg-cyan-500 text-white'
+          )}>
+            {isSubmitting ? 'Saving…' : confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function Toast({ msg, onDismiss }: { msg: string; onDismiss: () => void }) {
+  useEffect(() => {
+    const t = setTimeout(onDismiss, 5000)
+    return () => clearTimeout(t)
+  }, [onDismiss])
+
+  return (
+    <div className="fixed bottom-4 right-4 z-50 bg-cyan-950 border border-cyan-800 text-cyan-200 text-sm px-4 py-3 rounded-lg shadow-xl">
+      {msg}
+    </div>
+  )
+}
+

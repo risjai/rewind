@@ -2,7 +2,7 @@ use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
     http::StatusCode,
     response::Json,
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
     Router,
 };
 use rewind_replay::ReplayEngine;
@@ -25,6 +25,8 @@ pub fn routes(state: AppState) -> Router {
         .route("/sessions/{id}/export/otel", post(export_otel))
         .route("/sessions/{id}/savings", get(get_session_savings))
         .route("/steps/{id}", get(get_step_detail))
+        .route("/steps/{id}/edit", patch(patch_step))
+        .route("/steps/{id}/cascade-count", get(cascade_count))
         .route("/baselines", get(list_baselines))
         .route("/baselines/{name}", get(get_baseline))
         .route("/cache/stats", get(cache_stats))
@@ -41,6 +43,7 @@ pub fn routes(state: AppState) -> Router {
         .route("/sessions/{id}/tool-calls/replay-lookup", post(replay_lookup_tool))
         .route("/sessions/{id}/fork", post(fork_session))
         .route("/sessions/{session_id}/timelines/{timeline_id}", delete(delete_timeline_handler))
+        .route("/sessions/{id}/fork-and-edit-step", post(fork_and_edit_step))
         .route("/replay-contexts", post(create_replay_context))
         .route("/replay-contexts/{id}", delete(delete_replay_context_handler))
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10MB
@@ -51,12 +54,17 @@ pub fn routes(state: AppState) -> Router {
 struct HealthResponse {
     status: &'static str,
     version: &'static str,
+    allow_main_edits: bool,
 }
 
 async fn health() -> Json<HealthResponse> {
+    let allow_main_edits = std::env::var("REWIND_ALLOW_MAIN_EDITS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
     Json(HealthResponse {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
+        allow_main_edits,
     })
 }
 
@@ -1541,6 +1549,230 @@ async fn fork_session(
 
     Ok((StatusCode::CREATED, Json(ForkResponse {
         fork_timeline_id: fork.id,
+    })))
+}
+
+// ── Step editing (step-edit-on-fork) ──────────────────────────────
+
+const MAX_EDIT_BLOB_SIZE: usize = 5 * 1024 * 1024; // 5 MB per blob
+
+#[derive(Deserialize)]
+struct PatchStepRequest {
+    request_body: Option<serde_json::Value>,
+    response_body: Option<serde_json::Value>,
+}
+
+#[derive(Serialize)]
+struct PatchStepResponse {
+    step_id: String,
+    deleted_downstream_count: u32,
+}
+
+async fn patch_step(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<PatchStepRequest>,
+) -> Result<Json<PatchStepResponse>, (StatusCode, String)> {
+    if body.request_body.is_none() && body.response_body.is_none() {
+        return Err((StatusCode::BAD_REQUEST, "at least one of request_body or response_body must be provided".into()));
+    }
+
+    let request_bytes = body.request_body.as_ref()
+        .map(|v| serde_json::to_vec(v).unwrap_or_default());
+    let response_bytes = body.response_body.as_ref()
+        .map(|v| serde_json::to_vec(v).unwrap_or_default());
+
+    if let Some(ref b) = request_bytes
+        && b.len() > MAX_EDIT_BLOB_SIZE {
+            return Err((StatusCode::PAYLOAD_TOO_LARGE, format!(
+                "request_body exceeds {MAX_EDIT_BLOB_SIZE} bytes"
+            )));
+        }
+    if let Some(ref b) = response_bytes
+        && b.len() > MAX_EDIT_BLOB_SIZE {
+            return Err((StatusCode::PAYLOAD_TOO_LARGE, format!(
+                "response_body exceeds {MAX_EDIT_BLOB_SIZE} bytes"
+            )));
+        }
+
+    let store = state.store.lock().map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Lock error: {e}"))
+    })?;
+
+    let step = store.get_step(&id).map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
+    })?.ok_or_else(|| (StatusCode::NOT_FOUND, format!("Step not found: {id}")))?;
+
+    let allow_main = std::env::var("REWIND_ALLOW_MAIN_EDITS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if !allow_main {
+        let is_main = store.is_main_timeline(&step.timeline_id).map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
+        })?;
+        if is_main {
+            return Err((StatusCode::CONFLICT,
+                "Cannot edit steps on the main timeline. \
+                 Use the fork-and-edit endpoint or set REWIND_ALLOW_MAIN_EDITS=true on the server.".into()
+            ));
+        }
+    }
+
+    let (_timeline_id, step_number, session_id) = store.update_step_blobs(
+        &id,
+        request_bytes.as_deref(),
+        response_bytes.as_deref(),
+    ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let deleted = store.delete_steps_after(&step.timeline_id, step_number)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let _ = state.event_tx.send(StoreEvent::StepUpdated {
+        session_id,
+        step_id: id.clone(),
+        timeline_id: step.timeline_id,
+        deleted_count: deleted,
+    });
+
+    Ok(Json(PatchStepResponse {
+        step_id: id,
+        deleted_downstream_count: deleted,
+    }))
+}
+
+#[derive(Serialize)]
+struct CascadeCountResponse {
+    deleted_downstream_count: u32,
+    on_main: bool,
+}
+
+async fn cascade_count(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<CascadeCountResponse>, (StatusCode, String)> {
+    let store = state.store.lock().map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Lock error: {e}"))
+    })?;
+
+    let step = store.get_step(&id).map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
+    })?.ok_or_else(|| (StatusCode::NOT_FOUND, format!("Step not found: {id}")))?;
+
+    let count = store.count_steps_after(&step.timeline_id, step.step_number)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let on_main = store.is_main_timeline(&step.timeline_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    Ok(Json(CascadeCountResponse {
+        deleted_downstream_count: count,
+        on_main,
+    }))
+}
+
+#[derive(Deserialize)]
+struct ForkAndEditStepRequest {
+    source_timeline_id: String,
+    at_step: u32,
+    request_body: Option<serde_json::Value>,
+    response_body: Option<serde_json::Value>,
+    label: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ForkAndEditStepResponse {
+    fork_timeline_id: String,
+    step_id: String,
+}
+
+async fn fork_and_edit_step(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Json(body): Json<ForkAndEditStepRequest>,
+) -> Result<(StatusCode, Json<ForkAndEditStepResponse>), (StatusCode, String)> {
+    if body.request_body.is_none() && body.response_body.is_none() {
+        return Err((StatusCode::BAD_REQUEST, "at least one of request_body or response_body must be provided".into()));
+    }
+    if body.at_step == 0 {
+        return Err((StatusCode::BAD_REQUEST, "cannot fork at step 0".into()));
+    }
+
+    let store = state.store.lock().map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Lock error: {e}"))
+    })?;
+
+    let session = resolve_session(&store, &session_id)
+        .map_err(|e| (StatusCode::NOT_FOUND, format!("{e}")))?;
+
+    let timelines = store.get_timelines(&session.id).map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
+    })?;
+    let source_exists = timelines.iter().any(|t| t.id == body.source_timeline_id);
+    if !source_exists {
+        return Err((StatusCode::BAD_REQUEST, format!(
+            "source_timeline_id '{}' not found in session '{}'",
+            body.source_timeline_id, session.id
+        )));
+    }
+
+    let original_step = store.get_step_by_number(&body.source_timeline_id, body.at_step)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, format!(
+            "no step #{} on timeline '{}'", body.at_step, body.source_timeline_id
+        )))?;
+
+    let label = body.label.as_deref().unwrap_or("edited-fork");
+    let engine = ReplayEngine::new(&store);
+    let fork = engine.fork(&session.id, &body.source_timeline_id, body.at_step.saturating_sub(1), label)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("{e}")))?;
+
+    let request_bytes = body.request_body.as_ref()
+        .map(|v| serde_json::to_vec(v).unwrap_or_default());
+    let response_bytes = body.response_body.as_ref()
+        .map(|v| serde_json::to_vec(v).unwrap_or_default());
+
+    let req_blob = if let Some(ref rb) = request_bytes {
+        store.blobs.put(rb).map_err(|e| (StatusCode::INSUFFICIENT_STORAGE, format!("Blob error: {e}")))?
+    } else {
+        original_step.request_blob.clone()
+    };
+    let resp_blob = if let Some(ref rb) = response_bytes {
+        store.blobs.put(rb).map_err(|e| (StatusCode::INSUFFICIENT_STORAGE, format!("Blob error: {e}")))?
+    } else {
+        original_step.response_blob.clone()
+    };
+
+    let request_hash = if let Some(ref rb) = request_bytes {
+        Some(rewind_store::normalize_and_hash(rb))
+    } else {
+        original_step.request_hash.clone()
+    };
+
+    let mut new_step = Step::new_llm_call(&fork.id, &session.id, body.at_step, &original_step.model);
+    new_step.step_type = original_step.step_type;
+    new_step.status = original_step.status;
+    new_step.duration_ms = original_step.duration_ms;
+    new_step.tokens_in = original_step.tokens_in;
+    new_step.tokens_out = original_step.tokens_out;
+    new_step.request_blob = req_blob;
+    new_step.response_blob = resp_blob;
+    new_step.request_hash = request_hash;
+    new_step.tool_name = original_step.tool_name;
+    new_step.error = original_step.error;
+
+    store.create_step(&new_step).map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
+    })?;
+
+    let _ = state.event_tx.send(StoreEvent::StepUpdated {
+        session_id: session.id,
+        step_id: new_step.id.clone(),
+        timeline_id: fork.id.clone(),
+        deleted_count: 0,
+    });
+
+    Ok((StatusCode::CREATED, Json(ForkAndEditStepResponse {
+        fork_timeline_id: fork.id,
+        step_id: new_step.id,
     })))
 }
 

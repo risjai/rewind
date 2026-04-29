@@ -185,6 +185,20 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                 },
                             })
                         }
+                        StoreEvent::StepUpdated { session_id, .. } => {
+                            if subscribed_session.as_deref() == Some(session_id) {
+                                Some(ServerMessage::SessionUpdate {
+                                    data: SessionUpdateData {
+                                        session_id: session_id.clone(),
+                                        status: "recording".to_string(),
+                                        total_steps: 0,
+                                        total_tokens: 0,
+                                    },
+                                })
+                            } else {
+                                None
+                            }
+                        }
                         StoreEvent::ReplayJobUpdated {
                             job_id,
                             session_id,

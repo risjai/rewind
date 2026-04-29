@@ -1287,3 +1287,350 @@ async fn test_source_label_with_metadata_both_preserved() {
     assert_eq!(session.metadata["source_label"].as_str().unwrap(), "ray-agent",
         "source_label should be added on top of provided metadata");
 }
+
+// ── Helpers ────────────────────────────────────────────────
+
+async fn patch_json(app: &Router, path: &str, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+    let resp = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = resp.status();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap_or(json!({"raw": String::from_utf8_lossy(&body).to_string()}));
+    (status, json)
+}
+
+/// Create a session, record `n` LLM-call steps on the root timeline, and
+/// return `(session_id, root_timeline_id)`.
+async fn seed_session(app: &Router, n: u32) -> (String, String) {
+    let (_, start) = post_json(app, "/api/sessions/start", json!({"name": "test"})).await;
+    let sid = start["session_id"].as_str().unwrap().to_string();
+    let tid = start["root_timeline_id"].as_str().unwrap().to_string();
+
+    for i in 0..n {
+        post_json(app, &format!("/api/sessions/{sid}/llm-calls"), json!({
+            "request_body": {"step": i},
+            "response_body": {"content": format!("response-{}", i + 1)},
+            "model": "gpt-4o",
+            "duration_ms": 100
+        })).await;
+    }
+    (sid, tid)
+}
+
+/// Record `n` LLM-call steps on a specific timeline and return the step
+/// IDs by querying the steps endpoint.
+async fn seed_steps_on_timeline(app: &Router, sid: &str, tid: &str, n: u32) -> Vec<String> {
+    for i in 0..n {
+        post_json(app, &format!("/api/sessions/{sid}/llm-calls"), json!({
+            "timeline_id": tid,
+            "request_body": {"fork_step": i},
+            "response_body": {"content": format!("fork-response-{}", i + 1)},
+            "model": "gpt-4o",
+            "duration_ms": 100
+        })).await;
+    }
+    let (_, steps_json) = get_json(app, &format!("/api/sessions/{sid}/steps?timeline={tid}")).await;
+    steps_json.as_array().unwrap()
+        .iter()
+        .map(|s| s["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+// ── Step Edit on Fork (T3: PATCH + cascade-count) ──────────
+
+#[tokio::test]
+async fn test_patch_step_edit_response_on_fork() {
+    let (app, store, _tmp) = setup();
+    let (sid, _root_tid) = seed_session(&app, 3).await;
+
+    let (_, fork) = post_json(&app, &format!("/api/sessions/{sid}/fork"), json!({
+        "at_step": 2, "label": "edit-test"
+    })).await;
+    let fork_tid = fork["fork_timeline_id"].as_str().unwrap();
+
+    let step_ids = seed_steps_on_timeline(&app, &sid, fork_tid, 2).await;
+    let fork_own_ids: Vec<_> = step_ids.iter()
+        .filter(|id| {
+            let s = store.lock().unwrap();
+            let step = s.get_step(id).unwrap().unwrap();
+            step.timeline_id == fork_tid
+        })
+        .cloned()
+        .collect();
+    let target_id = &fork_own_ids[0];
+
+    let original_hash = {
+        let s = store.lock().unwrap();
+        s.get_step(target_id).unwrap().unwrap().request_hash.clone()
+    };
+
+    let (status, body) = patch_json(&app, &format!("/api/steps/{target_id}/edit"), json!({
+        "response_body": {"content": "edited response"}
+    })).await;
+
+    assert_eq!(status, StatusCode::OK, "editing response on fork should succeed, got: {body}");
+    assert_eq!(body["step_id"].as_str().unwrap(), target_id.as_str());
+
+    let updated_hash = {
+        let s = store.lock().unwrap();
+        s.get_step(target_id).unwrap().unwrap().request_hash.clone()
+    };
+    assert_eq!(original_hash, updated_hash, "request_hash should be unchanged when only response is edited");
+}
+
+#[tokio::test]
+async fn test_patch_step_edit_request_changes_hash() {
+    let (app, store, _tmp) = setup();
+    let (sid, _root_tid) = seed_session(&app, 2).await;
+
+    let (_, fork) = post_json(&app, &format!("/api/sessions/{sid}/fork"), json!({
+        "at_step": 1, "label": "hash-test"
+    })).await;
+    let fork_tid = fork["fork_timeline_id"].as_str().unwrap();
+
+    let step_ids = seed_steps_on_timeline(&app, &sid, fork_tid, 1).await;
+    let fork_own_ids: Vec<_> = step_ids.iter()
+        .filter(|id| {
+            let s = store.lock().unwrap();
+            s.get_step(id).unwrap().unwrap().timeline_id == fork_tid
+        })
+        .cloned()
+        .collect();
+    let target_id = &fork_own_ids[0];
+
+    let original_hash = {
+        let s = store.lock().unwrap();
+        s.get_step(target_id).unwrap().unwrap().request_hash.clone()
+    };
+
+    let (status, _) = patch_json(&app, &format!("/api/steps/{target_id}/edit"), json!({
+        "request_body": {"messages": [{"role": "user", "content": "different prompt"}]}
+    })).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let updated_hash = {
+        let s = store.lock().unwrap();
+        s.get_step(target_id).unwrap().unwrap().request_hash.clone()
+    };
+    assert_ne!(original_hash, updated_hash, "request_hash must change when request_body is edited");
+}
+
+#[tokio::test]
+async fn test_patch_step_edit_on_main_blocked_and_env_bypass() {
+    let (app, _store, _tmp) = setup();
+
+    // Phase 1: env var unset → editing main blocked
+    unsafe { std::env::remove_var("REWIND_ALLOW_MAIN_EDITS"); }
+
+    let (sid, _root_tid) = seed_session(&app, 2).await;
+
+    let (_, steps_json) = get_json(&app, &format!("/api/sessions/{sid}/steps")).await;
+    let step_id = steps_json.as_array().unwrap()[0]["id"].as_str().unwrap();
+
+    let (status, body) = patch_json(&app, &format!("/api/steps/{step_id}/edit"), json!({
+        "response_body": {"content": "nope"}
+    })).await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "editing main timeline should be blocked");
+    let msg = body.get("raw").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(msg.contains("REWIND_ALLOW_MAIN_EDITS"), "error should mention the env var, got: {msg}");
+
+    // Phase 2: set env var → same edit succeeds
+    unsafe { std::env::set_var("REWIND_ALLOW_MAIN_EDITS", "true"); }
+
+    let (status2, body2) = patch_json(&app, &format!("/api/steps/{step_id}/edit"), json!({
+        "response_body": {"content": "allowed via env"}
+    })).await;
+
+    assert_eq!(status2, StatusCode::OK, "main edit should be allowed with env var set, got: {body2}");
+
+    unsafe { std::env::remove_var("REWIND_ALLOW_MAIN_EDITS"); }
+}
+
+#[tokio::test]
+async fn test_patch_step_cascade_delete() {
+    let (app, _store, _tmp) = setup();
+    let (sid, _root_tid) = seed_session(&app, 3).await;
+
+    let (_, fork) = post_json(&app, &format!("/api/sessions/{sid}/fork"), json!({
+        "at_step": 2, "label": "cascade-test"
+    })).await;
+    let fork_tid = fork["fork_timeline_id"].as_str().unwrap();
+
+    let step_ids = seed_steps_on_timeline(&app, &sid, fork_tid, 4).await;
+    let fork_own_ids: Vec<_> = step_ids.iter()
+        .filter(|id| {
+            let s = _store.lock().unwrap();
+            s.get_step(id).unwrap().unwrap().timeline_id == fork_tid
+        })
+        .cloned()
+        .collect();
+    assert!(fork_own_ids.len() >= 4, "should have 4 own steps on the fork");
+
+    let target_id = &fork_own_ids[0];
+
+    let (status, body) = patch_json(&app, &format!("/api/steps/{target_id}/edit"), json!({
+        "response_body": {"content": "edited"}
+    })).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["deleted_downstream_count"].as_u64().unwrap(), 3,
+        "editing step 1 of 4 should cascade-delete 3 downstream steps");
+}
+
+#[tokio::test]
+async fn test_cascade_count_matches_actual_delete() {
+    let (app, _store, _tmp) = setup();
+    let (sid, _root_tid) = seed_session(&app, 2).await;
+
+    let (_, fork) = post_json(&app, &format!("/api/sessions/{sid}/fork"), json!({
+        "at_step": 1, "label": "count-test"
+    })).await;
+    let fork_tid = fork["fork_timeline_id"].as_str().unwrap();
+
+    let step_ids = seed_steps_on_timeline(&app, &sid, fork_tid, 3).await;
+    let fork_own_ids: Vec<_> = step_ids.iter()
+        .filter(|id| {
+            let s = _store.lock().unwrap();
+            s.get_step(id).unwrap().unwrap().timeline_id == fork_tid
+        })
+        .cloned()
+        .collect();
+    let target_id = &fork_own_ids[0];
+
+    let (cc_status, cc_body) = get_json(&app, &format!("/api/steps/{target_id}/cascade-count")).await;
+    assert_eq!(cc_status, StatusCode::OK);
+    let predicted = cc_body["deleted_downstream_count"].as_u64().unwrap();
+    assert_eq!(cc_body["on_main"].as_bool().unwrap(), false, "fork step should not be on main");
+
+    let (patch_status, patch_body) = patch_json(&app, &format!("/api/steps/{target_id}/edit"), json!({
+        "response_body": {"content": "edited"}
+    })).await;
+    assert_eq!(patch_status, StatusCode::OK);
+    let actual = patch_body["deleted_downstream_count"].as_u64().unwrap();
+
+    assert_eq!(predicted, actual, "cascade-count dry-run should match actual delete count");
+}
+
+#[tokio::test]
+async fn test_patch_step_body_too_large() {
+    let (app, _store, _tmp) = setup();
+    let (sid, _root_tid) = seed_session(&app, 2).await;
+
+    let (_, fork) = post_json(&app, &format!("/api/sessions/{sid}/fork"), json!({
+        "at_step": 1, "label": "large-body"
+    })).await;
+    let fork_tid = fork["fork_timeline_id"].as_str().unwrap();
+
+    let step_ids = seed_steps_on_timeline(&app, &sid, fork_tid, 1).await;
+    let fork_own_ids: Vec<_> = step_ids.iter()
+        .filter(|id| {
+            let s = _store.lock().unwrap();
+            s.get_step(id).unwrap().unwrap().timeline_id == fork_tid
+        })
+        .cloned()
+        .collect();
+    let target_id = &fork_own_ids[0];
+
+    let big = "x".repeat(5 * 1024 * 1024 + 1);
+    let (status, _) = patch_json(&app, &format!("/api/steps/{target_id}/edit"), json!({
+        "request_body": big
+    })).await;
+
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "body > 5MB should be rejected with 413");
+}
+
+#[tokio::test]
+async fn test_patch_step_both_bodies_missing() {
+    let (app, _store, _tmp) = setup();
+    let (sid, _root_tid) = seed_session(&app, 2).await;
+
+    let (_, fork) = post_json(&app, &format!("/api/sessions/{sid}/fork"), json!({
+        "at_step": 1, "label": "empty-body"
+    })).await;
+    let fork_tid = fork["fork_timeline_id"].as_str().unwrap();
+
+    let step_ids = seed_steps_on_timeline(&app, &sid, fork_tid, 1).await;
+    let fork_own_ids: Vec<_> = step_ids.iter()
+        .filter(|id| {
+            let s = _store.lock().unwrap();
+            s.get_step(id).unwrap().unwrap().timeline_id == fork_tid
+        })
+        .cloned()
+        .collect();
+    let target_id = &fork_own_ids[0];
+
+    let (status, _) = patch_json(&app, &format!("/api/steps/{target_id}/edit"), json!({})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "empty body should return 400");
+}
+
+// ── Fork-and-Edit-Step (T5) ───────────────────────────────
+
+#[tokio::test]
+async fn test_fork_and_edit_step_happy_path() {
+    let (app, store, _tmp) = setup();
+    let (sid, root_tid) = seed_session(&app, 3).await;
+
+    let (status, body) = post_json(&app, &format!("/api/sessions/{sid}/fork-and-edit-step"), json!({
+        "source_timeline_id": root_tid,
+        "at_step": 2,
+        "response_body": {"content": "edited at step 2"},
+        "label": "edit-fork"
+    })).await;
+
+    assert_eq!(status, StatusCode::CREATED, "fork-and-edit should return 201, got: {body}");
+    let fork_tid = body["fork_timeline_id"].as_str().unwrap();
+    let edited_step_id = body["step_id"].as_str().unwrap();
+    assert!(!fork_tid.is_empty());
+    assert!(!edited_step_id.is_empty());
+
+    let (_, fork_steps) = get_json(&app, &format!("/api/sessions/{sid}/steps?timeline={fork_tid}")).await;
+    let steps = fork_steps.as_array().unwrap();
+
+    assert_eq!(steps.len(), 2, "fork should have step 1 (inherited) + step 2 (edited)");
+    assert_eq!(steps[0]["step_number"].as_u64().unwrap(), 1, "first step should be inherited step 1");
+    assert_eq!(steps[1]["step_number"].as_u64().unwrap(), 2, "second step should be the edited step 2");
+
+    let s = store.lock().unwrap();
+    let edited = s.get_step(edited_step_id).unwrap().unwrap();
+    assert_eq!(edited.step_number, 2);
+    assert_eq!(edited.timeline_id, fork_tid);
+}
+
+#[tokio::test]
+async fn test_fork_and_edit_step_bad_timeline() {
+    let (app, _store, _tmp) = setup();
+    let (sid, _root_tid) = seed_session(&app, 2).await;
+
+    let (status, _) = post_json(&app, &format!("/api/sessions/{sid}/fork-and-edit-step"), json!({
+        "source_timeline_id": "nonexistent-timeline-id",
+        "at_step": 1,
+        "response_body": {"content": "won't happen"}
+    })).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "nonexistent source_timeline_id should return 400");
+}
+
+#[tokio::test]
+async fn test_fork_and_edit_step_at_zero() {
+    let (app, _store, _tmp) = setup();
+    let (sid, root_tid) = seed_session(&app, 2).await;
+
+    let (status, _) = post_json(&app, &format!("/api/sessions/{sid}/fork-and-edit-step"), json!({
+        "source_timeline_id": root_tid,
+        "at_step": 0,
+        "response_body": {"content": "won't happen"}
+    })).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "at_step=0 should return 400");
+}
