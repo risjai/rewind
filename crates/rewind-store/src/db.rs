@@ -649,6 +649,41 @@ impl Store {
         Ok(())
     }
 
+    /// Atomically insert the timeline and seed its `step_counters` row
+    /// to `seed_counter`. Used by `ReplayEngine::fork` so a runner's
+    /// first recorded step continues at `seed_counter + 1` instead of
+    /// re-using step numbers from the inherited prefix.
+    ///
+    /// Wrapping both writes in a transaction ensures the timeline never
+    /// exists without a seeded counter — the half-state would put us
+    /// right back in the bug this method fixes (review #164 P2).
+    pub fn create_timeline_with_seeded_counter(
+        &self,
+        timeline: &Timeline,
+        seed_counter: u32,
+    ) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO timelines (id, session_id, parent_timeline_id, fork_at_step, created_at, label)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                timeline.id,
+                timeline.session_id,
+                timeline.parent_timeline_id,
+                timeline.fork_at_step,
+                timeline.created_at.to_rfc3339(),
+                timeline.label,
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO step_counters (session_id, timeline_id, counter) VALUES (?1, ?2, ?3)
+             ON CONFLICT(session_id, timeline_id) DO UPDATE SET counter = MAX(counter, ?3)",
+            params![timeline.session_id, timeline.id, seed_counter],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn get_timelines(&self, session_id: &str) -> Result<Vec<Timeline>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, session_id, parent_timeline_id, fork_at_step, created_at, label

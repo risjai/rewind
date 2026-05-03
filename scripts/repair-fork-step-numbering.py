@@ -10,8 +10,16 @@ sorts AFTER the agent's response.
 This script:
   * Finds every fork-timeline whose owned steps include any
     step_number <= fork_at_step.
-  * Renumbers each owned step to step_number + fork_at_step
-    (preserving the chronological order 1->N+1, 2->N+2, ...).
+  * Shifts EVERY owned step on that timeline by `fork_at_step`,
+    not just the ones at step_number <= fork_at_step. The buggy
+    counter started at 1 and kept incrementing, so a fork at
+    step 5 with M=8 recorded iterations has owned steps
+    [1..8] — shifting only [1..5] would leave the later [6..8]
+    in place and create duplicates at step_numbers [6, 7, 8]
+    after the early ones renumber to [6..10] (review #164 P1).
+    Updates are issued in DESCENDING order so transient state
+    never has two rows at the same step_number, even if a
+    UNIQUE constraint is added later.
   * Updates step_counters to reflect the highest new step_number.
 
 Safe to re-run. Idempotent — second run finds nothing to fix.
@@ -77,13 +85,19 @@ def main() -> int:
     total_renumbered = 0
     for fork in broken:
         fork_at = fork["fork_at_step"]
-        # Pull all owned steps with broken numbers, ordered by their
-        # current step_number so the +offset preserves chronology.
+        # Pull EVERY owned step on the fork (not just step_number <=
+        # fork_at_step) and shift each by +fork_at. Ordering DESCENDING
+        # by step_number means the highest existing number gets bumped
+        # first — at no point are two owned rows at the same number.
+        # Critical when the runner overran fork_at_step: a fork@5 with
+        # 8 recorded iterations has owned [1..8]; shifting only [1..5]
+        # would collide them with the un-shifted [6..8] (P1 from PR #164
+        # review).
         cur.execute("""
             SELECT id, step_number FROM steps
-            WHERE timeline_id = ? AND step_number <= ?
-            ORDER BY step_number
-        """, (fork["id"], fork_at))
+            WHERE timeline_id = ?
+            ORDER BY step_number DESC
+        """, (fork["id"],))
         rows = cur.fetchall()
         new_max = 0
         for s in rows:

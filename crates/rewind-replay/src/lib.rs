@@ -158,29 +158,10 @@ impl<'a> ReplayEngine<'a> {
         }
     }
 
-    /// Create a fork: new timeline branching from a specific step.
-    ///
-    /// Seeds the fork's `step_counters` row to `at_step` so the next
-    /// recorded step gets number `at_step + 1`, continuing the
-    /// timeline rather than restarting at 1.
-    ///
-    /// Why this matters: a fork inherits steps `1..=at_step` from
-    /// its parent. Without seeding, the first new step a runner
-    /// records on the fork would land at step_number=1, shadowing
-    /// the inherited prefix in `get_full_timeline_steps` (which
-    /// dedups owned-over-inherited at the same number) and sorting
-    /// before the fork point in any step-ordered view. Operators
-    /// looking at a replay fork would see the agent's fresh work
-    /// numbered 1..N then the inherited turn-N user message at the
-    /// end — backwards from how the conversation actually flowed.
-    ///
-    /// Seeding here intentionally does NOT clash with the fork-and-
-    /// edit-step flow: that path overrides step_number explicitly
-    /// via `upsert_step_on_timeline_and_cascade(at_step, ...)` so
-    /// the counter is irrelevant for the edit's own row. Subsequent
-    /// runner replays starting from that fork still get their
-    /// numbering from `next_step_number`, which now begins at
-    /// `at_step + 1` — exactly what we want.
+    /// Create a fork branching at `at_step`. Seeds `step_counters` to
+    /// `at_step` so the runner's next recorded step is `at_step + 1`,
+    /// chronologically after the inherited prefix (`fork_seeds_step_counter…`
+    /// regression test has the rationale).
     pub fn fork(&self, session_id: &str, source_timeline_id: &str, at_step: u32, label: &str) -> Result<Timeline> {
         let steps = self.get_full_timeline_steps(source_timeline_id, session_id)?;
         let total = u32::try_from(steps.len()).unwrap_or(u32::MAX);
@@ -189,8 +170,7 @@ impl<'a> ReplayEngine<'a> {
         }
 
         let fork = Timeline::new_fork(session_id, source_timeline_id, at_step, label);
-        self.store.create_timeline(&fork)?;
-        self.store.sync_step_counter(session_id, &fork.id, at_step)?;
+        self.store.create_timeline_with_seeded_counter(&fork, at_step)?;
         tracing::info!(
             fork_id = %fork.id,
             source = %source_timeline_id,
