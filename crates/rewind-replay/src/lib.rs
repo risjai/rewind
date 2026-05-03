@@ -158,7 +158,10 @@ impl<'a> ReplayEngine<'a> {
         }
     }
 
-    /// Create a fork: new timeline branching from a specific step
+    /// Create a fork branching at `at_step`. Seeds `step_counters` to
+    /// `at_step` so the runner's next recorded step is `at_step + 1`,
+    /// chronologically after the inherited prefix (`fork_seeds_step_counter…`
+    /// regression test has the rationale).
     pub fn fork(&self, session_id: &str, source_timeline_id: &str, at_step: u32, label: &str) -> Result<Timeline> {
         let steps = self.get_full_timeline_steps(source_timeline_id, session_id)?;
         let total = u32::try_from(steps.len()).unwrap_or(u32::MAX);
@@ -167,7 +170,7 @@ impl<'a> ReplayEngine<'a> {
         }
 
         let fork = Timeline::new_fork(session_id, source_timeline_id, at_step, label);
-        self.store.create_timeline(&fork)?;
+        self.store.create_timeline_with_seeded_counter(&fork, at_step)?;
         tracing::info!(
             fork_id = %fork.id,
             source = %source_timeline_id,
@@ -460,6 +463,82 @@ mod tests {
         let engine = ReplayEngine::new(&store);
         let fork = engine.fork(&sid, &tid, 2, "valid-fork");
         assert!(fork.is_ok());
+    }
+
+    #[test]
+    fn fork_seeds_step_counter_so_replay_steps_continue_after_inherited_prefix() {
+        // Regression: previously `engine.fork()` created the timeline
+        // row but didn't seed step_counters, so the runner's first
+        // recorded step on the fork landed at step_number=1. That
+        // collided with the inherited prefix (1..=fork_at_step) and
+        // — combined with the owned-over-inherited dedup —
+        // shadowed the original turn-1..N steps with the agent's
+        // *new* turn-(N+1) work. Visible bug on dev1 session
+        // ray-agent-a18ac577 (2026-05-03): replay against an
+        // edited-fork at step 6 produced owned steps 1..5 + an
+        // inherited step 6, which sorted to put the user's edited
+        // question AFTER the agent's response. Backwards.
+        //
+        // After the fix, fork(at_step=N) seeds the counter to N so
+        // the runner's first step is N+1. Sort order matches
+        // chronology again.
+        let (_tmp, store) = setup();
+        let (sid, tid) = seed_session_with_steps(&store, 6);
+
+        let engine = ReplayEngine::new(&store);
+        let fork = engine.fork(&sid, &tid, 6, "replay-fork").unwrap();
+
+        // First runner-recorded step on the fork: should be 7, not 1.
+        let next1 = store.next_step_number(&sid, &fork.id).unwrap();
+        assert_eq!(
+            next1, 7,
+            "first recorded step on a fork@6 must be #7 to continue \
+             after the inherited prefix (got #{next1})"
+        );
+        let next2 = store.next_step_number(&sid, &fork.id).unwrap();
+        assert_eq!(next2, 8);
+        let next3 = store.next_step_number(&sid, &fork.id).unwrap();
+        assert_eq!(next3, 9);
+
+        // step_counters row exists with the seeded value (so a
+        // subsequent runner that re-attaches sees the right cursor).
+        let count = store
+            .count_step_counters_for_timeline_in_session(&sid, &fork.id)
+            .unwrap();
+        assert_eq!(count, 1, "exactly one step_counters row for the fork");
+    }
+
+    #[test]
+    fn fork_at_step_1_seeds_counter_to_1_so_first_replay_step_is_2() {
+        // Edge case: fork at the very first step. Inherited prefix
+        // is just step 1; the next recorded step should be 2.
+        let (_tmp, store) = setup();
+        let (sid, tid) = seed_session_with_steps(&store, 3);
+        let engine = ReplayEngine::new(&store);
+        let fork = engine.fork(&sid, &tid, 1, "fork-at-1").unwrap();
+        let next = store.next_step_number(&sid, &fork.id).unwrap();
+        assert_eq!(next, 2);
+    }
+
+    #[test]
+    fn fork_does_not_disturb_existing_step_counters_on_other_timelines() {
+        // Defensive: seeding the new fork's row must not touch the
+        // parent's counter. Parent root timeline keeps its existing
+        // counter (3 in this fixture, since seed_session_with_steps
+        // calls create_step which increments the counter).
+        let (_tmp, store) = setup();
+        let (sid, tid) = seed_session_with_steps(&store, 3);
+
+        // Sync parent's counter to a known value so the assertion
+        // doesn't depend on create_step's internal bookkeeping.
+        store.sync_step_counter(&sid, &tid, 3).unwrap();
+
+        let engine = ReplayEngine::new(&store);
+        let _fork = engine.fork(&sid, &tid, 2, "side-effect-test").unwrap();
+
+        // Parent's next step is still 4 (counter was 3 -> next = 4).
+        let parent_next = store.next_step_number(&sid, &tid).unwrap();
+        assert_eq!(parent_next, 4, "fork must not disturb parent counter");
     }
 
     // ── delete_fork tests (#143) ─────────────────────────────────

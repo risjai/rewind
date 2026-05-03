@@ -7,9 +7,22 @@ use http_body_util::BodyExt;
 use rewind_store::*;
 use rewind_web::{AppState, HookIngestionState, StoreEvent};
 use serde_json::json;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use tempfile::TempDir;
 use tower::ServiceExt;
+
+/// Serializes any test that mutates the global `REWIND_ALLOW_MAIN_EDITS`
+/// env var. Without this, two tests that both flip the var run in
+/// parallel and one ends up reading the other's state — leading to
+/// intermittent CI flakes (review #164: the parallel race surfaced
+/// after switching `test_patch_promote_main_protection_follows_target`
+/// from `.last()` to a fixed step_number, which made the test do a
+/// real PATCH against main with the env bypass and so collide with
+/// `test_patch_step_edit_on_main_blocked_and_env_bypass`).
+fn main_edits_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
+}
 
 fn setup() -> (Router, Arc<Mutex<Store>>, TempDir) {
     let tmp = TempDir::new().unwrap();
@@ -1427,6 +1440,7 @@ async fn test_patch_step_edit_request_changes_hash() {
 
 #[tokio::test]
 async fn test_patch_step_edit_on_main_blocked_and_env_bypass() {
+    let _env_guard = main_edits_env_lock();
     let (app, _store, _tmp) = setup();
 
     // Phase 1: env var unset → editing main blocked
@@ -1835,6 +1849,7 @@ async fn test_patch_promote_visibility_400() {
 
 #[tokio::test]
 async fn test_patch_promote_main_protection_follows_target() {
+    let _env_guard = main_edits_env_lock();
     let (app, _store, _tmp) = setup();
     unsafe { std::env::remove_var("REWIND_ALLOW_MAIN_EDITS"); }
 
@@ -1845,18 +1860,31 @@ async fn test_patch_promote_main_protection_follows_target() {
     })).await;
     let fork_tid = fork["fork_timeline_id"].as_str().unwrap();
 
+    // Add a fork-owned step so the fork has both inherited (1, 2) and
+    // owned (3) rows in its view. We then promote-and-mutate the
+    // INHERITED step #2 with target=main — the visibility check needs
+    // an id that exists on both timelines, and inherited rows trivially
+    // satisfy that. Picking an explicit step_number here (rather than
+    // .last()) makes the test independent of the step_counters seeding
+    // behavior on forks: before v0.14.9, fork owned-steps started at 1
+    // and (.last() returned the inherited step at step #2 by accident);
+    // after v0.14.9, fork owned-steps start at fork_at_step+1=3 and
+    // .last() returns the fork-owned step (which isn't visible on main).
     seed_steps_on_timeline(&app, &sid, fork_tid, 1).await;
     let (_, fork_steps) = get_json(&app, &format!("/api/sessions/{sid}/steps?timeline={fork_tid}")).await;
-    let fork_owned_id = fork_steps.as_array().unwrap().last().unwrap()["id"].as_str().unwrap();
+    let inherited_step_id = fork_steps.as_array().unwrap().iter()
+        .find(|s| s["step_number"].as_u64() == Some(2))
+        .and_then(|s| s["id"].as_str())
+        .expect("step #2 should be visible on the fork (inherited from main)");
 
-    let (status, _) = patch_json(&app, &format!("/api/steps/{fork_owned_id}/edit"), json!({
+    let (status, _) = patch_json(&app, &format!("/api/steps/{inherited_step_id}/edit"), json!({
         "response_body": {"target_main": true},
         "target_timeline_id": root_tid
     })).await;
     assert_eq!(status, StatusCode::CONFLICT, "targeting main should be blocked");
 
     unsafe { std::env::set_var("REWIND_ALLOW_MAIN_EDITS", "true"); }
-    let (status2, _) = patch_json(&app, &format!("/api/steps/{fork_owned_id}/edit"), json!({
+    let (status2, _) = patch_json(&app, &format!("/api/steps/{inherited_step_id}/edit"), json!({
         "response_body": {"target_main": true},
         "target_timeline_id": root_tid
     })).await;
