@@ -10,7 +10,6 @@
   <strong>Other tools show what happened. Rewind lets you fix it - without re-running.</strong>
   <br/>
   <br/>
-  <a href="https://agentoptics.dev">Website</a> &nbsp;&bull;&nbsp;
   <a href="#the-problem">Why</a> &nbsp;&bull;&nbsp;
   <a href="#see-it-in-action">Demo</a> &nbsp;&bull;&nbsp;
   <a href="#install">Install</a> &nbsp;&bull;&nbsp;
