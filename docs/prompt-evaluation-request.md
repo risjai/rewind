@@ -6,42 +6,43 @@
 
 I want you to evaluate a developer tool called **Rewind** to see if it would be useful for our project. Rewind bills itself as "Chrome DevTools for AI agents" — a unified platform for **tracing**, **evaluation**, and **time-travel debugging** of AI agent sessions. It records LLM calls, tool invocations, and context windows, then lets you inspect, fork, replay from any failure point, diff timelines, run regression tests, and score agent outputs with a built-in eval system — all from a single local-first binary.
 
-This is not a trace viewer or a hosted SaaS. It's a statically-linked binary with a SQLite-backed store, a Python SDK, a web dashboard, an MCP server, and a CLI with 28+ commands. MIT licensed.
+This is not a trace viewer or a hosted SaaS. It's a statically-linked binary with a SQLite-backed store, a Python SDK, a web dashboard, an MCP server, and a rich CLI. MIT licensed.
 
 Here's what I need you to do:
 
-**1. Read their docs**: Fetch and read https://github.com/agentoptics/rewind — focus on the README, the Python SDK at `python/rewind_agent/`, the examples in `examples/`, and the docs in `docs/`. Also check the PyPI page at https://pypi.org/project/rewind-agent/ for install info. Current versions: Rust CLI v0.6.0, Python SDK v0.9.0.
+**1. Read their docs**: Fetch and read https://github.com/agentoptics/rewind — focus on the README, the Python SDK at `python/rewind_agent/`, the examples in `examples/`, and the docs in `docs/`. Also check the PyPI page at https://pypi.org/project/rewind-agent/ for install info and the latest release notes for current capabilities.
 
 **2. Understand our codebase**: Look at how we currently build and run agents — what frameworks we use (OpenAI SDK, Anthropic SDK, OpenAI Agents SDK, Pydantic AI, LangGraph, CrewAI, custom loops, etc.), how we handle failures, how we test agent behavior, and what observability we already have (LangSmith, Langfuse, Helicone, Braintrust, or nothing).
 
 **3. Write an evaluation report** covering:
 
-**a. Integration fit**: Does Rewind support our agent framework and LLM provider? They have native integrations for OpenAI Agents SDK (`TracingProcessor` subclass) and Pydantic AI (auto-patched Hooks), wrapper support for LangGraph (`wrap_langgraph`) and CrewAI (`wrap_crew`), plus a transparent HTTP proxy that works with any framework and language. They also have Claude Code / Cursor / Windsurf integration via an MCP server with 25 tools. How many lines of code would it take to integrate? Show a concrete before/after snippet using our actual code.
+**a. Integration fit**: Does Rewind support our agent framework and LLM provider? They have native integrations for OpenAI Agents SDK (`TracingProcessor` subclass) and Pydantic AI (auto-patched Hooks), wrapper support for LangGraph (`wrap_langgraph`) and CrewAI (`wrap_crew`), plus a transparent HTTP proxy that works with any framework and language. They also have Claude Code / Cursor / Windsurf integration via an MCP server. How many lines of code would it take to integrate? Show a concrete before/after snippet using our actual code.
 
 **b. Problem/solution match**: Do we actually have the problems Rewind solves? Specifically:
    - Are we spending time/money re-running full agent chains to debug failures? (Rewind's fork-and-replay serves steps 1–N from cache at 0 tokens.)
    - Do we lack visibility into what the model saw at each step? (Rewind captures the exact context window, system prompt, and tool responses per step.)
    - Do we have agent regression testing today? (Rewind's `rewind assert` creates baselines from known-good sessions and checks new runs against them — with a GitHub Action for CI.)
-   - Do we have an eval system for scoring agent outputs? (Rewind has datasets, 6 evaluator types including custom, experiments, comparison, and `--fail-below` for CI gates.)
-   - Are we building multi-agent workflows? (Rewind v0.5 added hierarchical span trees with agent boundaries, tool calls, handoffs, and thread views.)
+   - Do we have an eval system for scoring agent outputs? (Rewind has datasets, multiple evaluator types including LLM-as-judge and custom, experiments, comparison, and `--fail-below` for CI gates.)
+   - Are we building multi-agent workflows? (Rewind has hierarchical span trees with agent boundaries, tool calls, handoffs, and thread views.)
+   - Are we debugging production failures? (Rewind imports OTLP traces and Langfuse traces, so you can replay/fork a production failure locally.)
    - Are we using Claude Code / Cursor / Windsurf for development? (Rewind has an MCP server and Claude Code hooks integration for observing coding agent sessions in real-time.)
 
 **c. Cost/benefit**: Rewind claims replay-from-failure saves tokens and time. Given our typical agent runs (estimate step count, tokens per run, cost per run), what would the savings look like for a debugging session? Their claim: a 20-step agent at $2/run × 8 debug cycles = $16 wasted; with replay-from-failure, only the steps after the fork point re-run.
 
 **d. Comparison to our current stack**: If we're already using LangSmith, Langfuse, Braintrust, or similar — what does Rewind do that our current tool doesn't? The key differentiators to evaluate:
    - Time-travel debugging (fork, replay, diff) — no observability tool has this
+   - `rewind fix` — AI-powered diagnosis with proxy request rewriting and hypothesis testing
    - Instant Replay caching (identical requests → 0 tokens, 0ms)
    - Local-first (single binary, no cloud dependency, no API keys for infrastructure)
    - Tracing + evals + debugging in one data model (fork a session → replay → diff → score)
+   - Bidirectional OTel + Langfuse interop (export to your existing tool, or import production traces in for local debug)
    - Language-agnostic proxy mode (any language, not just Python)
 
 **e. Gaps and risks**: What doesn't Rewind cover that we need? Evaluate these known gaps:
-   - No LLM-as-judge evaluators yet (planned for v0.7)
-   - No OTel export yet (planned for v0.7)
-   - No team collaboration / shared sessions (planned for v1.0)
+   - No team collaboration / shared sessions in a hosted backend (HTML session export exists for one-off sharing; full multi-user planned for v1.0)
    - No production monitoring / alerting
    - No prompt management / playground
-   - Any concerns about the proxy intercepting our traffic? Is the project mature enough? (Check commit activity, contributor count, release cadence — they've shipped 6 versions: v0.1–v0.6.)
+   - Any concerns about the proxy intercepting our traffic? Is the project mature enough? (Check commit activity, contributor count, and release cadence on GitHub.)
 
 **f. Verdict**: On a scale of 1–5, how useful would this be for us right now? Answer three questions:
    1. What's the single strongest reason to adopt it?
