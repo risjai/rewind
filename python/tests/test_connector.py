@@ -132,17 +132,26 @@ class TestSessionLifecycle(_ConnectorTestBase):
 
 
 class TestReplayDispatch(_ConnectorTestBase):
+    _ALL_REPLAY_VARS = (
+        "REWIND_SESSION_ID",
+        "REWIND_REPLAY_CONTEXT_ID",
+        "REWIND_REPLAY_CONTEXT_TIMELINE_ID",
+    )
+
+    def _replay_env(self, **overrides):
+        """Build a clean env dict with replay vars set unless overridden."""
+        base = {k: v for k, v in os.environ.items() if k not in self._ALL_REPLAY_VARS}
+        base.update({
+            "REWIND_SESSION_ID": "s-replay",
+            "REWIND_REPLAY_CONTEXT_ID": "ctx-replay",
+            "REWIND_REPLAY_CONTEXT_TIMELINE_ID": "tl-fork",
+        })
+        base.update(overrides)
+        return {k: v for k, v in base.items() if v is not None}
+
     def test_replay_env_skips_session_start(self):
-        with mock.patch.dict(
-            os.environ,
-            {
-                "REWIND_SESSION_ID": "s-replay",
-                "REWIND_REPLAY_CONTEXT_ID": "ctx-replay",
-                "REWIND_REPLAY_CONTEXT_TIMELINE_ID": "tl-fork",
-                "REWIND_URL": self.base_url,
-            },
-            clear=False,
-        ):
+        env = self._replay_env(REWIND_URL=self.base_url)
+        with mock.patch.dict(os.environ, env, clear=True):
             self.assertTrue(_is_replay_dispatch())
             with setup(name="replay-handler", base_url=self.base_url) as client:
                 self.assertIsInstance(client, ExplicitClient)
@@ -151,19 +160,46 @@ class TestReplayDispatch(_ConnectorTestBase):
         self.assertEqual(_MockHandler.sessions_started, [])
         self.assertEqual(_MockHandler.sessions_ended, [])
 
-    def test_partial_replay_env_does_not_trigger_replay_path(self):
-        # Only one of the two required vars set → not a replay dispatch.
-        with mock.patch.dict(
-            os.environ,
-            {"REWIND_SESSION_ID": "s-only"},
-            clear=False,
-        ), mock.patch.dict(os.environ, {"REWIND_REPLAY_CONTEXT_ID": ""}, clear=False):
-            os.environ.pop("REWIND_REPLAY_CONTEXT_ID", None)
-            self.assertFalse(_is_replay_dispatch())
+    def test_all_three_required_for_replay_mode(self):
+        # Each replay var, individually unset, breaks replay-mode detection.
+        # Without all three, intercept._install warns about an undefined
+        # recording target — better to fall through to normal session start.
+        for omit in self._ALL_REPLAY_VARS:
+            with self.subTest(omit=omit):
+                env = self._replay_env(**{omit: None})
+                with mock.patch.dict(os.environ, env, clear=True):
+                    self.assertFalse(
+                        _is_replay_dispatch(),
+                        f"missing {omit} should disable replay mode",
+                    )
+
+    def test_partial_replay_env_falls_through_to_session_start(self):
+        # Sanity: with only sessionid + replayctxid (no timeline), the
+        # connector starts a fresh session instead of half-attaching.
+        env = self._replay_env(REWIND_REPLAY_CONTEXT_TIMELINE_ID=None)
+        with mock.patch.dict(os.environ, env, clear=True):
+            with setup(name="incomplete-replay", base_url=self.base_url):
+                pass
+        self.assertEqual(len(_MockHandler.sessions_started), 1)
+        self.assertEqual(_MockHandler.sessions_started[0]["name"], "incomplete-replay")
+
+
+def _fake_req(netloc: str):
+    """Build the minimal duck-typed RewindRequest a Predicates.is_llm_call needs."""
+    class _Parts:
+        pass
+
+    parts = _Parts()
+    parts.netloc = netloc
+    req = type("R", (), {})()
+    req.url_parts = parts
+    return req
 
 
 class TestHostPredicates(_ConnectorTestBase):
-    def test_hosts_from_kwarg(self):
+    """Behavioral coverage — assert what is_llm_call returns, not on private state."""
+
+    def _capture_predicates_via_setup(self, **setup_kwargs):
         captured = {}
 
         def fake_install(predicates=None):
@@ -172,68 +208,56 @@ class TestHostPredicates(_ConnectorTestBase):
         with mock.patch("rewind_agent.connector.install", side_effect=fake_install), \
              mock.patch("rewind_agent.connector.uninstall"), \
              mock.patch("rewind_agent.connector.is_installed", return_value=False):
-            with setup(
-                name="custom",
-                base_url=self.base_url,
-                llm_hosts=("llm-gateway.example.com",),
-            ):
+            with setup(name="capture", base_url=self.base_url, **setup_kwargs):
                 pass
+        return captured["predicates"]
 
-        preds = captured["predicates"]
+    def test_kwarg_hosts_match_via_substring(self):
+        preds = self._capture_predicates_via_setup(
+            llm_hosts=("llm-gateway.example.com",),
+        )
         self.assertIsInstance(preds, _HostPredicates)
-        self.assertEqual(preds._hosts, ("llm-gateway.example.com",))
+        # The kwarg host matches — including substring containment.
+        self.assertTrue(preds.is_llm_call(_fake_req("llm-gateway.example.com")))
+        self.assertTrue(preds.is_llm_call(_fake_req("private-llm-gateway.example.com")))
+        # Hosts not in kwarg AND not on the strict-by-default provider list don't match.
+        self.assertFalse(preds.is_llm_call(_fake_req("unrelated.example.com")))
 
-    def test_hosts_from_env(self):
-        captured = {}
-
-        def fake_install(predicates=None):
-            captured["predicates"] = predicates
-
+    def test_env_hosts_parsed_with_whitespace_and_empties_dropped(self):
         with mock.patch.dict(
             os.environ,
             {"REWIND_LLM_HOSTS": "a.example,b.example , ,c.example"},
             clear=False,
-        ), mock.patch("rewind_agent.connector.install", side_effect=fake_install), \
-             mock.patch("rewind_agent.connector.uninstall"), \
-             mock.patch("rewind_agent.connector.is_installed", return_value=False):
-            with setup(name="env-hosts", base_url=self.base_url):
-                pass
-
-        preds = captured["predicates"]
+        ):
+            preds = self._capture_predicates_via_setup()
         self.assertIsInstance(preds, _HostPredicates)
-        # Empty entries dropped, surrounding whitespace stripped.
-        self.assertEqual(
-            preds._hosts,
-            ("a.example", "b.example", "c.example"),
-        )
+        # All three configured hosts match.
+        self.assertTrue(preds.is_llm_call(_fake_req("a.example")))
+        self.assertTrue(preds.is_llm_call(_fake_req("svc.b.example")))
+        self.assertTrue(preds.is_llm_call(_fake_req("c.example:8080")))
+        # The empty / whitespace-only entries did NOT become a wildcard:
+        # an unrelated host that doesn't share a substring with any of
+        # a/b/c.example must still miss.
+        self.assertFalse(preds.is_llm_call(_fake_req("unrelated.example")))
 
-    def test_no_hosts_uses_default_predicates(self):
-        captured = {}
+    def test_no_hosts_uses_intercept_default_predicates(self):
+        # Empty REWIND_LLM_HOSTS and no kwarg → install() gets None, which
+        # tells intercept to apply its strict-by-default DefaultPredicates.
+        # We do NOT wrap an empty _HostPredicates here (would silently
+        # broaden matching to "no hosts" — never True for unknown hosts —
+        # which IS the same in effect, but it's clearer to delegate to
+        # intercept's default rather than introduce an empty wrapper.)
+        with mock.patch.dict(os.environ, {"REWIND_LLM_HOSTS": ""}, clear=False):
+            preds = self._capture_predicates_via_setup()
+        self.assertIsNone(preds)
 
-        def fake_install(predicates=None):
-            captured["predicates"] = predicates
-
-        with mock.patch.dict(os.environ, {"REWIND_LLM_HOSTS": ""}, clear=False), \
-             mock.patch("rewind_agent.connector.install", side_effect=fake_install), \
-             mock.patch("rewind_agent.connector.uninstall"), \
-             mock.patch("rewind_agent.connector.is_installed", return_value=False):
-            with setup(name="defaults", base_url=self.base_url):
-                pass
-
-        # No custom hosts → no _HostPredicates wrapper; install gets None
-        # (DefaultPredicates is applied by intercept itself).
-        self.assertIsNone(captured["predicates"])
-
-    def test_predicate_matches_substring(self):
-        preds = _HostPredicates(("internal-gateway",))
-
-        class FakeReq:
-            class _Parts:
-                netloc = "private-internal-gateway.example.com"
-
-            url_parts = _Parts()
-
-        self.assertTrue(preds.is_llm_call(FakeReq()))
+    def test_predicate_falls_through_to_default_provider_list(self):
+        # When custom hosts don't match, the parent DefaultPredicates handles
+        # known providers like api.openai.com — verify the chain.
+        preds = _HostPredicates(("custom-gw.example",))
+        self.assertTrue(preds.is_llm_call(_fake_req("custom-gw.example")))
+        self.assertTrue(preds.is_llm_call(_fake_req("api.openai.com")))
+        self.assertFalse(preds.is_llm_call(_fake_req("unrelated.com")))
 
 
 class TestPublicExport(unittest.TestCase):

@@ -162,7 +162,7 @@ def setup(name, *, base_url=None, llm_hosts=None, enabled=None):
         env = os.environ.get("REWIND_LLM_HOSTS", "")
         hosts = tuple(env.split(",")) if env else _DEFAULT_LLM_HOSTS
 
-    url = base_url or os.environ.get("REWIND_URL", "http://localhost:4800")
+    url = base_url or os.environ.get("REWIND_URL", "http://127.0.0.1:4800")
     client = ExplicitClient(base_url=url)
     with client.session(name):
         install(predicates=_OrgPredicates(hosts))
@@ -183,7 +183,7 @@ with my_org_rewind.setup("alerts-triage"):
 Configurable knobs every connector should expose:
 
 - `REWIND_ENABLED=0` — kill switch with zero overhead in prod when off.
-- `REWIND_URL` — Rewind server URL (default `http://localhost:4800`).
+- `REWIND_URL` — Rewind server URL (default `http://127.0.0.1:4800`).
 - `REWIND_LLM_HOSTS` — comma-separated hostnames to treat as LLM gateways.
 - Per-call kwargs override env values, useful for tests and multi-tenant cases.
 
@@ -192,6 +192,16 @@ Configurable knobs every connector should expose:
 **Recording silently no-ops.** `record_llm_call` returns `None` when no session is active. Always wrap your agent loop in `with client.session(...)` before calling `install(...)` or `record_*`. The intercept layer reuses the session's contextvars; without them, intercepted calls succeed (HTTP-wise) but record nothing.
 
 **Don't combine `init()` with `intercept.install()`.** `rewind_agent.init()` patches the OpenAI / Anthropic Python SDKs at the SDK layer; `intercept.install()` patches httpx / requests / aiohttp at the transport layer. Running both in the same process double-records every call. Pick one path per process.
+
+**`connector.setup()` is sync, even in async code.** It's a `@contextmanager`, not an `@asynccontextmanager`. Async callers should use plain `with` — not `async with` — even inside an `async def`:
+
+```python
+async def main():
+    with rewind_agent.connector.setup(name="my-agent"):  # NOT `async with`
+        await run_agent_loop()
+```
+
+Only the setup and teardown are synchronous (HTTP POST `/api/sessions/start` and `/api/sessions/{id}/end`); the body of the block can be fully async.
 
 **`requests.Session()` constructed before `install()` keeps its old adapter.** The intercept layer patches `Session.__init__`; live instances aren't mutated. Move `install()` earlier in startup, or call `session.mount(...)` explicitly for pre-existing sessions. Same caveat applies to `httpx.Client` constructed pre-install.
 
