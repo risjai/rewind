@@ -23,35 +23,71 @@ Need to bake in defaults for your org / framework?
 
 Most integrators stop at Tier 1.
 
-## Tier 1 — `intercept.install()`
+## Tier 1 — `connector.setup()`
 
-For any agent that talks to LLMs over httpx, requests, or aiohttp. The intercept layer patches the transport once; every client constructed afterward routes through Rewind. **No per-call-site instrumentation.**
+For any agent that talks to LLMs over httpx, requests, or aiohttp. The connector wraps a session, installs HTTP intercept, and tears both down on exit — one call, one `with` block, no order to remember.
+
+```python
+import rewind_agent
+
+with rewind_agent.connector.setup(name="my-agent"):
+    run_agent_loop()
+```
+
+For a custom LLM gateway hostname, pass `llm_hosts` (or set `REWIND_LLM_HOSTS=a.example,b.example` in the env):
+
+```python
+with rewind_agent.connector.setup(
+    name="my-agent",
+    llm_hosts=("llm-gateway.example",),
+):
+    run_agent_loop()
+```
+
+The yielded value is an `ExplicitClient` — useful for non-HTTP record paths (gRPC, in-process LLMs) inside the same block:
+
+```python
+with rewind_agent.connector.setup(name="my-agent") as client:
+    response = my_grpc_client.chat(request)
+    client.record_llm_call(
+        request=request, response=response.dict(),
+        model="my-private-llama", duration_ms=duration_ms,
+    )
+```
+
+**Configuration knobs** (env > default; kwargs override env):
+
+- `REWIND_ENABLED=0` — kill switch with zero overhead in prod when off.
+- `REWIND_URL` — Rewind server URL (default `http://127.0.0.1:4800`).
+- `REWIND_LLM_HOSTS` — comma-separated hostnames to treat as LLM gateways in addition to the strict-by-default provider list.
+
+**Replay-aware**: when `REWIND_SESSION_ID` and `REWIND_REPLAY_CONTEXT_ID` are set (the runner-subprocess pattern from [runners.md](runners.md)), `setup()` skips creating a fresh session and lets `intercept.install()` attach to the existing replay context. Drop the connector into runner-driven replay handlers without phantom sessions.
+
+For per-library examples, custom predicates, streaming behavior, the savings counter, and troubleshooting, see [intercept-quickstart.md](intercept-quickstart.md).
+
+### When you need finer control
+
+If you need to install intercept and start sessions independently — for example, a long-running process that opens many short sessions back-to-back — use the underlying primitives directly:
 
 ```python
 from rewind_agent.explicit import ExplicitClient
-from rewind_agent.intercept import DefaultPredicates, install
+from rewind_agent.intercept import DefaultPredicates, install, uninstall
 
 class MyPredicates(DefaultPredicates):
     def is_llm_call(self, req):
-        # Match your custom gateway hostname; fall back to the built-in
-        # provider list (api.openai.com, api.anthropic.com, etc.)
-        if "llm-gateway.example" in req.url_parts.netloc:
-            return True
-        return super().is_llm_call(req)
+        return "llm-gateway.example" in req.url_parts.netloc or super().is_llm_call(req)
 
 client = ExplicitClient()
-with client.session("my-agent"):
-    install(predicates=MyPredicates())
-    try:
-        run_agent_loop()
-    finally:
-        from rewind_agent.intercept import uninstall
-        uninstall()
+install(predicates=MyPredicates())  # once at process startup
+try:
+    for task in tasks:
+        with client.session(name=task.name):  # short session per task
+            run_task(task)
+finally:
+    uninstall()
 ```
 
-Why both `client.session(...)` and `install(...)`: the session sets the `_session_id` / `_timeline_id` contextvars; the intercept layer reads those vars on every recorded call. Without an active session, intercepted calls silently no-op. **This is the most common integration mistake** — see [intercept-quickstart.md](intercept-quickstart.md#troubleshooting).
-
-For everything else (custom predicates, streaming behavior, savings counter, replay), see [intercept-quickstart.md](intercept-quickstart.md). Tier 1 is the path that doc walks through end-to-end.
+The order matters: the session sets `_session_id` / `_timeline_id` contextvars; the intercept layer reads those vars on every recorded call. Without an active session, intercepted calls silently no-op. **This is the most common Tier-1 mistake** — `connector.setup()` exists specifically to remove this footgun.
 
 ## Tier 2 — `ExplicitClient`
 
