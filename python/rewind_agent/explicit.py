@@ -33,6 +33,7 @@ import functools
 import inspect
 import json
 import logging
+import os
 import time
 import urllib.error
 import urllib.request
@@ -99,8 +100,15 @@ class RewindReplayDivergenceError(RuntimeError):
 class ExplicitClient:
     """Wire-format-agnostic recording client for the Rewind explicit API."""
 
-    def __init__(self, base_url: str = "http://127.0.0.1:4800"):
-        self.base_url = base_url.rstrip("/")
+    def __init__(self, base_url: str | None = None):
+        # Resolution order: explicit kwarg > $REWIND_URL > localhost default.
+        # Matches intercept._install._bootstrap_replay_context_from_env so a
+        # process running rewind on a non-default port (multi-tenant deploys,
+        # local dev where 4800 is taken) sets REWIND_URL once and every
+        # ExplicitClient — including the lazy singleton in intercept._flow —
+        # reads it consistently.
+        resolved = base_url or os.environ.get("REWIND_URL", "http://127.0.0.1:4800")
+        self.base_url = resolved.rstrip("/")
         self._enabled = True
         self._session_cache: dict[str, tuple[str, str, float]] = {}
 
