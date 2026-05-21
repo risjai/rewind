@@ -504,5 +504,39 @@ class TestEnsureSession(unittest.TestCase):
         self.assertEqual(len(MockRewindHandler.recorded_steps), 1)
 
 
+class TestExplicitClientBaseUrlResolution(unittest.TestCase):
+    """Cover the __init__ resolution order: kwarg > $REWIND_URL > default."""
+
+    def test_default_base_url(self):
+        import os
+        from unittest import mock
+
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("REWIND_URL", None)
+            client = ExplicitClient()
+            self.assertEqual(client.base_url, "http://127.0.0.1:4800")
+
+    def test_env_var_used_when_kwarg_absent(self):
+        import os
+        from unittest import mock
+
+        with mock.patch.dict(
+            os.environ, {"REWIND_URL": "http://rewind.test:9999/"}, clear=False
+        ):
+            client = ExplicitClient()
+            # Trailing slash gets stripped to match the existing convention.
+            self.assertEqual(client.base_url, "http://rewind.test:9999")
+
+    def test_kwarg_wins_over_env_var(self):
+        import os
+        from unittest import mock
+
+        with mock.patch.dict(
+            os.environ, {"REWIND_URL": "http://rewind.from-env:9999"}, clear=False
+        ):
+            client = ExplicitClient(base_url="http://rewind.from-kwarg:7777")
+            self.assertEqual(client.base_url, "http://rewind.from-kwarg:7777")
+
+
 if __name__ == "__main__":
     unittest.main()

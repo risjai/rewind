@@ -85,6 +85,22 @@ crew = rewind_agent.wrap_crew(crew)
 result = crew.kickoff()
 ```
 
+## Bring your own framework
+
+Building an agent or framework that isn't in the list above? Don't write a custom HTTP emitter — Rewind ships the integration primitives. Three tiers, pick the one that matches your transport:
+
+- **Tier 1** — your agent uses `httpx` / `requests` / `aiohttp`: one-liner via `rewind_agent.connector.setup()`.
+- **Tier 2** — custom transport (gRPC, in-process, mTLS-tunneled): ~30-line `ExplicitClient` integration.
+- **Tier 3** — shipping a connector for an org or framework family (one package consumed by every internal agent): thin wrapper around Tier 1 with org-specific defaults.
+
+```python
+import rewind_agent
+with rewind_agent.connector.setup(name="my-agent"):
+    run_agent_loop()
+```
+
+See **[hdk.md](hdk.md)** for the full decision tree, configuration knobs (`REWIND_ENABLED`, `REWIND_URL`, `REWIND_LLM_HOSTS`), and common pitfalls.
+
 ## Examples
 
 - [`examples/04_langgraph.py`](../examples/04_langgraph.py) -- LangGraph integration

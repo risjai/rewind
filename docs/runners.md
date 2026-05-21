@@ -365,3 +365,12 @@ The runner authenticated successfully but is trying to post
 events on a job belonging to a different runner. Usually
 means the runner is processing a stale/leaked dispatch — check
 runner logs for an old job_id.
+
+---
+
+## Integrating a non-runner agent with Rewind
+
+Runners are the dashboard's "Run replay" path. If you're starting from a
+plain agent and want recording / fork / replay without a webhook, see
+[hdk.md](hdk.md) — three-tier guide for picking between
+`intercept.install()`, `ExplicitClient`, and a small connector package.

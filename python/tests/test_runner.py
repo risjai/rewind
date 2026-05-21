@@ -242,9 +242,19 @@ def test_attach_replay_context_sets_contextvars() -> None:
     assert _replay_context_id.get() == "ctx-attach"
 
 
-def test_install_bootstraps_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``intercept.install()`` reads REWIND_SESSION_ID +
-    REWIND_REPLAY_CONTEXT_ID and attaches before patching.
+def test_install_bootstraps_only_when_all_three_env_vars_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #171 round 2: bootstrap requires all three env vars
+    (REWIND_SESSION_ID + REWIND_REPLAY_CONTEXT_ID +
+    REWIND_REPLAY_CONTEXT_TIMELINE_ID).
+
+    Previously, the bootstrap fired with only the first two and treated
+    the timeline as optional with a WARN. That contract diverged from
+    connector.setup() and caused a clobber bug — see
+    test_intercept_install.TestEnvVarBootstrapContract for full coverage.
+    Here we just sanity-check the subprocess path: missing timeline
+    means no attach.
     """
     from rewind_agent.explicit import _replay_context_id, _session_id, _timeline_id
     from rewind_agent.intercept import _install
@@ -261,8 +271,9 @@ def test_install_bootstraps_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
     try:
         _install._bootstrap_replay_context_from_env()
-        assert _session_id.get() == "boot-sess"
-        assert _replay_context_id.get() == "boot-ctx"
+        # Without REWIND_REPLAY_CONTEXT_TIMELINE_ID, no attach happens.
+        assert _session_id.get() is None
+        assert _replay_context_id.get() is None
         assert _timeline_id.get() is None
     finally:
         _session_id.set(None)
@@ -304,19 +315,29 @@ def test_install_bootstraps_with_timeline_id_from_env(
 def test_install_partial_env_logs_warning_and_skips(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    from rewind_agent.explicit import _replay_context_id, _session_id
+    """Partial env-var subset (any 1 or 2 of 3) → WARN + skip attach.
+
+    The new contract requires all three together; a partial subset is
+    operator misconfiguration that should fail loudly rather than
+    half-attach with a warning (which used to leave live cache misses
+    on an undefined timeline).
+    """
+    from rewind_agent.explicit import _replay_context_id, _session_id, _timeline_id
     from rewind_agent.intercept import _install
 
     monkeypatch.setenv("REWIND_SESSION_ID", "only-session")
     monkeypatch.delenv("REWIND_REPLAY_CONTEXT_ID", raising=False)
+    monkeypatch.delenv("REWIND_REPLAY_CONTEXT_TIMELINE_ID", raising=False)
     _session_id.set(None)
     _replay_context_id.set(None)
+    _timeline_id.set(None)
 
     with caplog.at_level("WARNING"):
         _install._bootstrap_replay_context_from_env()
 
     assert _session_id.get() is None
     assert _replay_context_id.get() is None
+    assert _timeline_id.get() is None
     assert any(
-        "must be set together" in r.message for r in caplog.records
+        "set together" in r.message for r in caplog.records
     ), f"records={[r.message for r in caplog.records]}"

@@ -172,5 +172,105 @@ class TestCustomPredicates(unittest.TestCase):
         _savings.reset()
 
 
+class TestEnvVarBootstrapContract(unittest.TestCase):
+    """Cover the all-three-or-skip contract of _bootstrap_replay_context_from_env.
+
+    Previously the bootstrap required only REWIND_SESSION_ID +
+    REWIND_REPLAY_CONTEXT_ID and treated the timeline as optional. That
+    contract diverged from connector.setup() and caused a clobber bug
+    in the connector's partial-replay fall-through path. PR #171 round 2
+    tightened to require all three; partial subsets now skip the attach
+    with a single WARN.
+    """
+
+    def setUp(self) -> None:
+        uninstall()
+        # Reset contextvars so we observe attach behavior cleanly.
+        from rewind_agent.explicit import (
+            _replay_context_id,
+            _session_id,
+            _timeline_id,
+        )
+        _session_id.set(None)
+        _timeline_id.set(None)
+        _replay_context_id.set(None)
+
+    def tearDown(self) -> None:
+        uninstall()
+
+    def _run_bootstrap_with_env(self, env: dict) -> tuple:
+        """Run install() under env and return (session_id, replay_ctx_id, timeline_id) contextvars after."""
+        import os
+        from unittest import mock
+
+        from rewind_agent.explicit import (
+            _replay_context_id,
+            _session_id,
+            _timeline_id,
+        )
+
+        # Strip any inherited rewind-related vars so the test env is clean.
+        clean = {k: v for k, v in os.environ.items() if not k.startswith("REWIND_")}
+        clean.update(env)
+        with mock.patch.dict(os.environ, clean, clear=True):
+            install()
+        return (
+            _session_id.get(),
+            _replay_context_id.get(),
+            _timeline_id.get(),
+        )
+
+    def test_all_three_set_attaches(self) -> None:
+        sid, ctx, tid = self._run_bootstrap_with_env({
+            "REWIND_SESSION_ID": "s-env",
+            "REWIND_REPLAY_CONTEXT_ID": "ctx-env",
+            "REWIND_REPLAY_CONTEXT_TIMELINE_ID": "tl-env",
+        })
+        self.assertEqual(sid, "s-env")
+        self.assertEqual(ctx, "ctx-env")
+        self.assertEqual(tid, "tl-env")
+
+    def test_none_set_is_silent_noop(self) -> None:
+        sid, ctx, tid = self._run_bootstrap_with_env({})
+        self.assertIsNone(sid)
+        self.assertIsNone(ctx)
+        self.assertIsNone(tid)
+
+    def test_partial_subsets_skip_attach(self) -> None:
+        """Each partial subset (1 or 2 of 3) must NOT attach.
+
+        This is the contract the connector relies on: when partial
+        replay env is detected, the bootstrap leaves contextvars alone
+        so the connector's freshly-started session stays in scope.
+        """
+        all_vars = {
+            "REWIND_SESSION_ID": "s-env",
+            "REWIND_REPLAY_CONTEXT_ID": "ctx-env",
+            "REWIND_REPLAY_CONTEXT_TIMELINE_ID": "tl-env",
+        }
+        keys = list(all_vars.keys())
+        partials: list[dict] = []
+        # All single-var subsets.
+        for k in keys:
+            partials.append({k: all_vars[k]})
+        # All two-var subsets.
+        for i, k1 in enumerate(keys):
+            for k2 in keys[i + 1 :]:
+                partials.append({k1: all_vars[k1], k2: all_vars[k2]})
+
+        for env in partials:
+            with self.subTest(env_keys=sorted(env.keys())):
+                sid, ctx, tid = self._run_bootstrap_with_env(env)
+                self.assertIsNone(
+                    sid, f"REWIND_SESSION_ID must not be attached with {env}"
+                )
+                self.assertIsNone(
+                    ctx, f"_replay_context_id must not be set with {env}"
+                )
+                self.assertIsNone(
+                    tid, f"_timeline_id must not be set with {env}"
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

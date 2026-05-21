@@ -129,21 +129,29 @@ def install(predicates: Predicates | None = None) -> None:
 
 
 def _bootstrap_replay_context_from_env() -> None:
-    """Read REWIND_SESSION_ID + REWIND_REPLAY_CONTEXT_ID
-    (+ optional REWIND_REPLAY_CONTEXT_TIMELINE_ID) and attach.
+    """Read REWIND_SESSION_ID + REWIND_REPLAY_CONTEXT_ID +
+    REWIND_REPLAY_CONTEXT_TIMELINE_ID and attach.
 
-    The first two are required and must be set together. If either
-    is missing, this is a silent no-op (operator either explicitly
-    attached via the SDK or doesn't want bootstrap behavior).
-    Misconfiguration (one set, other unset) logs a WARN — likely
-    an env-var typo.
+    All three are required for env-var bootstrap to fire. None set is
+    a silent no-op (operator explicitly attached via the SDK or isn't
+    using bootstrap). Any partial subset (one or two of the three)
+    logs a WARN and skips the attach — partial config means a live
+    cache miss would land on an undefined recording target, which is
+    a half-broken replay strictly worse than failing fast.
 
-    **Review #154 round 2 fix:** REWIND_REPLAY_CONTEXT_TIMELINE_ID
-    is also honored. Without it the subprocess-bootstrap path used
-    to leave `_timeline_id` unset, with the documented consequence
-    that live cache misses record into the root timeline instead
-    of the fork. Now it forwards through to attach_replay_context
-    so the env-var path matches the direct SDK path.
+    **PR #171 review round 2:** previously this required only the
+    first two and treated the timeline as optional with a separate
+    WARN log. That was a contract divergence with ``connector.setup``,
+    which the reviewer flagged: in the partial-replay path, a fresh
+    session would be started, then ``intercept.install`` would run
+    this bootstrap on the still-incomplete env, calling
+    ``attach_replay_context`` and clobbering the fresh session's
+    contextvars. Tightening to all-three-or-skip aligns the two
+    consumers and removes the orphaned-session bug.
+
+    The documented runner-subprocess pattern (docs/runners.md) always
+    sets all three from the dispatch payload, so no in-tree consumer
+    is affected by the tightening.
     """
     import os
 
@@ -151,7 +159,9 @@ def _bootstrap_replay_context_from_env() -> None:
     replay_context_id = os.environ.get("REWIND_REPLAY_CONTEXT_ID")
     timeline_id = os.environ.get("REWIND_REPLAY_CONTEXT_TIMELINE_ID")
 
-    if session_id and replay_context_id:
+    set_count = sum(bool(v) for v in (session_id, replay_context_id, timeline_id))
+
+    if set_count == 3:
         try:
             from rewind_agent.explicit import ExplicitClient
 
@@ -164,23 +174,20 @@ def _bootstrap_replay_context_from_env() -> None:
                 "rewind: attached to replay context %s (session %s, timeline %s) from env",
                 replay_context_id,
                 session_id,
-                timeline_id or "<unset — live misses will not have a defined timeline>",
+                timeline_id,
             )
-            if not timeline_id:
-                logger.warning(
-                    "rewind: REWIND_REPLAY_CONTEXT_TIMELINE_ID is not set; "
-                    "live cache misses during this replay will not have a "
-                    "defined recording target. Set it from the dispatch payload's "
-                    "replay_context_timeline_id field for correct fork-timeline binding."
-                )
         except Exception as e:  # noqa: BLE001 — log + continue, don't break install()
             logger.warning("rewind: env-var bootstrap failed: %s", e)
-    elif session_id or replay_context_id:
+    elif set_count > 0:
         logger.warning(
-            "rewind: REWIND_SESSION_ID and REWIND_REPLAY_CONTEXT_ID must be set together; "
-            "skipping env-var bootstrap (got session=%s ctx=%s)",
+            "rewind: env-var bootstrap requires REWIND_SESSION_ID + "
+            "REWIND_REPLAY_CONTEXT_ID + REWIND_REPLAY_CONTEXT_TIMELINE_ID "
+            "to be set together; skipping (got session=%s ctx=%s timeline=%s). "
+            "Live cache misses without all three would land on an undefined "
+            "recording target — fix the dispatch caller to forward all three.",
             bool(session_id),
             bool(replay_context_id),
+            bool(timeline_id),
         )
     _log_install_status()
 
