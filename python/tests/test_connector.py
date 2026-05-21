@@ -174,12 +174,27 @@ class TestReplayDispatch(_ConnectorTestBase):
                     )
 
     def test_partial_replay_env_falls_through_to_session_start(self):
-        # Sanity: with only sessionid + replayctxid (no timeline), the
-        # connector starts a fresh session instead of half-attaching.
+        # With only two of three replay vars, the connector must start a
+        # fresh session AND _install._bootstrap_replay_context_from_env
+        # must NOT clobber the new session's contextvars by attaching to
+        # the env-supplied (incomplete) replay context.
+        #
+        # This is the regression test for the round-2 review finding:
+        # previously, the bootstrap fired on partial env and the fresh
+        # session got orphaned because attach_replay_context overwrote
+        # _session_id with the env-supplied value. The bootstrap is now
+        # tightened to require all three; this test asserts the fresh
+        # session's contextvars are live inside the block.
         env = self._replay_env(REWIND_REPLAY_CONTEXT_TIMELINE_ID=None)
         with mock.patch.dict(os.environ, env, clear=True):
             with setup(name="incomplete-replay", base_url=self.base_url):
-                pass
+                # _session_id must be the freshly-created session
+                # ("s-1" from the mock handler), NOT "s-replay" from
+                # the env. _replay_context_id must remain unset
+                # because no replay attach happened.
+                self.assertEqual(_session_id.get(), "s-1")
+                self.assertEqual(_timeline_id.get(), "tl-1")
+                self.assertIsNone(_replay_context_id.get())
         self.assertEqual(len(_MockHandler.sessions_started), 1)
         self.assertEqual(_MockHandler.sessions_started[0]["name"], "incomplete-replay")
 

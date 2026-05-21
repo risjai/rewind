@@ -130,6 +130,9 @@ def _is_replay_dispatch() -> bool:
     "partial replay env" as "not replay" so the connector falls through
     to the normal session-start path and recording works correctly.
     """
+    # Truthiness, not `is not None`: an empty-string env var is the same
+    # as unset for our purposes (`REWIND_SESSION_ID=""` is operator
+    # misconfiguration, not a valid id). Don't "fix" this to `is not None`.
     return bool(
         os.environ.get("REWIND_SESSION_ID")
         and os.environ.get("REWIND_REPLAY_CONTEXT_ID")
