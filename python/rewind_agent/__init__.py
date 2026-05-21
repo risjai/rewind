@@ -15,6 +15,10 @@ Usage:
     # Wrap LangGraph / CrewAI for automatic instrumentation
     graph = rewind_agent.wrap_langgraph(graph)
     crew = rewind_agent.wrap_crew(crew)
+
+    # One-call connector for custom agents (any HTTP transport, any framework)
+    with rewind_agent.connector.setup(name="my-agent"):
+        run_agent_loop()
 """
 
 from .patch import init, uninit, session, replay, thread
@@ -31,6 +35,7 @@ from .hooks import (
 )
 from .cached_call import cached_llm_call
 from .explicit import ExplicitClient, RewindReplayDivergenceError
+from . import connector
 from .assertions import Assertions, AssertionResult
 from .openai_agents import openai_agents_hooks
 from .pydantic_ai import pydantic_ai_hooks
@@ -92,6 +97,8 @@ __all__ = [
     "RewindReplayDivergenceError",
     # Cached LLM call decorator (Phase 2 / Tier 2)
     "cached_llm_call",
+    # One-call connector for any agent (see docs/hdk.md)
+    "connector",
 ]
 
 
@@ -113,4 +120,4 @@ def import_from_langfuse(trace_id: str, **kwargs) -> str:
     return _import(trace_id, **kwargs)
 
 
-__version__ = "0.16.0"
+__version__ = "0.16.1"
