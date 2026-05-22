@@ -36,26 +36,31 @@ class _StubHandler(BaseHTTPRequestHandler):
         owner = self.server  # type: ignore[attr-defined]
 
         if self.path == "/api/sessions/start":
+            # Decide the response inside the lock, then write the socket
+            # outside it. Both branches now follow the same pattern, so a
+            # slow socket write never blocks other handlers waiting on
+            # the lock.
+            status = 201
             with owner.lock:
                 key = body.get("client_session_key")
                 if key and key in owner.sessions_by_client_key:
                     sid, tid = owner.sessions_by_client_key[key]
-                    self._json(200, {"session_id": sid, "root_timeline_id": tid})
-                    return
-                idx = len(owner.sessions) + 1
-                sid = f"s-{idx}"
-                tid = f"tl-{idx}"
-                owner.sessions[sid] = {
-                    "session_id": sid,
-                    "name": body.get("name", ""),
-                    "root_timeline_id": tid,
-                    "metadata": body.get("metadata", {}),
-                    "thread_id": body.get("thread_id"),
-                    "ended": False,
-                }
-                if key:
-                    owner.sessions_by_client_key[key] = (sid, tid)
-            self._json(201, {"session_id": sid, "root_timeline_id": tid})
+                    status = 200
+                else:
+                    idx = len(owner.sessions) + 1
+                    sid = f"s-{idx}"
+                    tid = f"tl-{idx}"
+                    owner.sessions[sid] = {
+                        "session_id": sid,
+                        "name": body.get("name", ""),
+                        "root_timeline_id": tid,
+                        "metadata": body.get("metadata", {}),
+                        "thread_id": body.get("thread_id"),
+                        "ended": False,
+                    }
+                    if key:
+                        owner.sessions_by_client_key[key] = (sid, tid)
+            self._json(status, {"session_id": sid, "root_timeline_id": tid})
             return
 
         if self.path.endswith("/end"):

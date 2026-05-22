@@ -207,8 +207,6 @@ class ExplicitClient:
         Public read APIs that need crisp error semantics opt in here
         rather than reverse-engineering the silent-failure path.
         """
-        if not self._enabled:
-            raise RewindServerError("ExplicitClient is disabled")
         url = f"{self.base_url}/api{path}"
         req = urllib.request.Request(url, method="GET")
         try:
@@ -770,37 +768,53 @@ class ExplicitClient:
 
         Raises:
             StepNotFoundError: when the requested ``step_number`` does
-                not exist on the resolved timeline (true 404 / absent),
-                OR when a session has no root timeline (server has no
-                timelines for that session id).
+                not exist on the resolved timeline, OR when ``session_id``
+                resolves to no timelines at all (unknown / empty session).
+                These are the two true "absence" cases.
             RewindServerError: when the rewind server is unreachable,
-                returns a non-2xx response, or returns malformed JSON.
-                Replay handlers should retry on this; downstream sf-rewind
-                style consumers should NOT swallow it.
+                returns a non-2xx response, returns malformed JSON, or
+                returns a non-empty timelines list with no root timeline
+                (server data inconsistency). Replay handlers should retry
+                on this; downstream sf-rewind style consumers should NOT
+                swallow it.
         """
+        # Quote both path components: session_id is opaque caller input
+        # and timeline_id can in principle contain reserved characters.
+        # Existing legacy paths leave them raw — that's an SDK-wide
+        # consistency drift we're starting to walk back; this new public
+        # helper is built right.
+        quoted_sid = urllib.parse.quote(session_id, safe="")
+
         tid = timeline_id
         if tid is None:
-            timelines = self._get_or_raise(
-                f"/sessions/{session_id}/timelines"
-            )
+            timelines = self._get_or_raise(f"/sessions/{quoted_sid}/timelines")
             if not isinstance(timelines, list):
                 raise RewindServerError(
                     f"Rewind GET /sessions/{session_id}/timelines returned "
                     f"non-list body: {type(timelines).__name__}"
+                )
+            if not timelines:
+                # Empty list = unknown / freshly-empty session. True absence.
+                raise StepNotFoundError(
+                    f"Session {session_id} has no timelines"
                 )
             root = next(
                 (t for t in timelines if t.get("parent_timeline_id") is None),
                 None,
             )
             if root is None:
-                raise StepNotFoundError(
-                    f"No root timeline for session {session_id}"
+                # Non-empty list with no root entry = server data
+                # inconsistency, NOT a "step doesn't exist" case.
+                raise RewindServerError(
+                    f"Server returned {len(timelines)} timelines for session "
+                    f"{session_id} but none with parent_timeline_id=None"
                 )
             tid = root["id"]
 
+        quoted_tid = urllib.parse.quote(tid, safe="")
         path = (
-            f"/sessions/{session_id}/steps?"
-            f"timeline={urllib.parse.quote(tid)}&include_blobs=1"
+            f"/sessions/{quoted_sid}/steps?"
+            f"timeline={quoted_tid}&include_blobs=1"
         )
         steps = self._get_or_raise(path)
         if not isinstance(steps, list):

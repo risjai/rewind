@@ -30,7 +30,13 @@ def wait_for_session(
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        for session in list(server.sessions.values()):
+        # Snapshot under the stub's lock for symmetry with the rest of
+        # the stub. CPython's GIL would make the bare iteration safe in
+        # practice, but explicit locking keeps the test infrastructure
+        # honest about its concurrency contract.
+        with server._server.lock:  # type: ignore[attr-defined]
+            snapshot = list(server.sessions.values())
+        for session in snapshot:
             if session.get("name") == name:
                 return session
         time.sleep(poll_interval)

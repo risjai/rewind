@@ -199,6 +199,15 @@ def setup(
     ------
     ExplicitClient | None
         The recording client, or ``None`` when disabled.
+
+    Raises
+    ------
+    ValueError
+        When both ``predicates=`` and ``llm_hosts=`` are provided.
+    TypeError
+        When ``predicates=`` is not a :class:`~rewind_agent.intercept.Predicates`
+        instance (catches the common typo of passing a callable, a string,
+        or a list of hostnames).
     """
     if predicates is not None and llm_hosts is not None:
         raise ValueError(

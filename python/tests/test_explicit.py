@@ -552,11 +552,18 @@ class _StepAwareHandler(BaseHTTPRequestHandler):
     # Test instrumentation: lets tests assert which paths were touched.
     paths_called: list[str] = []
     timelines_path_called: bool = False
+    # Override the /timelines response for tests that exercise edge
+    # cases (empty list / non-empty list with no root / etc.). None
+    # = use the default 2-timeline fixture.
+    timelines_override: list[dict] | None = None
 
     def do_GET(self):  # noqa: N802 — stdlib API
         _StepAwareHandler.paths_called.append(self.path)
         if "/timelines" in self.path:
             _StepAwareHandler.timelines_path_called = True
+            if _StepAwareHandler.timelines_override is not None:
+                self._respond(200, _StepAwareHandler.timelines_override)
+                return
             self._respond(200, [
                 {"id": "tl-root", "parent_timeline_id": None, "session_id": "s1"},
                 {"id": "tl-fork", "parent_timeline_id": "tl-root", "session_id": "s1"},
@@ -612,6 +619,7 @@ class TestGetStep(unittest.TestCase):
     def setUp(self):
         _StepAwareHandler.paths_called = []
         _StepAwareHandler.timelines_path_called = False
+        _StepAwareHandler.timelines_override = None
         _StepAwareHandler.fixture_steps = [
             {
                 "step_number": 1,
@@ -726,6 +734,62 @@ class TestGetStep(unittest.TestCase):
         self.assertTrue(hasattr(rewind_agent, "StepNotFoundError"))
         self.assertTrue(hasattr(rewind_agent, "RewindServerError"))
 
+    def test_empty_timelines_raises_step_not_found(self):
+        """An empty timelines list = unknown / freshly-empty session.
+        That's true 'absence', not server data inconsistency, so it raises
+        StepNotFoundError (NOT RewindServerError)."""
+        from rewind_agent.explicit import StepNotFoundError
+
+        _StepAwareHandler.timelines_override = []
+        with self.assertRaises(StepNotFoundError):
+            self.client.get_step_sync("s1", step_number=1)
+
+    def test_non_empty_timelines_with_no_root_raises_server_error(self):
+        """Non-empty list with NO entry having parent_timeline_id=None is
+        server data inconsistency. Per round-3 fix, this raises
+        RewindServerError so callers can distinguish it from real
+        absences and decide to retry / log / page."""
+        from rewind_agent.explicit import RewindServerError
+
+        _StepAwareHandler.timelines_override = [
+            {"id": "tl-orphan-1", "parent_timeline_id": "tl-missing", "session_id": "s1"},
+            {"id": "tl-orphan-2", "parent_timeline_id": "tl-missing", "session_id": "s1"},
+        ]
+        with self.assertRaises(RewindServerError):
+            self.client.get_step_sync("s1", step_number=1)
+
+    def test_session_id_is_url_quoted(self):
+        """Round-3 fix: session_id, like timeline_id, is URL-quoted on
+        the way out so reserved characters in opaque IDs don't break
+        the URL or open a path-traversal-shaped surface."""
+        # Use a session id that contains URL-reserved characters. The
+        # mock handler ignores the session id for routing — it serves
+        # the same fixture regardless — so the test verifies what hit
+        # the wire, not server-side behavior.
+        weird_sid = "s/with?reserved#chars"
+        try:
+            self.client.get_step_sync(weird_sid, step_number=1)
+        except Exception:
+            pass  # The mock 404s for unrecognized paths; we only care about the URL.
+
+        # Both /timelines and /steps requests should have the session_id
+        # percent-encoded.
+        self.assertTrue(
+            _StepAwareHandler.paths_called,
+            "expected at least one GET to reach the server",
+        )
+        for p in _StepAwareHandler.paths_called:
+            self.assertNotIn(
+                "s/with",
+                p,
+                f"raw session_id leaked into URL: {p}",
+            )
+            self.assertIn(
+                "s%2Fwith%3Freserved%23chars",
+                p,
+                f"session_id was not properly URL-quoted in: {p}",
+            )
+
 
 class TestGetStepServerErrors(unittest.TestCase):
     """Round-2 santa-review fix: get_step distinguishes 'step absent'
@@ -779,16 +843,19 @@ class TestModuleCachedToolStableWrapper(unittest.TestCase):
         from rewind_agent import explicit as mod
         mod.set_default_client(None)
 
-    def test_inner_wrapper_built_once_per_client_func_pair(self):
-        from rewind_agent import explicit as mod
+    def test_call_path_uses_cached_wrapper_not_per_call_rebuild(self):
+        """Genuinely lock the perf claim: instrument ExplicitClient.cached_tool
+        to count invocations and assert it ran exactly ONCE across N calls
+        of the decorated function. A regression that reverts sync_wrapper /
+        async_wrapper to `client.cached_tool(name)(func)(*args)` per call
+        would show N invocations instead of 1."""
         from rewind_agent.explicit import (
             ExplicitClient,
-            _resolve_module_cached_wrapper,
             cached_tool as module_cached_tool,
             set_default_client,
         )
 
-        @module_cached_tool("inner_id_check")
+        @module_cached_tool("count_check")
         def add(a: int, b: int) -> int:
             return a + b
 
@@ -799,22 +866,31 @@ class TestModuleCachedToolStableWrapper(unittest.TestCase):
         try:
             client = ExplicitClient(f"http://127.0.0.1:{port}")
             set_default_client(client)
-            with client.session("stable-wrapper-test"):
-                add(1, 2)
-                # Both invocations must resolve to the SAME inner wrapper.
-                first = _resolve_module_cached_wrapper(
-                    client, add.__wrapped__, "inner_id_check"
-                )
-                add(3, 4)
-                second = _resolve_module_cached_wrapper(
-                    client, add.__wrapped__, "inner_id_check"
-                )
-                self.assertIs(
-                    first,
-                    second,
-                    "module-level cached_tool must reuse the inner wrapper "
-                    "per (client, func) pair, not rebuild it per call",
-                )
+
+            # Wrap the real cached_tool method to count invocations.
+            real_cached_tool = client.cached_tool
+            invocations = {"count": 0}
+
+            def counting_cached_tool(name):
+                invocations["count"] += 1
+                return real_cached_tool(name)
+
+            client.cached_tool = counting_cached_tool  # type: ignore[method-assign]
+
+            with client.session("call-path-cache-test"):
+                # Five calls of the decorated function.
+                for i in range(5):
+                    self.assertEqual(add(i, i), 2 * i)
+
+            # If sync_wrapper rebuilds the wrapper each call,
+            # invocations["count"] would be 5. With caching, exactly 1.
+            self.assertEqual(
+                invocations["count"],
+                1,
+                f"client.cached_tool was invoked {invocations['count']} times "
+                f"across 5 add() calls; module-level cached_tool must build "
+                f"the wrapper once per (client, func) pair and reuse it.",
+            )
         finally:
             server.shutdown()
 
