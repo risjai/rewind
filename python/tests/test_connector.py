@@ -14,7 +14,7 @@ from rewind_agent.explicit import (
     _session_id,
     _timeline_id,
 )
-from rewind_agent.intercept import is_installed, uninstall
+from rewind_agent.intercept import DefaultPredicates, is_installed, uninstall
 
 
 class _MockHandler(BaseHTTPRequestHandler):
@@ -279,6 +279,89 @@ class TestPublicExport(unittest.TestCase):
     def test_module_attribute(self):
         self.assertTrue(hasattr(rewind_agent, "connector"))
         self.assertTrue(callable(rewind_agent.connector.setup))
+
+
+class TestPredicatesKwarg(_ConnectorTestBase):
+    """`predicates=` is the structured alternative to the `llm_hosts=` shortcut.
+
+    Lets callers pass a fully-custom Predicates instance (e.g. an SF gateway
+    predicate) without going through the hostname-substring path. Phase 0
+    commit 1 of the public-helpers SDK PR.
+    """
+
+    def _capture_predicates(self, **setup_kwargs):
+        captured = {}
+
+        def fake_install(predicates=None):
+            captured["predicates"] = predicates
+
+        with mock.patch("rewind_agent.connector.install", side_effect=fake_install), \
+             mock.patch("rewind_agent.connector.uninstall"), \
+             mock.patch("rewind_agent.connector.is_installed", return_value=False):
+            with setup(name="capture", base_url=self.base_url, **setup_kwargs):
+                pass
+        return captured["predicates"]
+
+    def test_passthrough_to_intercept_install(self):
+        from rewind_agent.intercept import DefaultPredicates
+
+        sentinel = DefaultPredicates()
+        forwarded = self._capture_predicates(predicates=sentinel)
+        # The exact instance the caller passed must reach intercept.install,
+        # untouched — no wrapping in _HostPredicates.
+        self.assertIs(forwarded, sentinel)
+
+    def test_custom_predicate_subclass_passes_through(self):
+        from rewind_agent.intercept import DefaultPredicates
+
+        class _MyPreds(DefaultPredicates):
+            def is_llm_call(self, req) -> bool:  # noqa: D401
+                return "my-custom-gw" in req.url_parts.netloc.lower()
+
+        custom = _MyPreds()
+        forwarded = self._capture_predicates(predicates=custom)
+        self.assertIs(forwarded, custom)
+        # The forwarded predicate is fully functional — caller's behavior is preserved.
+        self.assertTrue(forwarded.is_llm_call(_fake_req("my-custom-gw.internal")))
+        self.assertFalse(forwarded.is_llm_call(_fake_req("unrelated.example")))
+
+    def test_predicates_and_llm_hosts_together_raises(self):
+        # Mutually exclusive: passing both is operator confusion and the
+        # silent-precedence outcome ("predicates wins, llm_hosts ignored")
+        # would mask the misconfiguration. Refuse explicitly.
+        with self.assertRaises(ValueError) as ctx:
+            with setup(
+                name="conflict",
+                base_url=self.base_url,
+                llm_hosts=("a.example",),
+                predicates=DefaultPredicates(),
+            ):
+                pass
+        self.assertIn("predicates", str(ctx.exception))
+        self.assertIn("llm_hosts", str(ctx.exception))
+
+    def test_predicates_none_falls_through_to_llm_hosts_path(self):
+        # Sanity: omitting `predicates=` doesn't disturb the existing
+        # llm_hosts path. Hosts kwarg still produces a _HostPredicates.
+        forwarded = self._capture_predicates(llm_hosts=("a.example",))
+        self.assertIsInstance(forwarded, _HostPredicates)
+
+
+class TestPredicatesPackageReExport(unittest.TestCase):
+    """The package root re-exports Predicates / DefaultPredicates so callers
+    that pass `predicates=` don't have to reach into the private intercept
+    package."""
+
+    def test_predicates_classes_at_package_root(self):
+        self.assertTrue(hasattr(rewind_agent, "Predicates"))
+        self.assertTrue(hasattr(rewind_agent, "DefaultPredicates"))
+        # The re-exports must be the *same* objects intercept exposes.
+        from rewind_agent.intercept import (
+            DefaultPredicates as _DP,
+            Predicates as _P,
+        )
+        self.assertIs(rewind_agent.Predicates, _P)
+        self.assertIs(rewind_agent.DefaultPredicates, _DP)
 
 
 if __name__ == "__main__":

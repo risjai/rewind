@@ -73,6 +73,7 @@ from typing import Iterator, Sequence
 from rewind_agent.explicit import ExplicitClient
 from rewind_agent.intercept import (
     DefaultPredicates,
+    Predicates,
     install,
     is_installed,
     uninstall,
@@ -146,6 +147,7 @@ def setup(
     *,
     base_url: str | None = None,
     llm_hosts: Sequence[str] | None = None,
+    predicates: Predicates | None = None,
     enabled: bool | None = None,
     thread_id: str | None = None,
     metadata: dict | None = None,
@@ -153,8 +155,9 @@ def setup(
     """Connect any agent to Rewind for the duration of a ``with`` block.
 
     Starts a session, installs HTTP intercept (with custom predicates
-    when ``llm_hosts`` is set), yields the :class:`ExplicitClient` for
-    use inside the block, and tears both down on exit.
+    when ``llm_hosts`` is set or ``predicates`` is provided), yields the
+    :class:`ExplicitClient` for use inside the block, and tears both
+    down on exit.
 
     Parameters
     ----------
@@ -168,6 +171,15 @@ def setup(
         Sequence of hostnames to treat as LLM gateways. ``None``
         (default) reads ``$REWIND_LLM_HOSTS``; empty / unset falls
         through to intercept's strict-by-default provider list.
+        Mutually exclusive with ``predicates``.
+    predicates:
+        Fully custom :class:`~rewind_agent.intercept.Predicates`
+        instance forwarded directly to :func:`intercept.install`. Use
+        when hostname-substring matching is not enough (e.g. matching
+        only specific path prefixes, or routing decisions that depend
+        on headers). Mutually exclusive with ``llm_hosts`` — passing
+        both raises :class:`ValueError` rather than silently picking
+        a winner.
     enabled:
         ``None`` (default) reads ``$REWIND_ENABLED`` (any value other
         than ``"0"`` is on); ``True`` forces on; ``False`` forces off.
@@ -181,6 +193,13 @@ def setup(
     ExplicitClient | None
         The recording client, or ``None`` when disabled.
     """
+    if predicates is not None and llm_hosts is not None:
+        raise ValueError(
+            "setup() accepts either `predicates=` or `llm_hosts=`, not both. "
+            "Use `predicates=` for fully custom matching; use `llm_hosts=` "
+            "for the hostname-substring shortcut."
+        )
+
     if not _enabled(enabled):
         yield None
         return
@@ -188,8 +207,9 @@ def setup(
     # base_url resolution lives in ExplicitClient.__init__ so all callers
     # share a single source of truth (kwarg > $REWIND_URL > localhost).
     client = ExplicitClient(base_url=base_url)
-    hosts = _resolve_hosts(llm_hosts)
-    predicates = _HostPredicates(hosts) if hosts else None
+    if predicates is None:
+        hosts = _resolve_hosts(llm_hosts)
+        predicates = _HostPredicates(hosts) if hosts else None
 
     if _is_replay_dispatch():
         # Runner-driven replay: intercept.install() will attach to the

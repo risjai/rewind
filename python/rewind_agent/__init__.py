@@ -36,6 +36,7 @@ from .hooks import (
 from .cached_call import cached_llm_call
 from .explicit import ExplicitClient, RewindReplayDivergenceError
 from . import connector
+from .intercept import DefaultPredicates, Predicates
 from .assertions import Assertions, AssertionResult
 from .openai_agents import openai_agents_hooks
 from .pydantic_ai import pydantic_ai_hooks
@@ -99,6 +100,9 @@ __all__ = [
     "cached_llm_call",
     # One-call connector for any agent (see docs/hdk.md)
     "connector",
+    # Intercept predicate types (for `connector.setup(predicates=…)`)
+    "Predicates",
+    "DefaultPredicates",
 ]
 
 
