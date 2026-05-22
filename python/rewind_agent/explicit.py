@@ -34,10 +34,14 @@ import inspect
 import json
 import logging
 import os
+import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+import weakref
 from contextlib import asynccontextmanager, contextmanager
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 logger = logging.getLogger("rewind.explicit")
@@ -56,6 +60,46 @@ _TIMEOUT = 2.0
 
 
 _SESSION_CACHE_TTL = 7200  # 2 hours
+
+
+class RewindServerError(RuntimeError):
+    """Raised by :meth:`ExplicitClient.get_step` when a transport or
+    server-side failure prevents step retrieval.
+
+    Distinct from :class:`StepNotFoundError` so callers (e.g. replay
+    handlers) can decide whether to retry transient infra failures vs
+    treat the step as genuinely absent. The existing ``_post`` / ``_get``
+    helpers swallow such failures to ``None`` for legacy reasons; the
+    new public step-fetch path opts into explicit propagation.
+    """
+
+
+class StepNotFoundError(LookupError):
+    """Raised by :meth:`ExplicitClient.get_step` ONLY when the
+    requested ``step_number`` does not exist on the resolved timeline.
+
+    Transport / server failures raise :class:`RewindServerError` instead,
+    so the two cases are distinguishable by exception type.
+    """
+
+
+@dataclass(frozen=True)
+class StepResponse:
+    """Typed view of a single recorded step (LLM call, tool call, etc.).
+
+    Returned by :meth:`ExplicitClient.get_step` /
+    :meth:`ExplicitClient.get_step_sync`. Replay handlers use this to
+    extract the recorded request/response without parsing untyped JSON
+    blobs by hand.
+    """
+
+    step_number: int
+    step_type: str
+    request_body: Any | None = None
+    response_body: Any | None = None
+    model: str | None = None
+    tool_name: str | None = None
+    raw: dict = field(default_factory=dict)
 
 
 class RewindReplayDivergenceError(RuntimeError):
@@ -150,6 +194,36 @@ class ExplicitClient:
         except Exception as e:
             logger.debug("Rewind GET %s failed: %s", path, e)
             return None
+
+    def _get_or_raise(self, path: str) -> dict | list:
+        """Variant of ``_get`` for paths where the caller wants to
+        distinguish transport failure from a successful empty response.
+
+        Raises :class:`RewindServerError` on network errors, non-2xx
+        responses, or invalid JSON. Returns the parsed body on success.
+
+        The existing ``_get`` helper swallows everything to ``None`` for
+        legacy reasons (recording paths must never crash the agent).
+        Public read APIs that need crisp error semantics opt in here
+        rather than reverse-engineering the silent-failure path.
+        """
+        url = f"{self.base_url}/api{path}"
+        req = urllib.request.Request(url, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            raise RewindServerError(
+                f"Rewind GET {path} returned {e.code}: {e.reason}"
+            ) from e
+        except urllib.error.URLError as e:
+            raise RewindServerError(
+                f"Rewind GET {path} transport error: {e.reason}"
+            ) from e
+        except (json.JSONDecodeError, OSError, TimeoutError) as e:
+            raise RewindServerError(
+                f"Rewind GET {path} failed: {e}"
+            ) from e
 
     # ── Session lifecycle ──────────────────────────────────────
 
@@ -677,6 +751,111 @@ class ExplicitClient:
         result = self._post(f"/sessions/{session_id}/fork", body)
         return result["fork_timeline_id"] if result else None
 
+    # ── Step fetch ────────────────────────────────────────────
+
+    def get_step_sync(
+        self,
+        session_id: str,
+        *,
+        step_number: int,
+        timeline_id: str | None = None,
+    ) -> StepResponse:
+        """Fetch a single recorded step by number (sync).
+
+        When ``timeline_id`` is omitted, resolves the session's root
+        timeline. Replay handlers typically pass the explicit timeline
+        from the dispatch payload so forks resolve correctly.
+
+        Raises:
+            StepNotFoundError: when the requested ``step_number`` does
+                not exist on the resolved timeline, OR when ``session_id``
+                resolves to no timelines at all (unknown / empty session).
+                These are the two true "absence" cases.
+            RewindServerError: when the rewind server is unreachable,
+                returns a non-2xx response, returns malformed JSON, or
+                returns a non-empty timelines list with no root timeline
+                (server data inconsistency). Replay handlers should retry
+                on this; downstream sf-rewind style consumers should NOT
+                swallow it.
+        """
+        # Quote both path components: session_id is opaque caller input
+        # and timeline_id can in principle contain reserved characters.
+        # Existing legacy paths leave them raw — that's an SDK-wide
+        # consistency drift we're starting to walk back; this new public
+        # helper is built right.
+        quoted_sid = urllib.parse.quote(session_id, safe="")
+
+        tid = timeline_id
+        if tid is None:
+            timelines = self._get_or_raise(f"/sessions/{quoted_sid}/timelines")
+            if not isinstance(timelines, list):
+                raise RewindServerError(
+                    f"Rewind GET /sessions/{session_id}/timelines returned "
+                    f"non-list body: {type(timelines).__name__}"
+                )
+            if not timelines:
+                # Empty list = unknown / freshly-empty session. True absence.
+                raise StepNotFoundError(
+                    f"Session {session_id} has no timelines"
+                )
+            root = next(
+                (t for t in timelines if t.get("parent_timeline_id") is None),
+                None,
+            )
+            if root is None:
+                # Non-empty list with no root entry = server data
+                # inconsistency, NOT a "step doesn't exist" case.
+                raise RewindServerError(
+                    f"Server returned {len(timelines)} timelines for session "
+                    f"{session_id} but none with parent_timeline_id=None"
+                )
+            tid = root["id"]
+
+        quoted_tid = urllib.parse.quote(tid, safe="")
+        path = (
+            f"/sessions/{quoted_sid}/steps?"
+            f"timeline={quoted_tid}&include_blobs=1"
+        )
+        steps = self._get_or_raise(path)
+        if not isinstance(steps, list):
+            raise RewindServerError(
+                f"Rewind GET {path} returned non-list body: "
+                f"{type(steps).__name__}"
+            )
+        for s in steps:
+            if s.get("step_number") == step_number:
+                return StepResponse(
+                    step_number=s["step_number"],
+                    step_type=s.get("step_type", ""),
+                    request_body=s.get("request_body"),
+                    response_body=s.get("response_body"),
+                    model=s.get("model"),
+                    tool_name=s.get("tool_name"),
+                    raw=s,
+                )
+        raise StepNotFoundError(
+            f"Step {step_number} not found on timeline {tid} of session {session_id}"
+        )
+
+    async def get_step(
+        self,
+        session_id: str,
+        *,
+        step_number: int,
+        timeline_id: str | None = None,
+    ) -> StepResponse:
+        """Async variant of :meth:`get_step_sync` — runs the HTTP call
+        in a thread executor to avoid blocking the event loop."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            lambda: self.get_step_sync(
+                session_id,
+                step_number=step_number,
+                timeline_id=timeline_id,
+            ),
+        )
+
     # ── Cached tool decorator ─────────────────────────────────
 
     def cached_tool(self, name: str | None = None):
@@ -757,6 +936,152 @@ class ExplicitClient:
                 return sync_wrapper
 
         return decorator
+
+
+# --------------------------------------------------------------------------- #
+# Default-client discovery (Phase 0 commit 2).
+#
+# A blessed module-level handle so wrappers (e.g. sf-rewind) can let
+# decorators find an active recording client at call time without inventing
+# their own module global. Accepted trade-off documented in the design plan:
+# this is a plain module attribute (not a ContextVar) for simplicity. Nested
+# `connector.setup()` blocks use stack-semantics (entry saves prior, exit
+# restores) but per-asyncio-task multi-client topologies are NOT supported —
+# real consumers run a single bootstrap. Revisit if a real workload needs
+# multi-sidecar in one process.
+# --------------------------------------------------------------------------- #
+
+_default_client: "ExplicitClient | None" = None
+_default_client_lock = threading.Lock()
+
+
+def set_default_client(client: "ExplicitClient | None") -> None:
+    """Bind the process-wide default :class:`ExplicitClient`.
+
+    Call this once at app startup (after constructing the client) so that
+    the module-level :func:`cached_tool` decorator can find it at call
+    time. Pass ``None`` to clear.
+
+    Threading / async semantics
+    ---------------------------
+    The binding is **process-global**, NOT per-thread or per-asyncio task.
+    Reads and writes are serialized by an internal :class:`threading.Lock`,
+    so individual ``set_default_client`` / ``get_default_client`` calls are
+    atomic. However, the read-modify-write pattern in
+    :func:`rewind_agent.connector.setup` (save previous → bind ours →
+    restore on exit) is NOT atomic across concurrent ``setup()`` blocks
+    in different threads: thread B can observe thread A's client as
+    its "previous" and then on exit restore A's client even though A
+    has already exited. Single-threaded or single-event-loop consumers
+    are safe; multi-threaded multi-bootstrap consumers should use
+    :meth:`ExplicitClient.cached_tool` with an explicit client instance.
+
+    Raises:
+        TypeError: when ``client`` is neither an :class:`ExplicitClient`
+            nor ``None``. Catches the common typo of passing a base-URL
+            string instead of a client instance.
+    """
+    global _default_client
+    if client is not None and not isinstance(client, ExplicitClient):
+        raise TypeError(
+            f"set_default_client expected ExplicitClient or None, got {type(client).__name__}"
+        )
+    with _default_client_lock:
+        _default_client = client
+
+
+def get_default_client() -> "ExplicitClient | None":
+    """Return the currently-bound default client, or ``None``.
+
+    See :func:`set_default_client` for the threading contract.
+    """
+    with _default_client_lock:
+        return _default_client
+
+
+# Per-(client, func) wrapper cache for module-level cached_tool. Keyed
+# weakly on the client so wrappers don't keep the client alive past its
+# normal lifetime. The inner dict is keyed by id(func) (functions don't
+# have a meaningful weak-ref story for module-level decorators); since
+# decorated functions live for the process lifetime in practice, the
+# inner dict not collecting is fine.
+_module_cached_tool_wrappers: "weakref.WeakKeyDictionary[ExplicitClient, dict[int, Callable[..., Any]]]" = weakref.WeakKeyDictionary()
+_module_cached_tool_lock = threading.Lock()
+
+
+def _resolve_module_cached_wrapper(
+    client: "ExplicitClient",
+    func: Callable,
+    tool_name: str,
+) -> Callable[..., Any]:
+    """Return a stable wrapper for (client, func, tool_name); built once
+    per (client, func) pair on first call, reused thereafter."""
+    func_key = id(func)
+    with _module_cached_tool_lock:
+        per_client = _module_cached_tool_wrappers.get(client)
+        if per_client is None:
+            per_client = {}
+            _module_cached_tool_wrappers[client] = per_client
+        wrapper = per_client.get(func_key)
+        if wrapper is None:
+            wrapper = client.cached_tool(tool_name)(func)
+            per_client[func_key] = wrapper
+        return wrapper
+
+
+def cached_tool(name: str | None = None):
+    """Module-level :func:`ExplicitClient.cached_tool` that lazy-resolves
+    the default client at call time.
+
+    Decorate at import time:
+
+        from rewind_agent import cached_tool
+
+        @cached_tool("list_clusters")
+        async def list_clusters(...): ...
+
+    Resolution happens *each call* via :func:`get_default_client`. If no
+    default client is bound when the function is called, the decorated
+    function still runs — it just isn't recorded. This keeps imports safe
+    at module load before app startup has bound a client.
+
+    Per-call cost is a single dict lookup: the underlying recording
+    wrapper is built once per ``(client, func)`` pair and cached in a
+    :class:`weakref.WeakKeyDictionary` so it dies with the client.
+
+    Threading / async note
+    ----------------------
+    The default-client binding is **process-global**, not per-thread or
+    per-asyncio task. See :func:`set_default_client` for the full
+    contract; in particular, concurrent
+    :func:`rewind_agent.connector.setup` blocks in different threads can
+    corrupt the stack-restore. If multiple threads or tasks need
+    different clients, use :meth:`ExplicitClient.cached_tool` directly
+    with an explicit client instance.
+    """
+    def decorator(func: Callable) -> Callable:
+        tool_name = name or func.__name__
+
+        if inspect.iscoroutinefunction(func):
+            @functools.wraps(func)
+            async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+                client = get_default_client()
+                if client is None:
+                    return await func(*args, **kwargs)
+                inner = _resolve_module_cached_wrapper(client, func, tool_name)
+                return await inner(*args, **kwargs)
+            return async_wrapper
+        else:
+            @functools.wraps(func)
+            def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
+                client = get_default_client()
+                if client is None:
+                    return func(*args, **kwargs)
+                inner = _resolve_module_cached_wrapper(client, func, tool_name)
+                return inner(*args, **kwargs)
+            return sync_wrapper
+
+    return decorator
 
 
 def _serialize_args(args: tuple, kwargs: dict) -> dict:

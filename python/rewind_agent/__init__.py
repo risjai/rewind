@@ -34,8 +34,18 @@ from .hooks import (
     wrap_crew,
 )
 from .cached_call import cached_llm_call
-from .explicit import ExplicitClient, RewindReplayDivergenceError
+from .explicit import (
+    ExplicitClient,
+    RewindReplayDivergenceError,
+    RewindServerError,
+    StepNotFoundError,
+    StepResponse,
+    cached_tool,
+    get_default_client,
+    set_default_client,
+)
 from . import connector
+from .intercept import DefaultPredicates, Predicates
 from .assertions import Assertions, AssertionResult
 from .openai_agents import openai_agents_hooks
 from .pydantic_ai import pydantic_ai_hooks
@@ -99,6 +109,17 @@ __all__ = [
     "cached_llm_call",
     # One-call connector for any agent (see docs/hdk.md)
     "connector",
+    # Intercept predicate types (for `connector.setup(predicates=…)`)
+    "Predicates",
+    "DefaultPredicates",
+    # Default-client discovery + module-level cached_tool decorator
+    "set_default_client",
+    "get_default_client",
+    "cached_tool",
+    # Public step-fetch helper (Phase 0 commit 3)
+    "StepResponse",
+    "StepNotFoundError",
+    "RewindServerError",
 ]
 
 
@@ -120,4 +141,4 @@ def import_from_langfuse(trace_id: str, **kwargs) -> str:
     return _import(trace_id, **kwargs)
 
 
-__version__ = "0.16.1"
+__version__ = "0.17.0"

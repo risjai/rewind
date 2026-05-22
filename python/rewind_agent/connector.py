@@ -70,9 +70,14 @@ import os
 from contextlib import contextmanager
 from typing import Iterator, Sequence
 
-from rewind_agent.explicit import ExplicitClient
+from rewind_agent.explicit import (
+    ExplicitClient,
+    get_default_client,
+    set_default_client,
+)
 from rewind_agent.intercept import (
     DefaultPredicates,
+    Predicates,
     install,
     is_installed,
     uninstall,
@@ -146,6 +151,7 @@ def setup(
     *,
     base_url: str | None = None,
     llm_hosts: Sequence[str] | None = None,
+    predicates: Predicates | None = None,
     enabled: bool | None = None,
     thread_id: str | None = None,
     metadata: dict | None = None,
@@ -153,8 +159,9 @@ def setup(
     """Connect any agent to Rewind for the duration of a ``with`` block.
 
     Starts a session, installs HTTP intercept (with custom predicates
-    when ``llm_hosts`` is set), yields the :class:`ExplicitClient` for
-    use inside the block, and tears both down on exit.
+    when ``llm_hosts`` is set or ``predicates`` is provided), yields the
+    :class:`ExplicitClient` for use inside the block, and tears both
+    down on exit.
 
     Parameters
     ----------
@@ -168,19 +175,57 @@ def setup(
         Sequence of hostnames to treat as LLM gateways. ``None``
         (default) reads ``$REWIND_LLM_HOSTS``; empty / unset falls
         through to intercept's strict-by-default provider list.
+        Mutually exclusive with ``predicates``.
+    predicates:
+        Fully custom :class:`~rewind_agent.intercept.Predicates`
+        instance forwarded directly to :func:`intercept.install`. Use
+        when hostname-substring matching is not enough (e.g. matching
+        only specific path prefixes, or routing decisions that depend
+        on headers). Mutually exclusive with ``llm_hosts`` — passing
+        both raises :class:`ValueError` rather than silently picking
+        a winner.
     enabled:
         ``None`` (default) reads ``$REWIND_ENABLED`` (any value other
         than ``"0"`` is on); ``True`` forces on; ``False`` forces off.
         When off, ``setup()`` is a true no-op — yields ``None``, no HTTP,
         no install.
     thread_id, metadata:
-        Forwarded to :meth:`ExplicitClient.session`.
+        Forwarded to :meth:`ExplicitClient.session`. Ignored on the
+        replay-dispatch path — when ``REWIND_SESSION_ID`` etc. are set,
+        ``setup()`` attaches to the existing session instead of starting
+        a new one, so per-session metadata has no effect.
 
     Yields
     ------
     ExplicitClient | None
         The recording client, or ``None`` when disabled.
+
+    Raises
+    ------
+    ValueError
+        When both ``predicates=`` and ``llm_hosts=`` are provided.
+    TypeError
+        When ``predicates=`` is not a :class:`~rewind_agent.intercept.Predicates`
+        instance (catches the common typo of passing a callable, a string,
+        or a list of hostnames).
     """
+    if predicates is not None and llm_hosts is not None:
+        raise ValueError(
+            "setup() accepts either `predicates=` or `llm_hosts=`, not both. "
+            "Use `predicates=` for fully custom matching; use `llm_hosts=` "
+            "for the hostname-substring shortcut."
+        )
+    if predicates is not None and not isinstance(predicates, Predicates):
+        # Boundary check parity with set_default_client(): catches the
+        # common typos of passing a callable, a string, or a list of
+        # hostnames where a Predicates instance was expected. Predicates
+        # is a runtime_checkable Protocol, so duck-typed instances are
+        # accepted.
+        raise TypeError(
+            f"setup(predicates=...) expected a Predicates instance, "
+            f"got {type(predicates).__name__}"
+        )
+
     if not _enabled(enabled):
         yield None
         return
@@ -188,27 +233,39 @@ def setup(
     # base_url resolution lives in ExplicitClient.__init__ so all callers
     # share a single source of truth (kwarg > $REWIND_URL > localhost).
     client = ExplicitClient(base_url=base_url)
-    hosts = _resolve_hosts(llm_hosts)
-    predicates = _HostPredicates(hosts) if hosts else None
+    if predicates is None:
+        hosts = _resolve_hosts(llm_hosts)
+        predicates = _HostPredicates(hosts) if hosts else None
 
-    if _is_replay_dispatch():
-        # Runner-driven replay: intercept.install() will attach to the
-        # existing replay context via env vars. Don't create a phantom
-        # session.
-        already_installed = is_installed()
-        install(predicates=predicates)
-        try:
-            yield client
-        finally:
-            if not already_installed:
-                uninstall()
-        return
+    # Stack-semantics for the default-client binding: save the previous
+    # value (which may be a different client or None), bind ours for the
+    # duration of the block, restore on exit — even if install() or
+    # client.session().__enter__ raises. The outer try/finally below
+    # guarantees the module-global never stays polluted across a setup()
+    # failure.
+    previous_default = get_default_client()
+    set_default_client(client)
+    try:
+        if _is_replay_dispatch():
+            # Runner-driven replay: intercept.install() will attach to the
+            # existing replay context via env vars. Don't create a phantom
+            # session.
+            already_installed = is_installed()
+            install(predicates=predicates)
+            try:
+                yield client
+            finally:
+                if not already_installed:
+                    uninstall()
+            return
 
-    with client.session(name, thread_id=thread_id, metadata=metadata):
-        already_installed = is_installed()
-        install(predicates=predicates)
-        try:
-            yield client
-        finally:
-            if not already_installed:
-                uninstall()
+        with client.session(name, thread_id=thread_id, metadata=metadata):
+            already_installed = is_installed()
+            install(predicates=predicates)
+            try:
+                yield client
+            finally:
+                if not already_installed:
+                    uninstall()
+    finally:
+        set_default_client(previous_default)
