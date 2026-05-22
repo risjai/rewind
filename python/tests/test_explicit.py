@@ -538,6 +538,160 @@ class TestExplicitClientBaseUrlResolution(unittest.TestCase):
             self.assertEqual(client.base_url, "http://rewind.from-kwarg:7777")
 
 
+class _StepAwareHandler(BaseHTTPRequestHandler):
+    """Mock that serves per-step lookups via the existing list endpoint.
+
+    Mirrors the real Rust server: GET /api/sessions/{id}/steps?timeline=…
+    returns the full step list; with ``&include_blobs=1`` the response
+    bodies include ``request_body`` and ``response_body``. Per-step
+    fetch in commit 3 is built on top of this list endpoint (no new
+    Rust route — Python-only filter by step_number).
+    """
+
+    fixture_steps: list[dict] = []
+
+    def do_GET(self):  # noqa: N802 — stdlib API
+        if "/timelines" in self.path:
+            self._respond(200, [
+                {"id": "tl-root", "parent_timeline_id": None, "session_id": "s1"},
+                {"id": "tl-fork", "parent_timeline_id": "tl-root", "session_id": "s1"},
+            ])
+            return
+        if "/steps" in self.path:
+            include_blobs = "include_blobs=1" in self.path
+            steps = []
+            for s in _StepAwareHandler.fixture_steps:
+                copy = {
+                    "step_number": s["step_number"],
+                    "step_type": s["step_type"],
+                    "model": s.get("model"),
+                    "tool_name": s.get("tool_name"),
+                }
+                if include_blobs:
+                    copy["request_body"] = s.get("request_body")
+                    copy["response_body"] = s.get("response_body")
+                steps.append(copy)
+            self._respond(200, steps)
+            return
+        self._respond(404, {"error": "not found"})
+
+    def _respond(self, status, body):
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(body).encode())
+
+    def log_message(self, *_):
+        pass
+
+
+class TestGetStep(unittest.TestCase):
+    """Tests for ExplicitClient.get_step / get_step_sync (Phase 0 commit 3).
+
+    Replay handlers today reach into private SDK helpers or hit raw HTTP
+    to fetch step content. A typed public helper closes that gap.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = HTTPServer(("127.0.0.1", 0), _StepAwareHandler)
+        cls.port = cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.client = ExplicitClient(f"http://127.0.0.1:{cls.port}")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def setUp(self):
+        _StepAwareHandler.fixture_steps = [
+            {
+                "step_number": 1,
+                "step_type": "llm_call",
+                "model": "gpt-4o",
+                "request_body": {"messages": [{"role": "user", "content": "hi"}]},
+                "response_body": {"choices": [{"message": {"content": "hello"}}]},
+            },
+            {
+                "step_number": 2,
+                "step_type": "tool_call",
+                "tool_name": "get_pods",
+                "request_body": {"args": ["dev"]},
+                "response_body": "pod-1\npod-2",
+            },
+            {
+                "step_number": 3,
+                "step_type": "llm_call",
+                "model": "gpt-4o",
+                "request_body": {"messages": [{"role": "user", "content": "next"}]},
+                "response_body": {"choices": [{"message": {"content": "ok"}}]},
+            },
+        ]
+
+    def test_returns_typed_step_response(self):
+        from rewind_agent.explicit import StepResponse
+
+        step = self.client.get_step_sync("s1", step_number=2)
+
+        self.assertIsInstance(step, StepResponse)
+        self.assertEqual(step.step_number, 2)
+        self.assertEqual(step.step_type, "tool_call")
+        self.assertEqual(step.request_body, {"args": ["dev"]})
+        self.assertEqual(step.response_body, "pod-1\npod-2")
+
+    def test_returns_llm_call_with_request_body(self):
+        step = self.client.get_step_sync("s1", step_number=1)
+        self.assertEqual(step.step_type, "llm_call")
+        self.assertEqual(step.model, "gpt-4o")
+        self.assertEqual(
+            step.request_body,
+            {"messages": [{"role": "user", "content": "hi"}]},
+        )
+
+    def test_unknown_step_raises_step_not_found(self):
+        from rewind_agent.explicit import StepNotFoundError
+
+        with self.assertRaises(StepNotFoundError):
+            self.client.get_step_sync("s1", step_number=999)
+
+    def test_explicit_timeline_id_passes_through(self):
+        # When `timeline_id` is provided we must NOT auto-resolve via
+        # /timelines — the caller's choice wins.
+        step = self.client.get_step_sync("s1", timeline_id="tl-fork", step_number=1)
+        self.assertEqual(step.step_number, 1)
+
+    def test_async_get_step(self):
+        from rewind_agent.explicit import StepResponse
+
+        async def run():
+            step = await self.client.get_step("s1", step_number=3)
+            self.assertIsInstance(step, StepResponse)
+            self.assertEqual(step.step_number, 3)
+            self.assertEqual(step.step_type, "llm_call")
+
+        asyncio.run(run())
+
+    def test_step_response_is_immutable(self):
+        from rewind_agent.explicit import StepResponse
+
+        step = self.client.get_step_sync("s1", step_number=1)
+        # Frozen dataclass: assignment raises.
+        with self.assertRaises(Exception):
+            step.step_number = 999  # type: ignore[misc]
+        # And StepResponse is the public type used in __all__.
+        self.assertTrue(hasattr(rewind_agent_module, "StepResponse"))
+
+    def test_package_root_re_exports(self):
+        import rewind_agent
+        self.assertTrue(hasattr(rewind_agent, "StepResponse"))
+        self.assertTrue(hasattr(rewind_agent, "StepNotFoundError"))
+
+
+# Module reference used by TestGetStep.test_step_response_is_immutable
+import rewind_agent as rewind_agent_module  # noqa: E402
+
+
 class TestDefaultClient(unittest.TestCase):
     """Tests for module-level default-client discovery (Phase 0 commit 2).
 

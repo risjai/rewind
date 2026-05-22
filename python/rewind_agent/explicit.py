@@ -36,8 +36,10 @@ import logging
 import os
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from contextlib import asynccontextmanager, contextmanager
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 logger = logging.getLogger("rewind.explicit")
@@ -56,6 +58,30 @@ _TIMEOUT = 2.0
 
 
 _SESSION_CACHE_TTL = 7200  # 2 hours
+
+
+class StepNotFoundError(LookupError):
+    """Raised by :meth:`ExplicitClient.get_step` when no step with the
+    requested ``step_number`` exists on the resolved timeline."""
+
+
+@dataclass(frozen=True)
+class StepResponse:
+    """Typed view of a single recorded step (LLM call, tool call, etc.).
+
+    Returned by :meth:`ExplicitClient.get_step` /
+    :meth:`ExplicitClient.get_step_sync`. Replay handlers use this to
+    extract the recorded request/response without parsing untyped JSON
+    blobs by hand.
+    """
+
+    step_number: int
+    step_type: str
+    request_body: Any | None = None
+    response_body: Any | None = None
+    model: str | None = None
+    tool_name: str | None = None
+    raw: dict = field(default_factory=dict)
 
 
 class RewindReplayDivergenceError(RuntimeError):
@@ -676,6 +702,77 @@ class ExplicitClient:
             body["timeline_id"] = timeline_id
         result = self._post(f"/sessions/{session_id}/fork", body)
         return result["fork_timeline_id"] if result else None
+
+    # ── Step fetch ────────────────────────────────────────────
+
+    def get_step_sync(
+        self,
+        session_id: str,
+        *,
+        step_number: int,
+        timeline_id: str | None = None,
+    ) -> StepResponse:
+        """Fetch a single recorded step by number (sync).
+
+        When ``timeline_id`` is omitted, resolves the session's root
+        timeline. Replay handlers typically pass the explicit timeline
+        from the dispatch payload so forks resolve correctly.
+
+        Raises:
+            StepNotFoundError: when no step with the requested
+                ``step_number`` exists on the resolved timeline.
+        """
+        tid = timeline_id
+        if tid is None:
+            timelines = self._get(f"/sessions/{session_id}/timelines") or []
+            root = next(
+                (t for t in timelines if t.get("parent_timeline_id") is None),
+                None,
+            )
+            if root is None:
+                raise StepNotFoundError(
+                    f"No root timeline for session {session_id}"
+                )
+            tid = root["id"]
+
+        path = (
+            f"/sessions/{session_id}/steps?"
+            f"timeline={urllib.parse.quote(tid)}&include_blobs=1"
+        )
+        steps = self._get(path) or []
+        for s in steps:
+            if s.get("step_number") == step_number:
+                return StepResponse(
+                    step_number=s["step_number"],
+                    step_type=s.get("step_type", ""),
+                    request_body=s.get("request_body"),
+                    response_body=s.get("response_body"),
+                    model=s.get("model"),
+                    tool_name=s.get("tool_name"),
+                    raw=s,
+                )
+        raise StepNotFoundError(
+            f"Step {step_number} not found on timeline {tid} of session {session_id}"
+        )
+
+    async def get_step(
+        self,
+        session_id: str,
+        *,
+        step_number: int,
+        timeline_id: str | None = None,
+    ) -> StepResponse:
+        """Async variant of :meth:`get_step_sync` — runs the HTTP call
+        in a thread executor to avoid blocking the event loop."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            lambda: self.get_step_sync(
+                session_id,
+                step_number=step_number,
+                timeline_id=timeline_id,
+            ),
+        )
 
     # ── Cached tool decorator ─────────────────────────────────
 
