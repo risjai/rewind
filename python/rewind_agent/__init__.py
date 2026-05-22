@@ -34,7 +34,13 @@ from .hooks import (
     wrap_crew,
 )
 from .cached_call import cached_llm_call
-from .explicit import ExplicitClient, RewindReplayDivergenceError
+from .explicit import (
+    ExplicitClient,
+    RewindReplayDivergenceError,
+    cached_tool,
+    get_default_client,
+    set_default_client,
+)
 from . import connector
 from .intercept import DefaultPredicates, Predicates
 from .assertions import Assertions, AssertionResult
@@ -103,6 +109,10 @@ __all__ = [
     # Intercept predicate types (for `connector.setup(predicates=…)`)
     "Predicates",
     "DefaultPredicates",
+    # Default-client discovery + module-level cached_tool decorator
+    "set_default_client",
+    "get_default_client",
+    "cached_tool",
 ]
 
 

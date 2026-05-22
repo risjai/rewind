@@ -70,7 +70,11 @@ import os
 from contextlib import contextmanager
 from typing import Iterator, Sequence
 
-from rewind_agent.explicit import ExplicitClient
+from rewind_agent.explicit import (
+    ExplicitClient,
+    get_default_client,
+    set_default_client,
+)
 from rewind_agent.intercept import (
     DefaultPredicates,
     Predicates,
@@ -211,6 +215,14 @@ def setup(
         hosts = _resolve_hosts(llm_hosts)
         predicates = _HostPredicates(hosts) if hosts else None
 
+    # Stack-semantics for the default-client binding: save the previous
+    # value (which may be a different client or None), bind ours for the
+    # duration of the block, restore on exit. This makes nested `setup()`
+    # safe for tests and for the rare case of an outer "always-on" client
+    # plus an inner per-request override.
+    previous_default = get_default_client()
+    set_default_client(client)
+
     if _is_replay_dispatch():
         # Runner-driven replay: intercept.install() will attach to the
         # existing replay context via env vars. Don't create a phantom
@@ -222,6 +234,7 @@ def setup(
         finally:
             if not already_installed:
                 uninstall()
+            set_default_client(previous_default)
         return
 
     with client.session(name, thread_id=thread_id, metadata=metadata):
@@ -232,3 +245,4 @@ def setup(
         finally:
             if not already_installed:
                 uninstall()
+            set_default_client(previous_default)

@@ -538,5 +538,170 @@ class TestExplicitClientBaseUrlResolution(unittest.TestCase):
             self.assertEqual(client.base_url, "http://rewind.from-kwarg:7777")
 
 
+class TestDefaultClient(unittest.TestCase):
+    """Tests for module-level default-client discovery (Phase 0 commit 2).
+
+    The blessed singleton lets wrapper libraries (like the planned sf-rewind)
+    bind a recording client at app startup and have a module-level
+    `cached_tool` decorator find it at call time, without re-implementing
+    the module-global pattern in every consumer.
+    """
+
+    def setUp(self):
+        # The default-client module attr is process-global. Reset before each
+        # test so leakage is impossible.
+        from rewind_agent import explicit as mod
+        mod.set_default_client(None)
+        _session_id.set(None)
+        _timeline_id.set(None)
+        _replay_context_id.set(None)
+
+    def tearDown(self):
+        from rewind_agent import explicit as mod
+        mod.set_default_client(None)
+
+    def test_get_returns_none_when_unset(self):
+        from rewind_agent.explicit import get_default_client
+        self.assertIsNone(get_default_client())
+
+    def test_set_and_get_round_trip(self):
+        from rewind_agent.explicit import (
+            get_default_client,
+            set_default_client,
+        )
+        client = ExplicitClient("http://127.0.0.1:1")
+        set_default_client(client)
+        self.assertIs(get_default_client(), client)
+
+    def test_set_none_clears(self):
+        from rewind_agent.explicit import (
+            get_default_client,
+            set_default_client,
+        )
+        client = ExplicitClient("http://127.0.0.1:1")
+        set_default_client(client)
+        set_default_client(None)
+        self.assertIsNone(get_default_client())
+
+    def test_module_cached_tool_records_when_default_client_set(self):
+        """`@cached_tool` at module level decorates at import time but
+        resolves the active client at *call* time. This is the load-bearing
+        contract for sf-rewind's tools.py pattern."""
+        # Decorate BEFORE setting the default client to lock the lazy-resolve
+        # contract.
+        from rewind_agent.explicit import cached_tool as module_cached_tool
+
+        @module_cached_tool("noop_add")
+        def add(a: int, b: int) -> int:
+            return a + b
+
+        server = HTTPServer(("127.0.0.1", 0), MockRewindHandler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            from rewind_agent.explicit import set_default_client
+            client = ExplicitClient(f"http://127.0.0.1:{port}")
+            set_default_client(client)
+            with client.session("default-client-test"):
+                result = add(2, 3)
+                self.assertEqual(result, 5)
+            # Recording happened against the bound default client.
+            self.assertTrue(
+                any(s.get("tool_name") == "noop_add" for s in MockRewindHandler.recorded_steps),
+                f"expected a noop_add tool_call step, got {MockRewindHandler.recorded_steps}",
+            )
+        finally:
+            server.shutdown()
+
+    def test_module_cached_tool_runs_unrecorded_when_no_default_client(self):
+        """If `@cached_tool` is decorated and called before
+        `set_default_client(...)` is invoked, the function still runs — it
+        just doesn't record. This keeps imports safe at module load."""
+        from rewind_agent.explicit import cached_tool as module_cached_tool
+
+        @module_cached_tool("unbound_add")
+        def add(a: int, b: int) -> int:
+            return a + b
+
+        # No default client set; no session active.
+        result = add(2, 3)
+        self.assertEqual(result, 5)
+
+    def test_module_cached_tool_async(self):
+        from rewind_agent.explicit import cached_tool as module_cached_tool
+
+        @module_cached_tool("noop_aadd")
+        async def aadd(a: int, b: int) -> int:
+            return a + b
+
+        server = HTTPServer(("127.0.0.1", 0), MockRewindHandler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        async def run():
+            from rewind_agent.explicit import set_default_client
+            client = ExplicitClient(f"http://127.0.0.1:{port}")
+            set_default_client(client)
+            async with client.session_async("default-client-async-test"):
+                result = await aadd(2, 3)
+                self.assertEqual(result, 5)
+
+        try:
+            asyncio.run(run())
+            self.assertTrue(
+                any(s.get("tool_name") == "noop_aadd" for s in MockRewindHandler.recorded_steps),
+                f"expected a noop_aadd tool_call step, got {MockRewindHandler.recorded_steps}",
+            )
+        finally:
+            server.shutdown()
+
+    def test_setup_binds_default_client_inside_block(self):
+        """connector.setup() binds the default client on entry and restores
+        the previous value on exit. Stack semantics, not full ContextVar
+        isolation — accepted trade-off documented in the design plan."""
+        from rewind_agent import connector
+        from rewind_agent.explicit import (
+            get_default_client,
+            set_default_client,
+        )
+
+        server = HTTPServer(("127.0.0.1", 0), MockRewindHandler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base_url = f"http://127.0.0.1:{port}"
+
+        # Stack semantics: inner block restores outer client on exit.
+        outer = ExplicitClient(base_url)
+        set_default_client(outer)
+        self.assertIs(get_default_client(), outer)
+
+        try:
+            with connector.setup(name="bind-test", base_url=base_url) as inner:
+                # Inside the block, the default client is the connector's
+                # client, NOT the outer one we set manually.
+                self.assertIsNotNone(inner)
+                self.assertIs(get_default_client(), inner)
+            # On exit, the outer client is restored.
+            self.assertIs(get_default_client(), outer)
+        finally:
+            server.shutdown()
+
+    def test_set_default_client_rejects_wrong_type(self):
+        """Cheap type check at the API boundary. Catches the common typo of
+        passing a string URL instead of a constructed client."""
+        from rewind_agent.explicit import set_default_client
+        with self.assertRaises(TypeError):
+            set_default_client("http://127.0.0.1:1")  # type: ignore[arg-type]
+
+    def test_package_root_re_exports(self):
+        import rewind_agent
+        self.assertTrue(hasattr(rewind_agent, "set_default_client"))
+        self.assertTrue(hasattr(rewind_agent, "get_default_client"))
+        self.assertTrue(hasattr(rewind_agent, "cached_tool"))
+
+
 if __name__ == "__main__":
     unittest.main()

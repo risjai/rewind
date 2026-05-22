@@ -759,6 +759,86 @@ class ExplicitClient:
         return decorator
 
 
+# --------------------------------------------------------------------------- #
+# Default-client discovery (Phase 0 commit 2).
+#
+# A blessed module-level handle so wrappers (e.g. sf-rewind) can let
+# decorators find an active recording client at call time without inventing
+# their own module global. Accepted trade-off documented in the design plan:
+# this is a plain module attribute (not a ContextVar) for simplicity. Nested
+# `connector.setup()` blocks use stack-semantics (entry saves prior, exit
+# restores) but per-asyncio-task multi-client topologies are NOT supported —
+# real consumers run a single bootstrap. Revisit if a real workload needs
+# multi-sidecar in one process.
+# --------------------------------------------------------------------------- #
+
+_default_client: "ExplicitClient | None" = None
+
+
+def set_default_client(client: "ExplicitClient | None") -> None:
+    """Bind the process-wide default :class:`ExplicitClient`.
+
+    Call this once at app startup (after constructing the client) so that
+    the module-level :func:`cached_tool` decorator can find it at call
+    time. Pass ``None`` to clear.
+
+    Raises:
+        TypeError: when ``client`` is neither an :class:`ExplicitClient`
+            nor ``None``. Catches the common typo of passing a base-URL
+            string instead of a client instance.
+    """
+    global _default_client
+    if client is not None and not isinstance(client, ExplicitClient):
+        raise TypeError(
+            f"set_default_client expected ExplicitClient or None, got {type(client).__name__}"
+        )
+    _default_client = client
+
+
+def get_default_client() -> "ExplicitClient | None":
+    """Return the currently-bound default client, or ``None``."""
+    return _default_client
+
+
+def cached_tool(name: str | None = None):
+    """Module-level :func:`ExplicitClient.cached_tool` that lazy-resolves
+    the default client at call time.
+
+    Decorate at import time:
+
+        from rewind_agent import cached_tool
+
+        @cached_tool("list_clusters")
+        async def list_clusters(...): ...
+
+    Resolution happens *each call* via :func:`get_default_client`. If no
+    default client is bound when the function is called, the decorated
+    function still runs — it just isn't recorded. This keeps imports safe
+    at module load before app startup has bound a client.
+    """
+    def decorator(func: Callable) -> Callable:
+        tool_name = name or func.__name__
+
+        if inspect.iscoroutinefunction(func):
+            @functools.wraps(func)
+            async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+                client = get_default_client()
+                if client is None:
+                    return await func(*args, **kwargs)
+                return await client.cached_tool(tool_name)(func)(*args, **kwargs)
+            return async_wrapper
+        else:
+            @functools.wraps(func)
+            def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
+                client = get_default_client()
+                if client is None:
+                    return func(*args, **kwargs)
+                return client.cached_tool(tool_name)(func)(*args, **kwargs)
+            return sync_wrapper
+
+    return decorator
+
+
 def _serialize_args(args: tuple, kwargs: dict) -> dict:
     """Convert function args to a JSON-serializable dict."""
     result: dict[str, Any] = {}
