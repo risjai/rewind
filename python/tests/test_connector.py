@@ -394,6 +394,47 @@ class TestDefaultClientLeakOnFailure(_ConnectorTestBase):
         finally:
             set_default_client(None)
 
+    def test_session_enter_failure_restores_previous_default(self):
+        """Round-2 santa-review gap: the previous test only covered
+        install() failure. session().__enter__ raises (e.g., POST
+        /sessions/start hangs / 5xx) is the other path the outer
+        try/finally must protect."""
+        from rewind_agent.explicit import (
+            ExplicitClient,
+            get_default_client,
+            set_default_client,
+        )
+
+        outer = ExplicitClient(self.base_url)
+        set_default_client(outer)
+        try:
+            self.assertIs(get_default_client(), outer)
+
+            class _BoomSession:
+                def __enter__(self_inner):
+                    raise RuntimeError("session start blew up")
+
+                def __exit__(self_inner, *_):
+                    return False
+
+            # Make any newly-constructed ExplicitClient.session() raise on
+            # __enter__, but leave session_async (etc.) alone. This is
+            # the exact failure shape replay/recording would surface from
+            # an unreachable rewind sidecar at session-start time.
+            with mock.patch.object(
+                ExplicitClient, "session", lambda *a, **kw: _BoomSession()
+            ):
+                with self.assertRaises(RuntimeError):
+                    with setup(name="will-fail-session", base_url=self.base_url):
+                        self.fail("setup() body must not be entered when session.__enter__ fails")
+
+            # Default client must be restored even though the failure
+            # happened inside `with client.session(...):` and the inner
+            # try/finally never reached its restore.
+            self.assertIs(get_default_client(), outer)
+        finally:
+            set_default_client(None)
+
 
 class TestPredicatesPackageReExport(unittest.TestCase):
     """The package root re-exports Predicates / DefaultPredicates so callers

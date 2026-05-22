@@ -70,7 +70,14 @@ class _StubHandler(BaseHTTPRequestHandler):
         if self.path.endswith("/llm-calls") and "replay-lookup" not in self.path:
             sid = self.path.split("/")[3]
             with owner.lock:
-                step_number = len(owner.recorded_steps) + 1
+                # Match real-server semantics: step_number is per-session,
+                # not global. Tests authored against this stub can rely on
+                # `step_number == 1` being the first call within a session
+                # regardless of how many other sessions have recorded.
+                step_number = sum(
+                    1 for s in owner.recorded_steps
+                    if s.get("session_id") == sid
+                ) + 1
                 owner.recorded_steps.append({
                     "session_id": sid,
                     "step_number": step_number,
@@ -86,7 +93,10 @@ class _StubHandler(BaseHTTPRequestHandler):
         if self.path.endswith("/tool-calls") and "replay-lookup" not in self.path:
             sid = self.path.split("/")[3]
             with owner.lock:
-                step_number = len(owner.recorded_steps) + 1
+                step_number = sum(
+                    1 for s in owner.recorded_steps
+                    if s.get("session_id") == sid
+                ) + 1
                 owner.recorded_steps.append({
                     "session_id": sid,
                     "step_number": step_number,
@@ -195,6 +205,11 @@ class StubRewindServer:
     def __exit__(self, exc_type, exc, tb) -> None:
         self._server.shutdown()
         self._server.server_close()
+        # Join the worker thread so a test asserting "port is free /
+        # serve_forever has returned" right after exit doesn't race.
+        # serve_forever has already returned by the time shutdown() is
+        # done, so the join is bounded; the timeout is defensive.
+        self._thread.join(timeout=2.0)
 
     @property
     def recorded_steps(self) -> list[dict[str, Any]]:

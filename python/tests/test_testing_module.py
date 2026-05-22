@@ -6,7 +6,6 @@ import-by-name (catches accidental rename), lifecycle, payload shape,
 ``wait_for_session`` timeout semantics, and the ``_unstable`` boundary.
 """
 
-import asyncio
 import threading
 import time
 import unittest
@@ -68,8 +67,12 @@ class TestStubRewindServer(unittest.TestCase):
             with urllib.request.urlopen(req, timeout=2.0) as resp:
                 self.assertIn(resp.status, (200, 201))
 
-        # After exit, the server is shut down — connections fail.
-        with self.assertRaises(Exception):
+        # After exit, the server is shut down — connections fail with a
+        # transport error specifically, not just any Exception. Tighten
+        # the assertion so a regression that surfaces as a different
+        # exception class (e.g. a hang masked by KeyboardInterrupt)
+        # actually fails the test.
+        with self.assertRaises(urllib.error.URLError):
             with urllib.request.urlopen(
                 f"{server.base_url}/api/sessions/start", timeout=0.5
             ):

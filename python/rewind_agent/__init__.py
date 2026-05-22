@@ -37,6 +37,7 @@ from .cached_call import cached_llm_call
 from .explicit import (
     ExplicitClient,
     RewindReplayDivergenceError,
+    RewindServerError,
     StepNotFoundError,
     StepResponse,
     cached_tool,
@@ -118,6 +119,7 @@ __all__ = [
     # Public step-fetch helper (Phase 0 commit 3)
     "StepResponse",
     "StepNotFoundError",
+    "RewindServerError",
 ]
 
 

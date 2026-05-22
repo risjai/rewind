@@ -724,6 +724,99 @@ class TestGetStep(unittest.TestCase):
         import rewind_agent
         self.assertTrue(hasattr(rewind_agent, "StepResponse"))
         self.assertTrue(hasattr(rewind_agent, "StepNotFoundError"))
+        self.assertTrue(hasattr(rewind_agent, "RewindServerError"))
+
+
+class TestGetStepServerErrors(unittest.TestCase):
+    """Round-2 santa-review fix: get_step distinguishes 'step absent'
+    (StepNotFoundError) from 'transport / server failure'
+    (RewindServerError). Replay handlers can decide whether to retry
+    transient infra failures vs treat the step as genuinely missing."""
+
+    def test_unreachable_server_raises_rewind_server_error(self):
+        from rewind_agent.explicit import (
+            ExplicitClient,
+            RewindServerError,
+            StepNotFoundError,
+        )
+
+        # Port 1 is reserved/closed on standard hosts — guaranteed
+        # connection refused. The exception type we want is
+        # RewindServerError, NOT StepNotFoundError.
+        client = ExplicitClient("http://127.0.0.1:1")
+        with self.assertRaises(RewindServerError):
+            client.get_step_sync("any-session", step_number=1)
+
+        # Defensive: verify it's NOT StepNotFoundError (which would let
+        # callers silently swallow infra failures).
+        try:
+            client.get_step_sync("any-session", step_number=1)
+        except StepNotFoundError:
+            self.fail(
+                "get_step_sync masked transport failure as StepNotFoundError"
+            )
+        except RewindServerError:
+            pass
+
+
+class TestModuleCachedToolStableWrapper(unittest.TestCase):
+    """Round-2 santa-review fix: module-level cached_tool used to call
+    `client.cached_tool(name)(func)` on EVERY invocation, allocating a
+    fresh wrapper per call. After the fix, the inner wrapper is built
+    once per (client, func) pair and reused. Locks the contract so a
+    refactor that loses the cache is caught."""
+
+    def setUp(self):
+        from rewind_agent import explicit as mod
+        mod.set_default_client(None)
+        # Also clear the wrapper cache so test order doesn't matter.
+        mod._module_cached_tool_wrappers.clear()
+        _session_id.set(None)
+        _timeline_id.set(None)
+        _replay_context_id.set(None)
+
+    def tearDown(self):
+        from rewind_agent import explicit as mod
+        mod.set_default_client(None)
+
+    def test_inner_wrapper_built_once_per_client_func_pair(self):
+        from rewind_agent import explicit as mod
+        from rewind_agent.explicit import (
+            ExplicitClient,
+            _resolve_module_cached_wrapper,
+            cached_tool as module_cached_tool,
+            set_default_client,
+        )
+
+        @module_cached_tool("inner_id_check")
+        def add(a: int, b: int) -> int:
+            return a + b
+
+        server = HTTPServer(("127.0.0.1", 0), MockRewindHandler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            client = ExplicitClient(f"http://127.0.0.1:{port}")
+            set_default_client(client)
+            with client.session("stable-wrapper-test"):
+                add(1, 2)
+                # Both invocations must resolve to the SAME inner wrapper.
+                first = _resolve_module_cached_wrapper(
+                    client, add.__wrapped__, "inner_id_check"
+                )
+                add(3, 4)
+                second = _resolve_module_cached_wrapper(
+                    client, add.__wrapped__, "inner_id_check"
+                )
+                self.assertIs(
+                    first,
+                    second,
+                    "module-level cached_tool must reuse the inner wrapper "
+                    "per (client, func) pair, not rebuild it per call",
+                )
+        finally:
+            server.shutdown()
 
 
 # Module reference used by TestGetStep.test_step_response_is_immutable
