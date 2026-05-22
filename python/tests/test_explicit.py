@@ -716,7 +716,6 @@ class TestGetStep(unittest.TestCase):
 
     def test_step_response_is_immutable(self):
         import dataclasses
-        from rewind_agent.explicit import StepResponse
 
         step = self.client.get_step_sync("s1", step_number=1)
         # Frozen dataclass: assignment raises FrozenInstanceError specifically.
