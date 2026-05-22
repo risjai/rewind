@@ -549,9 +549,14 @@ class _StepAwareHandler(BaseHTTPRequestHandler):
     """
 
     fixture_steps: list[dict] = []
+    # Test instrumentation: lets tests assert which paths were touched.
+    paths_called: list[str] = []
+    timelines_path_called: bool = False
 
     def do_GET(self):  # noqa: N802 — stdlib API
+        _StepAwareHandler.paths_called.append(self.path)
         if "/timelines" in self.path:
+            _StepAwareHandler.timelines_path_called = True
             self._respond(200, [
                 {"id": "tl-root", "parent_timeline_id": None, "session_id": "s1"},
                 {"id": "tl-fork", "parent_timeline_id": "tl-root", "session_id": "s1"},
@@ -605,6 +610,8 @@ class TestGetStep(unittest.TestCase):
         cls.server.shutdown()
 
     def setUp(self):
+        _StepAwareHandler.paths_called = []
+        _StepAwareHandler.timelines_path_called = False
         _StepAwareHandler.fixture_steps = [
             {
                 "step_number": 1,
@@ -657,9 +664,36 @@ class TestGetStep(unittest.TestCase):
 
     def test_explicit_timeline_id_passes_through(self):
         # When `timeline_id` is provided we must NOT auto-resolve via
-        # /timelines — the caller's choice wins.
+        # /timelines — the caller's choice wins. Verify two things:
+        # (1) the /timelines endpoint was NOT hit; (2) the caller-supplied
+        # timeline_id reached the server in the /steps query string.
         step = self.client.get_step_sync("s1", timeline_id="tl-fork", step_number=1)
         self.assertEqual(step.step_number, 1)
+        self.assertFalse(
+            _StepAwareHandler.timelines_path_called,
+            "auto-resolve via /timelines must be skipped when caller passes timeline_id",
+        )
+        steps_paths = [p for p in _StepAwareHandler.paths_called if "/steps" in p]
+        self.assertEqual(len(steps_paths), 1, f"expected one /steps call, got {steps_paths}")
+        self.assertIn(
+            "timeline=tl-fork",
+            steps_paths[0],
+            f"caller-supplied timeline_id missing from server URL: {steps_paths[0]}",
+        )
+
+    def test_default_timeline_resolution_hits_timelines_endpoint(self):
+        # Counterpart to the above: when timeline_id is omitted we DO hit
+        # /timelines once to find the root timeline. Locks the contract so
+        # a refactor that loses auto-resolve is caught.
+        self.client.get_step_sync("s1", step_number=1)
+        self.assertTrue(
+            _StepAwareHandler.timelines_path_called,
+            "auto-resolve via /timelines must run when caller omits timeline_id",
+        )
+        steps_paths = [p for p in _StepAwareHandler.paths_called if "/steps" in p]
+        self.assertEqual(len(steps_paths), 1)
+        # Auto-resolved root timeline reached the server URL.
+        self.assertIn("timeline=tl-root", steps_paths[0])
 
     def test_async_get_step(self):
         from rewind_agent.explicit import StepResponse
@@ -673,11 +707,15 @@ class TestGetStep(unittest.TestCase):
         asyncio.run(run())
 
     def test_step_response_is_immutable(self):
+        import dataclasses
         from rewind_agent.explicit import StepResponse
 
         step = self.client.get_step_sync("s1", step_number=1)
-        # Frozen dataclass: assignment raises.
-        with self.assertRaises(Exception):
+        # Frozen dataclass: assignment raises FrozenInstanceError specifically.
+        # Don't use bare Exception here — that would let unrelated regressions
+        # (e.g. AttributeError because StepResponse stops being a dataclass)
+        # mask the actual contract.
+        with self.assertRaises(dataclasses.FrozenInstanceError):
             step.step_number = 999  # type: ignore[misc]
         # And StepResponse is the public type used in __all__.
         self.assertTrue(hasattr(rewind_agent_module, "StepResponse"))

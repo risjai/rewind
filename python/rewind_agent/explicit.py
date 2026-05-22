@@ -912,6 +912,14 @@ def cached_tool(name: str | None = None):
     default client is bound when the function is called, the decorated
     function still runs — it just isn't recorded. This keeps imports safe
     at module load before app startup has bound a client.
+
+    Threading / async note
+    ----------------------
+    The default-client binding is **process-global**, not per-thread or
+    per-asyncio task. If multiple threads or tasks need different clients,
+    use :meth:`ExplicitClient.cached_tool` directly with an explicit client
+    instance. See the design note on
+    :func:`set_default_client`.
     """
     def decorator(func: Callable) -> Callable:
         tool_name = name or func.__name__

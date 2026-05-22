@@ -346,6 +346,54 @@ class TestPredicatesKwarg(_ConnectorTestBase):
         forwarded = self._capture_predicates(llm_hosts=("a.example",))
         self.assertIsInstance(forwarded, _HostPredicates)
 
+    def test_predicates_wrong_type_raises_type_error(self):
+        # Boundary check parity with set_default_client(): catches typos
+        # like passing a callable or a string. Predicates is a
+        # runtime_checkable Protocol, so a duck-typed object with the
+        # right methods would be accepted — but a string definitely
+        # shouldn't be.
+        with self.assertRaises(TypeError):
+            with setup(name="bad", base_url=self.base_url, predicates="oops"):  # type: ignore[arg-type]
+                pass
+        with self.assertRaises(TypeError):
+            with setup(name="bad", base_url=self.base_url, predicates=lambda r: True):  # type: ignore[arg-type]
+                pass
+
+
+class TestDefaultClientLeakOnFailure(_ConnectorTestBase):
+    """Regression: setup() must restore the previous default client even
+    when install() or session().__enter__ raises. Without the outer
+    try/finally, a failure mid-setup leaves the module-global polluted
+    across the failure, poisoning all subsequent cached_tool() calls in
+    the process."""
+
+    def test_install_failure_restores_previous_default(self):
+        from rewind_agent.explicit import (
+            ExplicitClient,
+            get_default_client,
+            set_default_client,
+        )
+
+        # Outer client representing an "always-on" baseline.
+        outer = ExplicitClient(self.base_url)
+        set_default_client(outer)
+        try:
+            self.assertIs(get_default_client(), outer)
+
+            def boom(predicates=None):
+                raise RuntimeError("install blew up")
+
+            with mock.patch("rewind_agent.connector.install", side_effect=boom):
+                with self.assertRaises(RuntimeError):
+                    with setup(name="will-fail", base_url=self.base_url):
+                        self.fail("setup() body must not be entered when install fails")
+
+            # Default client is restored to the outer baseline, not left
+            # pointing at the half-initialized inner client.
+            self.assertIs(get_default_client(), outer)
+        finally:
+            set_default_client(None)
+
 
 class TestPredicatesPackageReExport(unittest.TestCase):
     """The package root re-exports Predicates / DefaultPredicates so callers
