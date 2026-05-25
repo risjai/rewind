@@ -2,11 +2,6 @@ use anyhow::{bail, Result};
 use rewind_store::{Span, Step, Store, Timeline};
 use std::collections::{HashMap, HashSet};
 
-/// Maximum supported depth of the timeline ancestry chain. Any session
-/// that nests forks 64 levels deep is almost certainly a cycle the FK
-/// graph let through, so refuse rather than spin.
-const MAX_ANCESTRY_DEPTH: usize = 64;
-
 /// Truncate an id to 8 chars for error messages — char-boundary safe (no
 /// panic on multi-byte input).
 fn short(id: &str) -> String {
@@ -111,9 +106,9 @@ impl<'a> ReplayEngine<'a> {
     /// boundary on the path.
     ///
     /// Cycle defense: a `HashSet` of visited ids rejects any node that
-    /// reappears. The ancestry chain depth is capped at
-    /// [`MAX_ANCESTRY_DEPTH`] as a final guard against pathological
-    /// graphs.
+    /// reappears. The walk is naturally bounded by `timelines.len()`
+    /// because every iteration consumes one new id from the same
+    /// finite pool, so no separate depth cap is needed.
     fn ancestry_chain(
         timelines: &[Timeline],
         timeline_id: &str,
@@ -126,12 +121,6 @@ impl<'a> ReplayEngine<'a> {
         while let Some(t) = cursor {
             if !visited.insert(t.id.clone()) {
                 bail!("Cycle detected in timeline ancestry at {}", short(&t.id));
-            }
-            if chain.len() >= MAX_ANCESTRY_DEPTH {
-                bail!(
-                    "Timeline ancestry exceeds depth limit {} at {}",
-                    MAX_ANCESTRY_DEPTH, short(&t.id),
-                );
             }
             chain.push((t.id.clone(), clamp));
 
