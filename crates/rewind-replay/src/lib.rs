@@ -1,6 +1,11 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use rewind_store::{Span, Step, Store, Timeline};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+/// Maximum supported depth of the timeline ancestry chain. Any session
+/// that nests forks 64 levels deep is almost certainly a cycle the FK
+/// graph let through, so refuse rather than spin.
+const MAX_ANCESTRY_DEPTH: usize = 64;
 
 /// Truncate an id to 8 chars for error messages — char-boundary safe (no
 /// panic on multi-byte input).
@@ -91,71 +96,125 @@ impl<'a> ReplayEngine<'a> {
         ReplayEngine { store }
     }
 
-    /// Get all steps visible on `timeline_id`, including inherited steps
-    /// from the parent up to the fork point. When the same `step_number`
-    /// exists on both the parent (inherited) and on the timeline itself
-    /// (owned, e.g. via `upsert_step_on_timeline_and_cascade` after a
-    /// promote-and-mutate edit), the **owned** row wins — the inherited
-    /// row is omitted so the dashboard's step picker doesn't show two
-    /// rows at the same step_number masking the user's edit.
-    pub fn get_full_timeline_steps(&self, timeline_id: &str, session_id: &str) -> Result<Vec<Step>> {
-        let timelines = self.store.get_timelines(session_id)?;
-        let timeline = timelines.iter().find(|t| t.id == timeline_id)
-            .context("Timeline not found")?;
+    /// Walk the timeline's ancestry from `timeline_id` up to the root,
+    /// returning a vector of `(timeline_id, visible_upper_bound)` pairs
+    /// in *child-first* order (the leaf is index 0; the root, if
+    /// reachable, is the last entry).
+    ///
+    /// `visible_upper_bound` is the cumulative `min(fork_at_step)` of
+    /// every fork-edge traversed *below* the current node. For the leaf
+    /// it is `u32::MAX` (the leaf can see all of its own owned steps).
+    /// For a parent reached via `child.fork_at_step = K`, it is `K`. For
+    /// a grandparent reached via `child.fork_at_step = J` and
+    /// `parent.fork_at_step = K`, it is `min(J, K)` — i.e. each
+    /// ancestor's contribution is clamped to the narrowest fork
+    /// boundary on the path.
+    ///
+    /// Cycle defense: a `HashSet` of visited ids rejects any node that
+    /// reappears. The ancestry chain depth is capped at
+    /// [`MAX_ANCESTRY_DEPTH`] as a final guard against pathological
+    /// graphs.
+    fn ancestry_chain(
+        timelines: &[Timeline],
+        timeline_id: &str,
+    ) -> Result<Vec<(String, u32)>> {
+        let mut chain: Vec<(String, u32)> = Vec::new();
+        let mut visited: HashSet<String> = HashSet::new();
+        let mut cursor: Option<&Timeline> = timelines.iter().find(|t| t.id == timeline_id);
+        let mut clamp: u32 = u32::MAX;
 
-        if let (Some(parent_id), Some(fork_at)) = (&timeline.parent_timeline_id, timeline.fork_at_step) {
-            let parent_steps = self.store.get_steps(parent_id)?;
-            let own_steps = self.store.get_steps(timeline_id)?;
-
-            // Insert parent (inherited) first, then own — HashMap::insert
-            // returning the previous value gives us "owned overrides
-            // inherited at the same step_number" for free. Pre-size the
-            // map to avoid rehash on long sessions (review #162 S3).
-            let cap = (fork_at as usize).saturating_add(own_steps.len());
-            let mut by_step_number: HashMap<u32, Step> = HashMap::with_capacity(cap);
-            for s in parent_steps.into_iter().filter(|s| s.step_number <= fork_at) {
-                by_step_number.insert(s.step_number, s);
+        while let Some(t) = cursor {
+            if !visited.insert(t.id.clone()) {
+                bail!("Cycle detected in timeline ancestry at {}", short(&t.id));
             }
-            for s in own_steps {
-                by_step_number.insert(s.step_number, s);
+            if chain.len() >= MAX_ANCESTRY_DEPTH {
+                bail!(
+                    "Timeline ancestry exceeds depth limit {} at {}",
+                    MAX_ANCESTRY_DEPTH, short(&t.id),
+                );
             }
+            chain.push((t.id.clone(), clamp));
 
-            let mut combined: Vec<Step> = by_step_number.into_values().collect();
-            combined.sort_by_key(|s| s.step_number);
-            Ok(combined)
-        } else {
-            self.store.get_steps(timeline_id)
+            match (t.parent_timeline_id.as_deref(), t.fork_at_step) {
+                (Some(parent_id), Some(fork_at)) => {
+                    clamp = clamp.min(fork_at);
+                    cursor = timelines.iter().find(|p| p.id == parent_id);
+                }
+                _ => break,
+            }
         }
+        Ok(chain)
     }
 
-    /// Get all spans for a timeline, including inherited spans from parent (for forks)
+    /// Get all steps visible on `timeline_id`, including inherited steps
+    /// from every ancestor up to the fork point. When the same
+    /// `step_number` exists on multiple levels of the chain, the
+    /// **lowest** (closest-to-leaf) row wins — so an owned edit on a
+    /// fork shadows the inherited one. The parent's own owned edits in
+    /// turn shadow the grandparent's, etc.
+    pub fn get_full_timeline_steps(&self, timeline_id: &str, session_id: &str) -> Result<Vec<Step>> {
+        let timelines = self.store.get_timelines(session_id)?;
+        if !timelines.iter().any(|t| t.id == timeline_id) {
+            return Err(anyhow::anyhow!("Timeline not found"));
+        }
+
+        let chain = Self::ancestry_chain(&timelines, timeline_id)?;
+
+        // Walk root-first so that closer-to-leaf overrides land last
+        // and win the HashMap insert. Each ancestor's contribution is
+        // clamped by the cumulative min(fork_at_step) recorded in the
+        // chain.
+        let mut by_step_number: HashMap<u32, Step> = HashMap::new();
+        for (tid, clamp) in chain.iter().rev() {
+            let steps = self.store.get_steps(tid)?;
+            for s in steps {
+                if s.step_number <= *clamp {
+                    by_step_number.insert(s.step_number, s);
+                }
+            }
+        }
+
+        let mut combined: Vec<Step> = by_step_number.into_values().collect();
+        combined.sort_by_key(|s| s.step_number);
+        Ok(combined)
+    }
+
+    /// Get all spans visible on `timeline_id`, including inherited
+    /// spans from every ancestor. A span on an ancestor is included
+    /// iff every step that references it has `step_number <=` that
+    /// ancestor's contribution clamp.
     pub fn get_full_timeline_spans(&self, timeline_id: &str, session_id: &str) -> Result<Vec<Span>> {
         let timelines = self.store.get_timelines(session_id)?;
-        let timeline = timelines.iter().find(|t| t.id == timeline_id)
-            .context("Timeline not found")?;
+        if !timelines.iter().any(|t| t.id == timeline_id) {
+            return Err(anyhow::anyhow!("Timeline not found"));
+        }
 
-        if let (Some(parent_id), Some(fork_at)) = (&timeline.parent_timeline_id, timeline.fork_at_step) {
-            let parent_spans = self.store.get_spans_by_timeline(parent_id)?;
-            let own_spans = self.store.get_spans_by_timeline(timeline_id)?;
+        let chain = Self::ancestry_chain(&timelines, timeline_id)?;
+        let mut combined: Vec<Span> = Vec::new();
 
-            let parent_steps = self.store.get_steps(parent_id)?;
-            let mut inherited: Vec<Span> = parent_spans.into_iter().filter(|span| {
-                let span_steps: Vec<&Step> = parent_steps.iter()
+        for (tid, clamp) in &chain {
+            let spans = self.store.get_spans_by_timeline(tid)?;
+            // Steps lookup only needed when filtering an ancestor — the
+            // leaf (clamp == u32::MAX) admits every span unconditionally.
+            if *clamp == u32::MAX {
+                combined.extend(spans);
+                continue;
+            }
+            let steps = self.store.get_steps(tid)?;
+            for span in spans {
+                let span_steps: Vec<&Step> = steps.iter()
                     .filter(|s| s.span_id.as_deref() == Some(&span.id))
                     .collect();
-                if span_steps.is_empty() {
-                    true
-                } else {
-                    span_steps.iter().all(|s| s.step_number <= fork_at)
+                let visible = span_steps.is_empty()
+                    || span_steps.iter().all(|s| s.step_number <= *clamp);
+                if visible {
+                    combined.push(span);
                 }
-            }).collect();
-
-            inherited.extend(own_spans);
-            inherited.sort_by_key(|a| a.started_at);
-            Ok(inherited)
-        } else {
-            self.store.get_spans_by_timeline(timeline_id)
+            }
         }
+
+        combined.sort_by_key(|a| a.started_at);
+        Ok(combined)
     }
 
     /// Create a fork branching at `at_step`. Seeds `step_counters` to
@@ -444,6 +503,109 @@ mod tests {
         let at_one: Vec<&Step> = view.iter().filter(|s| s.step_number == 1).collect();
         assert_eq!(at_one.len(), 1);
         assert_eq!(at_one[0].timeline_id, root_tid);
+    }
+
+    #[test]
+    fn get_full_timeline_steps_walks_grandparent_inheritance() {
+        // Regression: previously the union view only walked ONE parent
+        // level. A 3-level chain (root -> mid-fork -> leaf-fork) caused
+        // the leaf to lose visibility of inherited steps that originated
+        // on the grandparent root timeline. Visible bug on dev1 with
+        // session ray-agent-7bea73fa (2026-05-25): a replay timeline
+        // forked from an edited-fork forked from main rendered as
+        // 1 step in the dashboard instead of all 4 inherited.
+        let (_tmp, store) = setup();
+        let (sid, root_tid) = seed_session_with_steps(&store, 4);
+
+        let engine = ReplayEngine::new(&store);
+        // mid-fork branches from root at step 4 — inherits steps 1..=4.
+        let mid = engine.fork(&sid, &root_tid, 4, "mid").unwrap();
+        // leaf-fork branches from mid at step 4 — inherits the same prefix.
+        let leaf = engine.fork(&sid, &mid.id, 4, "leaf").unwrap();
+
+        let view = engine.get_full_timeline_steps(&leaf.id, &sid).unwrap();
+        assert_eq!(
+            view.len(), 4,
+            "leaf must see all 4 grandparent steps; got {:?}",
+            view.iter().map(|s| (s.step_number, s.timeline_id.clone())).collect::<Vec<_>>()
+        );
+        let nums: Vec<u32> = view.iter().map(|s| s.step_number).collect();
+        assert_eq!(nums, vec![1, 2, 3, 4]);
+        // All four rows trace back to the root timeline.
+        assert!(view.iter().all(|s| s.timeline_id == root_tid));
+    }
+
+    #[test]
+    fn get_full_timeline_steps_min_clamps_when_mid_fork_branches_earlier() {
+        // The cumulative min-clamp invariant: when mid forks at 4 but
+        // leaf forks at 2 from mid, leaf must only see steps 1..=2 of
+        // root (clamped by leaf's fork_at_step), not 1..=4.
+        let (_tmp, store) = setup();
+        let (sid, root_tid) = seed_session_with_steps(&store, 4);
+
+        let engine = ReplayEngine::new(&store);
+        let mid = engine.fork(&sid, &root_tid, 4, "mid").unwrap();
+        let leaf = engine.fork(&sid, &mid.id, 2, "leaf-clamped").unwrap();
+
+        let view = engine.get_full_timeline_steps(&leaf.id, &sid).unwrap();
+        let nums: Vec<u32> = view.iter().map(|s| s.step_number).collect();
+        assert_eq!(
+            nums, vec![1, 2],
+            "leaf forked at 2 must only see steps 1..=2, not the full 1..=4 mid-fork inheritance"
+        );
+    }
+
+    #[test]
+    fn get_full_timeline_steps_min_clamps_when_leaf_forks_later_than_mid() {
+        // Symmetric clamp: when mid forks at 2 (inheriting 1..=2 from
+        // root) and leaf forks at 4 from mid, leaf still cannot see
+        // beyond step 2 from root — even if it asks for step 4 — because
+        // mid's own fork boundary is the upper bound on what root
+        // contributes to leaf.
+        let (_tmp, store) = setup();
+        let (sid, root_tid) = seed_session_with_steps(&store, 4);
+
+        let engine = ReplayEngine::new(&store);
+        let mid = engine.fork(&sid, &root_tid, 2, "mid-narrow").unwrap();
+        // mid owns no steps beyond 2; create steps 3..=4 on mid so leaf has something at those.
+        for i in 3..=4 {
+            let step = Step::new_llm_call(&mid.id, &sid, i, "gpt-4o");
+            store.create_step(&step).unwrap();
+        }
+        let leaf = engine.fork(&sid, &mid.id, 4, "leaf-wide").unwrap();
+
+        let view = engine.get_full_timeline_steps(&leaf.id, &sid).unwrap();
+        // Steps 1..=2 come from root, 3..=4 from mid. Leaf sees 4 total.
+        assert_eq!(view.len(), 4);
+        let from_root = view.iter().filter(|s| s.timeline_id == root_tid).count();
+        let from_mid = view.iter().filter(|s| s.timeline_id == mid.id).count();
+        assert_eq!(from_root, 2, "only 1..=2 should come from root (mid's fork boundary)");
+        assert_eq!(from_mid, 2, "3..=4 should come from mid (its own steps)");
+    }
+
+    #[test]
+    fn get_full_timeline_spans_walks_grandparent_inheritance() {
+        // Symmetric to the steps test above: spans must also flow
+        // through every ancestor level, not just one.
+        let (_tmp, store) = setup();
+        let (sid, root_tid) = seed_session_with_steps(&store, 4);
+
+        // Add a span to root.
+        let root_span = rewind_store::Span::new(
+            &sid, &root_tid, rewind_store::SpanType::Tool, "root-span",
+        );
+        store.create_span(&root_span).unwrap();
+
+        let engine = ReplayEngine::new(&store);
+        let mid = engine.fork(&sid, &root_tid, 4, "mid").unwrap();
+        let leaf = engine.fork(&sid, &mid.id, 4, "leaf").unwrap();
+
+        let spans = engine.get_full_timeline_spans(&leaf.id, &sid).unwrap();
+        assert!(
+            spans.iter().any(|s| s.id == root_span.id),
+            "leaf must inherit the root-level span; got {:?}",
+            spans.iter().map(|s| s.id.clone()).collect::<Vec<_>>()
+        );
     }
 
     #[test]
