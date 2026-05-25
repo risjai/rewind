@@ -1691,10 +1691,6 @@ async fn test_fork_and_edit_step_inherited_step() {
     assert!(!new_step_id.is_empty());
 
     // The newly-created step lives on the new fork at step_number = at_step.
-    // Note: nested-fork inheritance via get_full_timeline_steps is still
-    // a known follow-up (only walks one parent level up), so this test
-    // asserts the direct invariants of the edit itself rather than the
-    // resulting fork's full step view.
     let s = _store.lock().unwrap();
     let new_step = s.get_step(new_step_id).unwrap().unwrap();
     assert_eq!(new_step.step_number, 2);
@@ -2061,6 +2057,39 @@ async fn test_steps_endpoint_dedupes_owned_over_inherited_after_promote() {
     assert_eq!(at_two[0]["id"].as_str().unwrap(), resolved,
         "the surviving row at step #2 must be the OWNED one (resolved_step_id), not the inherited one");
     assert_eq!(at_two[0]["timeline_id"].as_str().unwrap(), fork_tid);
+}
+
+#[tokio::test]
+async fn test_steps_endpoint_walks_three_level_inheritance() {
+    // Regression for the dev1 bug on session ray-agent-7bea73fa
+    // (2026-05-25): a 3-level chain (root → edited-fork → replay-fork)
+    // rendered as 1 step in the dashboard because get_full_timeline_steps
+    // only walked one parent level. The fix walks the full ancestry.
+    let (app, _store, _tmp) = setup();
+    let (sid, _root_tid) = seed_session(&app, 4).await;
+
+    // Mid: fork from root at step 4 — inherits 1..=4.
+    let (_, mid) = post_json(&app, &format!("/api/sessions/{sid}/fork"), json!({
+        "at_step": 4, "label": "mid"
+    })).await;
+    let mid_tid = mid["fork_timeline_id"].as_str().unwrap();
+
+    // Leaf: fork from mid at step 4 — should also see all 4 inherited.
+    let (_, leaf) = post_json(&app, &format!("/api/sessions/{sid}/fork"), json!({
+        "timeline_id": mid_tid,
+        "at_step": 4,
+        "label": "leaf"
+    })).await;
+    let leaf_tid = leaf["fork_timeline_id"].as_str().unwrap();
+
+    let (_, leaf_view) = get_json(&app, &format!("/api/sessions/{sid}/steps?timeline={leaf_tid}")).await;
+    let arr = leaf_view.as_array().expect("steps endpoint must return array");
+    assert_eq!(
+        arr.len(), 4,
+        "leaf must see all 4 grandparent steps via 3-level ancestry walk; got {arr:?}"
+    );
+    let nums: Vec<u64> = arr.iter().map(|s| s["step_number"].as_u64().unwrap()).collect();
+    assert_eq!(nums, vec![1, 2, 3, 4]);
 }
 
 #[tokio::test]
